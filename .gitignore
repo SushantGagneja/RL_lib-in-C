@@ -19,3 +19,5 @@
 
 #  MNIST data files
 /*.mat
+# Extra Docs
+/crl-improvement-plan.md

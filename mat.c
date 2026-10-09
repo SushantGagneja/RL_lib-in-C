@@ -3,10 +3,12 @@
 
 matrix *create_matrix(mem_arena *arena, u32 rows, u32 cols) {
   matrix *mat = PUSH_STRUCT(arena, matrix);
+  assert(mat != NULL && "Arena out of memory in create_matrix");
 
   mat->rows = rows;
   mat->cols = cols;
   mat->data = PUSH_ARRAY(arena, f32, (u64)rows * cols);
+  assert(mat->data != NULL && "Arena out of memory in create_matrix data");
 
   return mat;
 }

@@ -4,11 +4,7 @@
 #include "mat.h"
 #include "prng.h"
 
-#include "arena.c"
-#include "autograd.c"
-#include "mat.c"
-#include "prng.c"
-
+#include "model.h"
 void create_actor_model(mem_arena *arena, model_state *model) {
   Var *input = var_create(arena, model, 76, 1, VAR_FLAG_NONE);
   model->input = input;

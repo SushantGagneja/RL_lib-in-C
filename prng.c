@@ -27,10 +27,14 @@ u32 prng_rand_r(prng_state *rng) {
 
 u32 prng_rand(void) { return prng_rand_r(&s_prng_state); }
 
-u32 randn(u32 range) { return arc4random_uniform(range); }
+u32 prng_randn_r(prng_state *rng, u32 range) { 
+  return (u32)(((u64)prng_rand_r(rng) * range) >> 32); 
+}
+
+u32 randn(u32 range) { return prng_randn_r(&s_prng_state, range); }
 
 f32 prng_randf_r(prng_state *rng) {
-  return (f32)prng_rand_r(rng) / (f32)UINT32_MAX;
+  return (prng_rand_r(rng) >> 8) * (1.0f / 16777216.0f);
 }
 
 f32 prng_randf(void) { return prng_randf_r(&s_prng_state); }

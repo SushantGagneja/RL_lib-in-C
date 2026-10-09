@@ -6,7 +6,7 @@
 #include "autograd.h"
 #include "base.h"
 #include "mat.h"
-#include "model.c"
+#include "model.h"
 #include "prng.h"
 
 typedef enum { LEFT = 0, RIGHT = 1, UP = 2, DOWN = 3, NONE = 4 } ACTION;
@@ -176,10 +176,9 @@ void train(model_state *model, SnakeENV *env, mem_arena *arena) {
 
   u32 EPOCHS = 2000;
   u32 rollout_size = 64;
-  u32 episode_len = 100;
   f32 gamma = 0.99f;
   f32 learning_rate = 0.05f;
-  ReplayBuffer buffer = {0};
+  ReplayBuffer *buffer = PUSH_STRUCT(arena, ReplayBuffer);
 
   for (u32 epoch = 0; epoch < EPOCHS; epoch++) {
     u32 foods_eaten = 0;
@@ -187,11 +186,11 @@ void train(model_state *model, SnakeENV *env, mem_arena *arena) {
     for (u32 i = 0; i < rollout_size; i++) {
       reset_state(env);
 
-      Trajactory *traj = &buffer.trajactories[i];
+      Trajactory *traj = &buffer->trajactories[i];
       traj->len = 0;
 
       // Rollout phase - collect experience from the model
-      for (u32 t = 0; t < episode_len; t++) {
+      for (u32 t = 0; t < EPISODE_LEN; t++) {
         State state = env->snake;
         State food_state = env->food;
         ACTION pov = env->pov;
@@ -228,7 +227,7 @@ void train(model_state *model, SnakeENV *env, mem_arena *arena) {
       foods_eaten += env->foods_eaten;
     }
 
-    buffer.count = rollout_size;
+    buffer->count = rollout_size;
 
     u32 sample_count = 0;
     f32 average_return = 0.0f;
@@ -236,8 +235,8 @@ void train(model_state *model, SnakeENV *env, mem_arena *arena) {
     f32 return_sq_sum = 0.0f;
 
     // Compute reward-to-go statistics for a rollout-wide baseline.
-    for (u32 b = 0; b < buffer.count; b++) {
-      Trajactory *traj = &buffer.trajactories[b];
+    for (u32 b = 0; b < buffer->count; b++) {
+      Trajactory *traj = &buffer->trajactories[b];
       f32 G = 0.0f;
 
       for (i32 t = (i32)traj->len - 1; t >= 0; t--) {
@@ -266,8 +265,8 @@ void train(model_state *model, SnakeENV *env, mem_arena *arena) {
     }
 
     // Training phase: use each trajectory from the current policy once.
-    for (u32 b = 0; b < buffer.count; b++) {
-      Trajactory *traj = &buffer.trajactories[b];
+    for (u32 b = 0; b < buffer->count; b++) {
+      Trajactory *traj = &buffer->trajactories[b];
 
       for (u32 t = 0; t < traj->len; t++) {
         build_state_vector(model->input->val, traj->states[t],
@@ -300,7 +299,7 @@ void train(model_state *model, SnakeENV *env, mem_arena *arena) {
 
     printf("Epoch %u | Average return: %.3f | Foods: %u | Samples: %u | Return "
            "std: %.3f\n",
-           epoch, average_return / (f32)buffer.count, foods_eaten, sample_count,
+           epoch, average_return / (f32)buffer->count, foods_eaten, sample_count,
            return_std);
   }
 }

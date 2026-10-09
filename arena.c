@@ -1,3 +1,5 @@
+#include "arena.h"
+
 mem_arena *arena_create(u64 capacity) {
   mem_arena *arena = malloc(sizeof(mem_arena));
   if (arena == NULL) {

@@ -64,6 +64,7 @@ const VarType VAR_TYPE_REINFORCE_LOSS = {.name = "reinforce_loss",
 Var *var_create(mem_arena *arena, model_state *model, u32 rows, u32 cols,
                 u32 flags) {
   Var *out = PUSH_STRUCT(arena, Var);
+  assert(out != NULL && "Arena out of memory in var_create");
 
   out->index = model->num_vars++;
   out->flags = flags;
@@ -111,6 +112,7 @@ static b32 var_shape_matmul(Var *a, Var *b, u32 *rows, u32 *cols) {
 static Var *create_node(mem_arena *arena, model_state *model,
                         const VarType *type, Var *a, Var *b) {
   if (type == NULL || type->shape == NULL) {
+    assert(false && "Invalid node type");
     return NULL;
   }
 
@@ -123,6 +125,7 @@ static Var *create_node(mem_arena *arena, model_state *model,
   u32 rows = 0;
   u32 cols = 0;
   if (!type->shape(a, b, &rows, &cols)) {
+    assert(false && "Shape error in create_node");
     return NULL;
   }
 
