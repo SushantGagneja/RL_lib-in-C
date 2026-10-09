@@ -57,14 +57,4 @@ void create_actor_model(mem_arena *arena, model_state *model) {
   model->cost = cost;
 }
 
-int main() {
-  mem_arena *arena = arena_create(GiB(1));
 
-  model_state *model = PUSH_STRUCT(arena, model_state);
-
-  create_actor_model(arena, model);
-
-  arena_destroy(arena);
-
-  return 0;
-}
