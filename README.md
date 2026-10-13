@@ -46,17 +46,17 @@ Tested on the grid environment across 5 distinct random seeds (`42`, `100`, `202
 ### Commands
 
 ```bash
-# Build release binary (-O3)
+# Build release binaries (train_snake, train_cartpole with -O3)
 make release
 
-# Run mathematical unit tests and autograd gradient checks
+# Run all test suites (mat ops, autograd gradcheck, environment tests)
 make test
 
-# Run default training with seed 42
-make run
+# Train Snake on the discrete grid
+make snake
 
-# Run multi-seed benchmark (5 seeds, 150 epochs)
-make bench
+# Train CartPole-v1
+make cartpole
 
 # Clean build artifacts
 make clean
@@ -118,17 +118,36 @@ Parameters checked: 153/153 passed within tolerance
 
 ```
 .
-├── arena.h / arena.c         # Memory arena allocator
-├── prng.h / prng.c           # PCG32 PRNG with re-entrant state structs
-├── mat.h / mat.c             # Matrix data structure and linear algebra
-├── autograd.h / autograd.c   # Static computation graph and reverse-mode AD
-├── model.h / model.c         # Neural network layer assembly
-├── env.c                     # Environment, training loop, evaluation harness
+├── include/
+│   ├── base.h               # Primitive types and utility macros
+│   ├── arena.h              # Bump allocator with power-of-2 alignment
+│   ├── prng.h               # PCG32 pseudo-random number generator
+│   ├── mat.h                # Matrix structure and linear algebra
+│   ├── autograd.h           # Computation graph, Var nodes, reverse-mode AD
+│   ├── nn.h                 # Neural network layers (linear, mlp, discrete actor)
+│   ├── optim.h              # Optimizers (SGD, zero_grad, parameter stepping)
+│   ├── env.h                # Modular RL Environment interface (reset, step, observe)
+│   └── rl.h                 # Rollout buffer, REINFORCE trainer, evaluation harness
+├── src/
+│   ├── arena.c              # Arena implementation
+│   ├── prng.c               # PRNG implementation
+│   ├── mat.c                # Matrix kernels & math operations
+│   ├── autograd.c           # Reverse-mode AD engine & node implementations
+│   ├── nn.c                 # Model builders & Xavier/Glorot init
+│   ├── optim.c              # Optimizer parameter updates
+│   └── rl.c                 # Decoupled rollout buffer, REINFORCE, and evaluation
+├── envs/
+│   ├── snake.h / snake.c    # Grid Snake environment conforming to Env
+│   └── cartpole.h / cartpole.c # CartPole-v1 physics simulator conforming to Env
+├── examples/
+│   ├── train_snake.c        # Standalone Snake training demo (< 50 lines)
+│   └── train_cartpole.c     # Standalone CartPole-v1 training demo (< 50 lines)
 ├── tests/
-│   ├── test_mat.c            # Math layer unit tests
-│   └── test_gradcheck.c      # Finite-difference numerical gradient checks
-├── crl-improvement-plan.md   # Architectural roadmap and phased milestones
-└── Makefile                  # Build and test orchestration
+│   ├── test_mat.c           # Math layer unit tests
+│   ├── test_gradcheck.c     # Finite-difference numerical gradient checks
+│   └── test_envs.c          # CartPole and Snake environment unit tests
+├── crl-improvement-plan.md  # Architectural roadmap and phased milestones
+└── Makefile                 # Build and test orchestration
 ```
 
 ---
@@ -140,18 +159,21 @@ Parameters checked: 153/153 passed within tolerance
   - [x] Numerical gradient checking for autograd (`test_gradcheck`).
   - [x] Isolated deterministic PRNG seeding & bit-for-bit reproducibility.
   - [x] Evaluation harness with Random & Greedy baselines over 5 seeds.
-  - [x] Safe arena allocation and Makefile targets (`release`, `debug`, `test`, `bench`, `run`).
-- [ ] **Phase 1: Library Structure**
-  - Modular environment interface (`Env` struct with `reset`, `step`, `observe`).
-  - Decoupled `RolloutBuffer`, neural network helpers (`nn_linear`, `nn_mlp`), and optimizer abstraction.
-  - Separation of library code from examples (`train_snake.c`, `train_cartpole.c`).
+  - [x] Safe arena allocation and Makefile targets (`release`, `debug`, `test`).
+- [x] **Phase 1: Real Library Structure**
+  - [x] Standard `Env` interface with separate `done` (terminal) and `truncated` (time limit) flags.
+  - [x] Decoupled `include/` headers and `src/` library implementation.
+  - [x] Dynamic arena-backed `RolloutBuffer` and parameter registry in `model_state`.
+  - [x] Neural network builders (`nn_linear`, `nn_mlp`, `nn_build_discrete_actor`).
+  - [x] Fully decoupled trainer (`rl_train_reinforce`) and optimizer (`optim_sgd_step`).
+  - [x] Multiple environments: CartPole-v1 and Snake.
+  - [x] Lean example scripts: `train_snake.c` and `train_cartpole.c` under 50 lines each.
 - [ ] **Phase 2: Autograd Upgrades**
   - Observation batching $(obs\_dim \times B)$ with broadcast bias add and per-column softmax.
   - New operators: `mul`, `tanh`, `mse`, `entropy`, and fused clipped objectives.
   - Adam optimizer and global gradient norm clipping.
 - [ ] **Phase 3: Standard Benchmarks**
-  - Classic CartPole-v1 implementation.
-  - Complete Snake with ring-buffer body and relative actions.
+  - Full Snake with ring-buffer body, collision grid, and relative actions.
 - [ ] **Phase 4: Advanced RL Algorithms**
   - REINFORCE with learned value baseline.
   - Advantage Actor-Critic (A2C) and Generalized Advantage Estimation (GAE).

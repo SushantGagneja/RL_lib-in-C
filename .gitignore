@@ -14,8 +14,11 @@
 /mnist
 /arena
 /cRL
+/train_snake
+/train_cartpole
 /test_mat
 /test_gradcheck
+/test_envs
 /exercise/arena
 /exercise/autograd
 /exercise/mat

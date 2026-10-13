@@ -75,6 +75,14 @@ Var *var_create(mem_arena *arena, model_state *model, u32 rows, u32 cols,
     out->grad = create_matrix(arena, rows, cols);
   }
 
+  if (flags & VAR_FLAG_PARAMETER) {
+    if (model->num_params < MODEL_MAX_PARAMS) {
+      model->params[model->num_params++] = out;
+    } else {
+      assert(false && "Exceeded MODEL_MAX_PARAMS");
+    }
+  }
+
   return out;
 }
 

@@ -49,8 +49,13 @@ typedef struct {
   u32 size;
 } Graph;
 
+#define MODEL_MAX_PARAMS 128
+
 typedef struct {
   u32 num_vars;
+
+  Var *params[MODEL_MAX_PARAMS];
+  u32 num_params;
 
   Var *input;
   Var *output;
