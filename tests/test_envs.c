@@ -71,28 +71,26 @@ static void test_snake_reset_and_step(mem_arena *arena) {
   printf("  snake reset & observation... ");
   Env *env = env_snake_create(arena, 36);
   ASSERT_TRUE(env != NULL, "snake create");
-  ASSERT_TRUE(env->obs_dim == 76, "snake obs dim 76");
-  ASSERT_TRUE(env->act_dim == 5, "snake act dim 5");
+  ASSERT_TRUE(env->obs_dim == 108, "snake obs dim 108 (3x36 channels)");
+  ASSERT_TRUE(env->act_dim == 4, "snake act dim 4 (left, right, up, down)");
 
   prng_state rng;
   prng_seed_r(&rng, 999, 1);
   env->reset(env, &rng);
 
-  f32 obs[76] = {0};
+  f32 obs[108] = {0};
   env->observe(env, obs);
 
-  // Check one-hot activations
-  u32 head_count = 0, food_count = 0, pov_count = 0;
+  // Check channel activations: channel 0 (head), channel 1 (food), channel 2 (body segments)
+  u32 head_count = 0, food_count = 0, body_count = 0;
   for (u32 i = 0; i < 36; i++) {
     if (obs[i] == 1.0f) head_count++;
     if (obs[36 + i] == 1.0f) food_count++;
-  }
-  for (u32 i = 72; i < 76; i++) {
-    if (obs[i] == 1.0f) pov_count++;
+    if (obs[72 + i] == 1.0f) body_count++;
   }
   ASSERT_TRUE(head_count == 1, "exactly 1 head one-hot");
   ASSERT_TRUE(food_count == 1, "exactly 1 food one-hot");
-  ASSERT_TRUE(pov_count == 1, "exactly 1 pov one-hot");
+  ASSERT_TRUE(body_count == 0, "0 body segments at initial length 1");
 
   b32 done = false;
   b32 truncated = false;
@@ -118,7 +116,43 @@ static void test_snake_wall_death(mem_arena *arena) {
     if (done) break;
   }
   ASSERT_TRUE(done, "snake dies on wall");
+  ASSERT_TRUE(!truncated, "wall death is not timeout truncation");
   ASSERT_TRUE(r == -10.0f, "wall death penalty -10.0");
+  printf("OK\n");
+}
+
+typedef struct {
+  i32 x;
+  i32 y;
+} SnakeTestPos;
+
+typedef struct {
+  SnakeTestPos body[256];
+  u32 body_len;
+} SnakeTestState;
+
+static void test_snake_self_collision(mem_arena *arena) {
+  printf("  snake self-collision... ");
+  Env *env = env_snake_create(arena, 36);
+  prng_state rng;
+  prng_seed_r(&rng, 101, 1);
+  env->reset(env, &rng);
+
+  SnakeTestState *s = (SnakeTestState *)env->state;
+  s->body_len = 5;
+  s->body[0] = (SnakeTestPos){2, 2};
+  s->body[1] = (SnakeTestPos){2, 1};
+  s->body[2] = (SnakeTestPos){3, 1};
+  s->body[3] = (SnakeTestPos){3, 2};
+  s->body[4] = (SnakeTestPos){3, 3};
+
+  b32 done = false;
+  b32 truncated = false;
+
+  f32 r = env->step(env, 1, &done, &truncated);
+  ASSERT_TRUE(done, "snake detects true self-collision");
+  ASSERT_TRUE(!truncated, "self-collision is not timeout");
+  ASSERT_TRUE(r == -10.0f, "self-collision penalty -10.0");
   printf("OK\n");
 }
 
@@ -130,6 +164,7 @@ int main(void) {
   test_cartpole_termination(arena);
   test_snake_reset_and_step(arena);
   test_snake_wall_death(arena);
+  test_snake_self_collision(arena);
 
   printf("\n---\nPassed: %u  Failed: %u\n\n", tests_passed, tests_failed);
   arena_destroy(arena);

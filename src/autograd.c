@@ -99,7 +99,7 @@ const VarType VAR_TYPE_REINFORCE_LOSS = {
 Var *var_create(mem_arena *arena, model_state *model, u32 rows, u32 cols,
                 u32 flags) {
   Var *out = PUSH_STRUCT(arena, Var);
-  assert(out != NULL && "Arena out of memory in var_create");
+  CRL_ASSERT(out != NULL, "Arena out of memory in var_create");
 
   out->index = model->num_vars++;
   out->flags = flags;
@@ -114,7 +114,7 @@ Var *var_create(mem_arena *arena, model_state *model, u32 rows, u32 cols,
     if (model->num_params < MODEL_MAX_PARAMS) {
       model->params[model->num_params++] = out;
     } else {
-      assert(false && "Exceeded MODEL_MAX_PARAMS");
+      CRL_ASSERT(false, "Exceeded MODEL_MAX_PARAMS");
     }
   }
 
@@ -202,10 +202,7 @@ static b32 var_shape_scalar(Var *a, Var *b, u32 *rows, u32 *cols) {
 
 static Var *create_node(mem_arena *arena, model_state *model,
                         const VarType *type, Var *a, Var *b) {
-  if (type == NULL || type->shape == NULL) {
-    assert(false && "Invalid node type");
-    return NULL;
-  }
+  CRL_ASSERT(type != NULL && type->shape != NULL, "Invalid node type");
 
   u32 flags = VAR_FLAG_NONE;
   if ((a != NULL && (a->flags & VAR_FLAG_REQUIRES_GRAD)) ||
@@ -215,10 +212,7 @@ static Var *create_node(mem_arena *arena, model_state *model,
 
   u32 rows = 0;
   u32 cols = 0;
-  if (!type->shape(a, b, &rows, &cols)) {
-    assert(false && "Shape error in create_node");
-    return NULL;
-  }
+  CRL_ASSERT(type->shape(a, b, &rows, &cols), "Shape error in create_node");
 
   Var *out = var_create(arena, model, rows, cols, flags);
 
@@ -272,6 +266,11 @@ Graph build_graph(mem_arena *arena, model_state *model, Var *out_var) {
   Graph graph = {0};
   if (arena == NULL || model == NULL || out_var == NULL ||
       model->num_vars == 0) {
+    fprintf(stderr,
+            "[cRL ERROR] build_graph failed: arena=%p model=%p out_var=%p "
+            "model->num_vars=%u\n",
+            (void *)arena, (void *)model, (void *)out_var,
+            model ? model->num_vars : 0);
     return graph;
   }
 
@@ -280,6 +279,7 @@ Graph build_graph(mem_arena *arena, model_state *model, Var *out_var) {
   Var **out = malloc(sizeof(*out) * model->num_vars);
 
   if (visited == NULL || stack == NULL || out == NULL) {
+    fprintf(stderr, "[cRL ERROR] build_graph failed: allocation failure\n");
     free(visited);
     free(stack);
     free(out);
@@ -334,6 +334,11 @@ Graph build_graph(mem_arena *arena, model_state *model, Var *out_var) {
     }
   }
 
+  if (out_size == 0) {
+    fprintf(stderr,
+            "[cRL ERROR] build_graph failed: zero reachable nodes from out_var\n");
+  }
+
   graph.vars = PUSH_ARRAY_UNINIT(arena, Var *, out_size);
   if (graph.vars != NULL) {
     graph.size = out_size;
@@ -360,10 +365,11 @@ void forward_pass(Graph *graph) {
   }
 }
 
-void backward_pass(Graph *graph) {
+void backward_pass_from(Graph *graph, Var *loss_var, b32 seed_one) {
   if (graph == NULL || graph->size == 0) {
     return;
   }
+
   for (u32 i = 0; i < graph->size; i++) {
     Var *cur = graph->vars[i];
 
@@ -375,12 +381,33 @@ void backward_pass(Graph *graph) {
       continue;
     }
 
-    clear(cur->grad);
+    if (!seed_one && cur == loss_var) {
+      continue;
+    }
+
+    mat_clear(cur->grad);
   }
 
-  fill(graph->vars[graph->size - 1]->grad, 1.0f);
+  Var *root = (loss_var != NULL) ? loss_var : graph->vars[graph->size - 1];
+  i64 root_idx = -1;
+  for (u32 i = 0; i < graph->size; i++) {
+    if (graph->vars[i] == root) {
+      root_idx = (i64)i;
+      break;
+    }
+  }
 
-  for (i64 i = (i64)graph->size - 1; i >= 0; i--) {
+  if (root_idx < 0) {
+    fprintf(stderr,
+            "[cRL ERROR] backward_pass_from: specified loss_var not found in graph\n");
+    return;
+  }
+
+  if (seed_one && root->grad != NULL) {
+    mat_fill(root->grad, 1.0f);
+  }
+
+  for (i64 i = root_idx; i >= 0; i--) {
     Var *cur = graph->vars[i];
 
     if ((cur->flags & VAR_FLAG_REQUIRES_GRAD) == 0) {
@@ -391,6 +418,13 @@ void backward_pass(Graph *graph) {
       cur->type->backward(cur);
     }
   }
+}
+
+void backward_pass(Graph *graph) {
+  if (graph == NULL || graph->size == 0) {
+    return;
+  }
+  backward_pass_from(graph, graph->vars[graph->size - 1], true);
 }
 
 static b32 var_requires_grad(Var *var) {

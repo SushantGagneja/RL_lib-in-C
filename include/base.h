@@ -35,4 +35,13 @@ typedef double f64;
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 #define ALIGN_UP_POW2(x, align) (((x) + (align) - 1) & ~((align) - 1))
 
+#define CRL_ASSERT(expr, msg)                                                  \
+  do {                                                                         \
+    if (!(expr)) {                                                             \
+      fprintf(stderr, "[cRL FATAL] %s (%s:%d: %s)\n", (msg), __FILE__,        \
+              __LINE__, #expr);                                                \
+      abort();                                                                 \
+    }                                                                          \
+  } while (0)
+
 #endif

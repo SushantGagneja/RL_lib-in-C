@@ -18,6 +18,8 @@ typedef struct {
   u32 max_steps;
   f32 learning_rate;
   f32 gamma;
+  f32 lambda;         // GAE lambda parameter (e.g. 0.95f)
+  f32 vf_coef;        // Value loss coefficient (e.g. 0.5f)
   u64 seed;
   b32 verbose;
   OptimType optim;
@@ -37,7 +39,10 @@ typedef struct {
   u32 *actions;     // [max_steps]
   f32 *rewards;     // [max_steps]
   f32 *returns;     // [max_steps]
-  b8 *dones;        // [max_steps]
+  f32 *values;      // [max_steps] (Critic estimated values)
+  f32 *advantages;  // [max_steps] (GAE advantages)
+  b8 *dones;        // [max_steps] (True environment termination)
+  b8 *truncateds;   // [max_steps] (Time limit truncation)
   u32 len;
 } RLTrajectory;
 
@@ -52,9 +57,16 @@ typedef struct {
 RolloutBuffer *rl_buffer_create(mem_arena *arena, u32 num_trajectories,
                                 u32 max_steps, u32 obs_dim);
 
-// Trains an actor model on any Env using the REINFORCE algorithm
+// Computes Generalized Advantage Estimation (GAE-Lambda) for a trajectory
+void rl_compute_gae(RLTrajectory *traj, f32 gamma, f32 lambda, f32 last_val);
+
+// Trains an actor model on any Env using batched REINFORCE
 void rl_train_reinforce(Env *env, model_state *model, const RLConfig *config,
                         mem_arena *train_arena);
+
+// Trains an Actor-Critic model on any Env using Advantage Actor-Critic (A2C) with GAE
+void rl_train_a2c(Env *env, model_state *model, const RLConfig *config,
+                  mem_arena *train_arena);
 
 // Evaluates an actor model on an Env across a number of episodes
 RLEvalResult rl_evaluate(Env *env, model_state *model, prng_state *rng,

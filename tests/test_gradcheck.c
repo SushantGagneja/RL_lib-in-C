@@ -119,19 +119,21 @@ static void test_gradcheck_mlp(void) {
   Graph graph = build_graph(arena, model, output);
   assert(graph.size > 0 && "Graph build failed");
 
-  // Init parameters away from zero (ReLU kink)
+  // Init parameters away from zero (some positive, some negative so both ReLU branches run)
   prng_seed(12345, 1);
-  fill_rand(W0->val, 0.1f, 1.0f);
-  fill_rand(W1->val, 0.1f, 1.0f);
-  fill_rand(b1->val, 0.1f, 0.5f);
-
-  // Input also away from zero
-  fill_rand(input->val, 0.5f, 2.0f);
+  fill_rand(W0->val, -1.0f, 1.0f);
+  // Ensure at least one pre-activation is strictly negative and one strictly positive
+  W0->val->data[0] = -2.0f;
+  W0->val->data[1] = -1.5f;
+  W0->val->data[4] = 2.0f;
+  fill_rand(W1->val, -0.5f, 0.5f);
+  fill_rand(b1->val, -0.2f, 0.2f);
+  fill_rand(input->val, 0.5f, 1.5f);
 
   f32 h = 1e-2f;
   f32 tol = 1e-2f;
 
-  printf("  W0 (3x4, %d params)... ", 12);
+  printf("  W0 (3x4, %d params, testing both ReLU branches)... ", 12);
   u32 f0 = gradcheck_param(&graph, output, W0, h, tol);
   printf("%s (%u failures)\n", f0 == 0 ? "OK" : "FAIL", f0);
 
@@ -291,7 +293,7 @@ static void test_gradcheck_reinforce(void) {
   advantage->val->data[1] = 1.5f;
 
   f32 h = 1e-2f;
-  f32 tol = 5e-2f; // Reinforce loss has the clamp, so be slightly more lenient
+  f32 tol = 1e-2f;
 
   u32 total_fail = 0;
 
@@ -432,6 +434,66 @@ static void test_gradcheck_mse(void) {
   arena_destroy(arena);
 }
 
+// ── Test: fused policy cross-entropy loss ────────────────────────────
+
+static void test_gradcheck_fused_policy(void) {
+  printf("\n[gradcheck: fused policy loss (batch B=3, act_dim=4)]\n");
+  mem_arena *arena = arena_create(MiB(16));
+
+  matrix *logits = create_matrix(arena, 4, 3);
+  matrix *logits_grad = create_matrix(arena, 4, 3);
+  matrix *loss_out = create_matrix(arena, 1, 1);
+  matrix *seed_grad = create_matrix(arena, 1, 1);
+  seed_grad->data[0] = 1.0f;
+
+  u32 actions[3] = {1, 0, 3};
+  f32 advantages[3] = {1.2f, -0.8f, 2.0f};
+
+  prng_seed(9876, 5);
+  fill_rand(logits, -1.0f, 1.0f);
+
+  clear(logits_grad);
+  fused_policy_loss(loss_out, logits, actions, advantages, 3);
+  fused_policy_add_grad(logits_grad, logits, actions, advantages, 3, seed_grad);
+
+  f32 h = 1e-3f;
+  f32 tol = 1e-2f;
+  u32 failures = 0;
+
+  for (u32 i = 0; i < 12; i++) {
+    f32 orig = logits->data[i];
+
+    logits->data[i] = orig + h;
+    matrix *up = create_matrix(arena, 1, 1);
+    fused_policy_loss(up, logits, actions, advantages, 3);
+
+    logits->data[i] = orig - h;
+    matrix *dn = create_matrix(arena, 1, 1);
+    fused_policy_loss(dn, logits, actions, advantages, 3);
+
+    logits->data[i] = orig;
+
+    f32 numeric = (up->data[0] - dn->data[0]) / (2.0f * h);
+    f32 analytic = logits_grad->data[i];
+    f32 denom = fmaxf(1e-6f, fabsf(numeric) + fabsf(analytic));
+    f32 rel = fabsf(numeric - analytic) / denom;
+
+    total_params_checked++;
+    if (rel < tol) {
+      params_ok++;
+    } else {
+      failures++;
+    }
+  }
+
+  printf("  logits (4x3, 12 elements)... %s (%u failures)\n",
+         failures == 0 ? "OK" : "FAIL", failures);
+  if (failures == 0) tests_passed++;
+  else tests_failed++;
+
+  arena_destroy(arena);
+}
+
 // ── Main ─────────────────────────────────────────────────────────────
 
 int main(void) {
@@ -443,6 +505,7 @@ int main(void) {
   test_gradcheck_broadcast_add();
   test_gradcheck_tanh_mul();
   test_gradcheck_mse();
+  test_gradcheck_fused_policy();
   test_gradcheck_reinforce();
 
   printf("\n---\nTests: %u passed, %u failed\n", tests_passed, tests_failed);

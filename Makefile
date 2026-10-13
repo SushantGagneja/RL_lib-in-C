@@ -60,9 +60,26 @@ snake: release
 cartpole: release
 	./$(TARGET_CARTPOLE)
 
+# ── Benchmark ───────────────────────────────────────────────────────
+
+BENCH_BIN = crl_bench
+
+$(BENCH_BIN): CFLAGS += -O3
+$(BENCH_BIN): $(LIB_OBJS) examples/bench.c
+	$(CC) $(CFLAGS) -o $@ $(LIB_OBJS) examples/bench.c -lm
+
+bench: $(BENCH_BIN)
+	./$(BENCH_BIN)
+
+bench-cartpole: $(BENCH_BIN)
+	./$(BENCH_BIN) cartpole
+
+bench-snake: $(BENCH_BIN)
+	./$(BENCH_BIN) snake
+
 # ── Cleanup ─────────────────────────────────────────────────────────
 
 clean:
-	rm -f $(LIB_OBJS) examples/train_snake.o examples/train_cartpole.o $(TARGET_SNAKE) $(TARGET_CARTPOLE) $(TEST_MAT_BIN) $(TEST_GRAD_BIN) $(TEST_ENVS_BIN) cRL
+	rm -f $(LIB_OBJS) examples/train_snake.o examples/train_cartpole.o examples/bench.o $(TARGET_SNAKE) $(TARGET_CARTPOLE) $(TEST_MAT_BIN) $(TEST_GRAD_BIN) $(TEST_ENVS_BIN) $(BENCH_BIN) cRL
 
-.PHONY: all release debug test clean snake cartpole
+.PHONY: all release debug test clean snake cartpole bench bench-cartpole bench-snake

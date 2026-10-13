@@ -65,7 +65,14 @@ typedef struct {
   Var *advantage;
   Var *cost;
 
+  // Batched training and Critic fields:
+  Var *batch_input;
+  Var *batch_logits;
+  Var *batch_value;
+  Var *value;
+
   Graph forward_graph;
+  Graph batch_graph;
   Graph cost_graph;
 } model_state;
 
@@ -88,6 +95,7 @@ Var *var_reinforce_loss(mem_arena *arena, model_state *model, Var *probs,
 Graph build_graph(mem_arena *arena, model_state *model, Var *out_var);
 void forward_pass(Graph *graph);
 void backward_pass(Graph *graph);
+void backward_pass_from(Graph *graph, Var *loss_var, b32 seed_one);
 
 model_state *model_create(mem_arena *arena);
 

@@ -19,6 +19,7 @@
 /test_mat
 /test_gradcheck
 /test_envs
+/crl_bench
 /exercise/arena
 /exercise/autograd
 /exercise/mat

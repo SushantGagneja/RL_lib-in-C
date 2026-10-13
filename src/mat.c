@@ -5,12 +5,12 @@
 
 matrix *create_matrix(mem_arena *arena, u32 rows, u32 cols) {
   matrix *mat = PUSH_STRUCT(arena, matrix);
-  assert(mat != NULL && "Arena out of memory in create_matrix");
+  CRL_ASSERT(mat != NULL, "Arena out of memory in create_matrix");
 
   mat->rows = rows;
   mat->cols = cols;
   mat->data = PUSH_ARRAY(arena, f32, (u64)rows * cols);
-  assert(mat->data != NULL && "Arena out of memory in create_matrix data");
+  CRL_ASSERT(mat->data != NULL, "Arena out of memory in create_matrix data");
 
   return mat;
 }
@@ -30,6 +30,13 @@ void fill_rand(matrix *mat, f32 lower, f32 upper) {
   u64 size = (u64)mat->rows * mat->cols;
   for (u64 i = 0; i < size; i++) {
     mat->data[i] = prng_randf() * (upper - lower) + lower;
+  }
+}
+
+void fill_rand_r(matrix *mat, prng_state *rng, f32 lower, f32 upper) {
+  u64 size = (u64)mat->rows * mat->cols;
+  for (u64 i = 0; i < size; i++) {
+    mat->data[i] = prng_randf_r(rng) * (upper - lower) + lower;
   }
 }
 
@@ -486,5 +493,82 @@ b32 reinforce_add_grad(matrix *prob_grads, const matrix *probs,
     f32 p = MAX(probs->data[i], 1e-8f);
     prob_grads->data[i] += grad->data[i] * (-rt->data[i] / p);
   }
+  return true;
+}
+
+b32 fused_policy_loss(matrix *out, const matrix *logits, const u32 *actions,
+                      const f32 *advantages, u32 batch_size) {
+  if (logits == NULL || actions == NULL || advantages == NULL || out == NULL) {
+    return false;
+  }
+  if (out->rows != 1 || out->cols != 1) return false;
+  if (logits->cols != batch_size) return false;
+
+  u32 act_dim = logits->rows;
+  f32 total_loss = 0.0f;
+
+  for (u32 b = 0; b < batch_size; b++) {
+    u32 a_chosen = actions[b];
+    if (a_chosen >= act_dim) return false;
+
+    // Log-sum-exp over column b
+    f32 max_z = logits->data[0 * batch_size + b];
+    for (u32 a = 1; a < act_dim; a++) {
+      f32 z = logits->data[a * batch_size + b];
+      if (z > max_z) max_z = z;
+    }
+
+    f32 sum_exp = 0.0f;
+    for (u32 a = 0; a < act_dim; a++) {
+      sum_exp += expf(logits->data[a * batch_size + b] - max_z);
+    }
+    f32 log_sum_exp = max_z + logf(sum_exp);
+
+    f32 log_prob_a = logits->data[a_chosen * batch_size + b] - log_sum_exp;
+    total_loss += -advantages[b] * log_prob_a;
+  }
+
+  out->data[0] = total_loss / (f32)batch_size;
+  return true;
+}
+
+b32 fused_policy_add_grad(matrix *logits_grad, const matrix *logits,
+                          const u32 *actions, const f32 *advantages,
+                          u32 batch_size, const matrix *grad) {
+  if (logits == NULL || logits_grad == NULL || actions == NULL ||
+      advantages == NULL || grad == NULL) {
+    return false;
+  }
+  if (logits->cols != batch_size || logits_grad->cols != batch_size) return false;
+
+  u32 act_dim = logits->rows;
+  f32 g_scale = grad->data[0] / (f32)batch_size;
+
+  for (u32 b = 0; b < batch_size; b++) {
+    u32 a_chosen = actions[b];
+
+    // Softmax probabilities for column b
+    f32 max_z = logits->data[0 * batch_size + b];
+    for (u32 a = 1; a < act_dim; a++) {
+      f32 z = logits->data[a * batch_size + b];
+      if (z > max_z) max_z = z;
+    }
+
+    f32 sum_exp = 0.0f;
+    for (u32 a = 0; a < act_dim; a++) {
+      sum_exp += expf(logits->data[a * batch_size + b] - max_z);
+    }
+    f32 inv_sum = 1.0f / sum_exp;
+
+    f32 adv_scale = advantages[b] * g_scale;
+
+    for (u32 a = 0; a < act_dim; a++) {
+      f32 prob = expf(logits->data[a * batch_size + b] - max_z) * inv_sum;
+      f32 indicator = (a == a_chosen) ? 1.0f : 0.0f;
+      // Gradient of -adv * log(p_a) is adv * (p - indicator)
+      logits_grad->data[a * batch_size + b] += adv_scale * (prob - indicator);
+    }
+  }
+
   return true;
 }
