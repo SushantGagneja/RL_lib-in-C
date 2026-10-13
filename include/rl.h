@@ -6,6 +6,11 @@
 #include "env.h"
 #include "optim.h"
 
+typedef enum {
+  OPTIM_SGD = 0,
+  OPTIM_ADAM = 1,
+} OptimType;
+
 // Configuration for training
 typedef struct {
   u32 epochs;
@@ -15,6 +20,9 @@ typedef struct {
   f32 gamma;
   u64 seed;
   b32 verbose;
+  OptimType optim;
+  f32 max_grad_norm;
+  u32 batch_size;
 } RLConfig;
 
 // Evaluation metrics

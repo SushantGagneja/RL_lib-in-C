@@ -2,18 +2,27 @@
 
 static void var_relu_forward(Var *var);
 static void var_relu_backward(Var *var);
+static void var_tanh_forward(Var *var);
+static void var_tanh_backward(Var *var);
 static void var_softmax_forward(Var *var);
 static void var_softmax_backward(Var *var);
 static void var_add_forward(Var *var);
 static void var_add_backward(Var *var);
 static void var_sub_forward(Var *var);
 static void var_sub_backward(Var *var);
+static void var_mul_forward(Var *var);
+static void var_mul_backward(Var *var);
 static void var_matmul_forward(Var *var);
 static void var_matmul_backward(Var *var);
+static void var_mse_forward(Var *var);
+static void var_mse_backward(Var *var);
 static void var_reinforce_forward(Var *var);
 static void var_reinforce_backward(Var *var);
+
 static b32 var_shape_same(Var *a, Var *b, u32 *rows, u32 *cols);
+static b32 var_shape_broadcast(Var *a, Var *b, u32 *rows, u32 *cols);
 static b32 var_shape_matmul(Var *a, Var *b, u32 *rows, u32 *cols);
+static b32 var_shape_scalar(Var *a, Var *b, u32 *rows, u32 *cols);
 
 const VarType VAR_TYPE_RELU = {
     .name = "relu",
@@ -21,6 +30,14 @@ const VarType VAR_TYPE_RELU = {
     .shape = var_shape_same,
     .forward = var_relu_forward,
     .backward = var_relu_backward,
+};
+
+const VarType VAR_TYPE_TANH = {
+    .name = "tanh",
+    .num_inputs = 1,
+    .shape = var_shape_same,
+    .forward = var_tanh_forward,
+    .backward = var_tanh_backward,
 };
 
 const VarType VAR_TYPE_SOFTMAX = {
@@ -34,7 +51,7 @@ const VarType VAR_TYPE_SOFTMAX = {
 const VarType VAR_TYPE_ADD = {
     .name = "add",
     .num_inputs = 2,
-    .shape = var_shape_same,
+    .shape = var_shape_broadcast,
     .forward = var_add_forward,
     .backward = var_add_backward,
 };
@@ -42,9 +59,17 @@ const VarType VAR_TYPE_ADD = {
 const VarType VAR_TYPE_SUB = {
     .name = "sub",
     .num_inputs = 2,
-    .shape = var_shape_same,
+    .shape = var_shape_broadcast,
     .forward = var_sub_forward,
     .backward = var_sub_backward,
+};
+
+const VarType VAR_TYPE_MUL = {
+    .name = "mul",
+    .num_inputs = 2,
+    .shape = var_shape_same,
+    .forward = var_mul_forward,
+    .backward = var_mul_backward,
 };
 
 const VarType VAR_TYPE_MATMUL = {
@@ -55,11 +80,21 @@ const VarType VAR_TYPE_MATMUL = {
     .backward = var_matmul_backward,
 };
 
-const VarType VAR_TYPE_REINFORCE_LOSS = {.name = "reinforce_loss",
-                                         .num_inputs = 2,
-                                         .shape = var_shape_same,
-                                         .forward = var_reinforce_forward,
-                                         .backward = var_reinforce_backward};
+const VarType VAR_TYPE_MSE = {
+    .name = "mse",
+    .num_inputs = 2,
+    .shape = var_shape_scalar,
+    .forward = var_mse_forward,
+    .backward = var_mse_backward,
+};
+
+const VarType VAR_TYPE_REINFORCE_LOSS = {
+    .name = "reinforce_loss",
+    .num_inputs = 2,
+    .shape = var_shape_same,
+    .forward = var_reinforce_forward,
+    .backward = var_reinforce_backward,
+};
 
 Var *var_create(mem_arena *arena, model_state *model, u32 rows, u32 cols,
                 u32 flags) {
@@ -102,6 +137,39 @@ static b32 var_shape_same(Var *a, Var *b, u32 *rows, u32 *cols) {
   return true;
 }
 
+static b32 var_shape_broadcast(Var *a, Var *b, u32 *rows, u32 *cols) {
+  if (a == NULL || b == NULL) {
+    return false;
+  }
+
+  if (a->val->rows != b->val->rows) {
+    return false;
+  }
+
+  u32 cols_a = a->val->cols;
+  u32 cols_b = b->val->cols;
+
+  if (cols_a == cols_b) {
+    *rows = a->val->rows;
+    *cols = cols_a;
+    return true;
+  }
+
+  if (cols_a == 1) {
+    *rows = a->val->rows;
+    *cols = cols_b;
+    return true;
+  }
+
+  if (cols_b == 1) {
+    *rows = a->val->rows;
+    *cols = cols_a;
+    return true;
+  }
+
+  return false;
+}
+
 static b32 var_shape_matmul(Var *a, Var *b, u32 *rows, u32 *cols) {
   if (a == NULL || b == NULL) {
     return false;
@@ -113,6 +181,21 @@ static b32 var_shape_matmul(Var *a, Var *b, u32 *rows, u32 *cols) {
 
   *rows = a->val->rows;
   *cols = b->val->cols;
+
+  return true;
+}
+
+static b32 var_shape_scalar(Var *a, Var *b, u32 *rows, u32 *cols) {
+  if (a == NULL || b == NULL) {
+    return false;
+  }
+
+  if (a->val->rows != b->val->rows || a->val->cols != b->val->cols) {
+    return false;
+  }
+
+  *rows = 1;
+  *cols = 1;
 
   return true;
 }
@@ -152,6 +235,10 @@ Var *var_relu(mem_arena *arena, model_state *model, Var *input) {
   return create_node(arena, model, &VAR_TYPE_RELU, input, NULL);
 }
 
+Var *var_tanh(mem_arena *arena, model_state *model, Var *input) {
+  return create_node(arena, model, &VAR_TYPE_TANH, input, NULL);
+}
+
 Var *var_softmax(mem_arena *arena, model_state *model, Var *input) {
   return create_node(arena, model, &VAR_TYPE_SOFTMAX, input, NULL);
 }
@@ -164,8 +251,16 @@ Var *var_sub(mem_arena *arena, model_state *model, Var *a, Var *b) {
   return create_node(arena, model, &VAR_TYPE_SUB, a, b);
 }
 
+Var *var_mul(mem_arena *arena, model_state *model, Var *a, Var *b) {
+  return create_node(arena, model, &VAR_TYPE_MUL, a, b);
+}
+
 Var *var_matmul(mem_arena *arena, model_state *model, Var *a, Var *b) {
   return create_node(arena, model, &VAR_TYPE_MATMUL, a, b);
+}
+
+Var *var_mse(mem_arena *arena, model_state *model, Var *pred, Var *target) {
+  return create_node(arena, model, &VAR_TYPE_MSE, pred, target);
 }
 
 Var *var_reinforce_loss(mem_arena *arena, model_state *model, Var *probs,
@@ -306,9 +401,17 @@ static void var_relu_forward(Var *var) { relu(var->val, var->inputs[0]->val); }
 
 static void var_relu_backward(Var *var) {
   Var *input = var->inputs[0];
-
   if (var_requires_grad(input)) {
     relu_add_grad(input->grad, input->val, var->grad);
+  }
+}
+
+static void var_tanh_forward(Var *var) { tanh_act(var->val, var->inputs[0]->val); }
+
+static void var_tanh_backward(Var *var) {
+  Var *input = var->inputs[0];
+  if (var_requires_grad(input)) {
+    tanh_add_grad(input->grad, var->val, var->grad);
   }
 }
 
@@ -318,7 +421,6 @@ static void var_softmax_forward(Var *var) {
 
 static void var_softmax_backward(Var *var) {
   Var *input = var->inputs[0];
-
   if (var_requires_grad(input)) {
     softmax_add_grad(input->grad, var->val, var->grad);
   }
@@ -331,14 +433,8 @@ static void var_add_forward(Var *var) {
 static void var_add_backward(Var *var) {
   Var *a = var->inputs[0];
   Var *b = var->inputs[1];
-
-  if (var_requires_grad(a)) {
-    add(a->grad, a->grad, var->grad);
-  }
-
-  if (var_requires_grad(b)) {
-    add(b->grad, b->grad, var->grad);
-  }
+  add_broadcast_grad(var_requires_grad(a) ? a->grad : NULL,
+                     var_requires_grad(b) ? b->grad : NULL, var->grad);
 }
 
 static void var_sub_forward(Var *var) {
@@ -348,14 +444,20 @@ static void var_sub_forward(Var *var) {
 static void var_sub_backward(Var *var) {
   Var *a = var->inputs[0];
   Var *b = var->inputs[1];
+  sub_broadcast_grad(var_requires_grad(a) ? a->grad : NULL,
+                     var_requires_grad(b) ? b->grad : NULL, var->grad);
+}
 
-  if (var_requires_grad(a)) {
-    add(a->grad, a->grad, var->grad);
-  }
+static void var_mul_forward(Var *var) {
+  mul(var->val, var->inputs[0]->val, var->inputs[1]->val);
+}
 
-  if (var_requires_grad(b)) {
-    sub(b->grad, b->grad, var->grad);
-  }
+static void var_mul_backward(Var *var) {
+  Var *a = var->inputs[0];
+  Var *b = var->inputs[1];
+  mul_add_grad(var_requires_grad(a) ? a->grad : NULL,
+               var_requires_grad(b) ? b->grad : NULL,
+               a->val, b->val, var->grad);
 }
 
 static void var_matmul_forward(Var *var) {
@@ -372,6 +474,18 @@ static void var_matmul_backward(Var *var) {
 
   if (var_requires_grad(b)) {
     matmul(b->grad, a->val, var->grad, 0, 1, 0);
+  }
+}
+
+static void var_mse_forward(Var *var) {
+  mse_loss(var->val, var->inputs[0]->val, var->inputs[1]->val);
+}
+
+static void var_mse_backward(Var *var) {
+  Var *pred = var->inputs[0];
+  Var *target = var->inputs[1];
+  if (var_requires_grad(pred)) {
+    mse_add_grad(pred->grad, pred->val, target->val, var->grad);
   }
 }
 

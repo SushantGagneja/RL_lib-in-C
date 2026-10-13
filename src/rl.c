@@ -63,10 +63,15 @@ void rl_train_reinforce(Env *env, model_state *model, const RLConfig *config,
   prng_state rng;
   prng_seed_r(&rng, config->seed != 0 ? config->seed : 42, 1);
 
+  AdamOptim *adam = (config->optim == OPTIM_ADAM)
+                        ? optim_adam_create(train_arena, model, lr)
+                        : NULL;
+
   printf("Starting REINFORCE Training:\n");
-  printf("  Obs Dim: %u | Act Dim: %u | Epochs: %u | Rollout: %u | LR: %.4f | "
-         "Gamma: %.2f\n\n",
-         env->obs_dim, env->act_dim, config->epochs, rollout_size, lr, gamma);
+  printf("  Obs Dim: %u | Act Dim: %u | Epochs: %u | Rollout: %u | Optim: %s | "
+         "LR: %.4f | Gamma: %.2f\n\n",
+         env->obs_dim, env->act_dim, config->epochs, rollout_size,
+         config->optim == OPTIM_ADAM ? "Adam" : "SGD", lr, gamma);
 
   for (u32 epoch = 0; epoch < config->epochs; epoch++) {
     f32 total_reward = 0.0f;
@@ -146,7 +151,15 @@ void rl_train_reinforce(Env *env, model_state *model, const RLConfig *config,
 
     // 4. Update model parameters
     if (sample_count > 0) {
-      optim_sgd_step(model, lr, 1.0f / (f32)sample_count);
+      if (config->max_grad_norm > 0.0f) {
+        optim_clip_grad_norm(model, config->max_grad_norm);
+      }
+
+      if (config->optim == OPTIM_ADAM) {
+        optim_adam_step(adam, model);
+      } else {
+        optim_sgd_step(model, lr, 1.0f / (f32)sample_count);
+      }
     }
 
     // Logging

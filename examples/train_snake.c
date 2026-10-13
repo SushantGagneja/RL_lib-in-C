@@ -26,9 +26,11 @@ int main(int argc, char **argv) {
       .epochs = epochs,
       .rollout_size = 64,
       .max_steps = env->max_steps,
-      .learning_rate = 0.05f,
+      .learning_rate = 0.001f,
       .gamma = 0.99f,
       .seed = seed,
+      .optim = OPTIM_ADAM,
+      .max_grad_norm = 0.5f,
   };
 
   rl_train_reinforce(env, model, &cfg, arena);

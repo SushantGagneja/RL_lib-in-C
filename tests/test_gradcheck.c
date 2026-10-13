@@ -313,6 +313,125 @@ static void test_gradcheck_reinforce(void) {
   arena_destroy(arena);
 }
 
+// ── Test: broadcast add across batch ─────────────────────────────────
+
+static void test_gradcheck_broadcast_add(void) {
+  printf("\n[gradcheck: broadcast add (batch B=2)]\n");
+
+  mem_arena *arena = arena_create(MiB(32));
+  model_state *model = PUSH_STRUCT(arena, model_state);
+
+  // X is (4x2), W is (3x4) -> z is (3x2), b is (3x1) broadcasted
+  Var *X = var_create(arena, model, 4, 2, VAR_FLAG_NONE);
+  Var *W = var_create(arena, model, 3, 4, VAR_FLAG_PARAMETER | VAR_FLAG_REQUIRES_GRAD);
+  Var *b = var_create(arena, model, 3, 1, VAR_FLAG_PARAMETER | VAR_FLAG_REQUIRES_GRAD);
+
+  Var *z = var_matmul(arena, model, W, X);
+  Var *output = var_add(arena, model, z, b);
+
+  Graph graph = build_graph(arena, model, output);
+  assert(graph.size > 0);
+
+  prng_seed(112233, 4);
+  fill_rand(W->val, -0.5f, 0.5f);
+  fill_rand(b->val, -0.5f, 0.5f);
+  fill_rand(X->val, 0.5f, 1.5f);
+
+  f32 h = 1e-2f;
+  f32 tol = 1e-2f;
+
+  printf("  W (3x4, 12 params)... ");
+  u32 fw = gradcheck_param(&graph, output, W, h, tol);
+  printf("%s (%u failures)\n", fw == 0 ? "OK" : "FAIL", fw);
+
+  printf("  b (3x1 broadcast, 3 params)... ");
+  u32 fb = gradcheck_param(&graph, output, b, h, tol);
+  printf("%s (%u failures)\n", fb == 0 ? "OK" : "FAIL", fb);
+
+  if (fw + fb == 0) tests_passed++;
+  else tests_failed++;
+
+  arena_destroy(arena);
+}
+
+// ── Test: elementwise mul & tanh ─────────────────────────────────────
+
+static void test_gradcheck_tanh_mul(void) {
+  printf("\n[gradcheck: tanh & elementwise mul]\n");
+
+  mem_arena *arena = arena_create(MiB(32));
+  model_state *model = PUSH_STRUCT(arena, model_state);
+
+  Var *input = var_create(arena, model, 3, 1, VAR_FLAG_NONE);
+  Var *W1 = var_create(arena, model, 3, 3, VAR_FLAG_PARAMETER | VAR_FLAG_REQUIRES_GRAD);
+  Var *W2 = var_create(arena, model, 3, 3, VAR_FLAG_PARAMETER | VAR_FLAG_REQUIRES_GRAD);
+
+  Var *z1 = var_matmul(arena, model, W1, input);
+  Var *z2 = var_matmul(arena, model, W2, input);
+  Var *t2 = var_tanh(arena, model, z2);
+  Var *output = var_mul(arena, model, z1, t2);
+
+  Graph graph = build_graph(arena, model, output);
+  assert(graph.size > 0);
+
+  prng_seed(445566, 5);
+  fill_rand(W1->val, -0.5f, 0.5f);
+  fill_rand(W2->val, -0.5f, 0.5f);
+  fill_rand(input->val, 0.5f, 1.5f);
+
+  f32 h = 1e-2f;
+  f32 tol = 1e-2f;
+
+  printf("  W1 (3x3, 9 params)... ");
+  u32 f1 = gradcheck_param(&graph, output, W1, h, tol);
+  printf("%s (%u failures)\n", f1 == 0 ? "OK" : "FAIL", f1);
+
+  printf("  W2 (3x3, 9 params)... ");
+  u32 f2 = gradcheck_param(&graph, output, W2, h, tol);
+  printf("%s (%u failures)\n", f2 == 0 ? "OK" : "FAIL", f2);
+
+  if (f1 + f2 == 0) tests_passed++;
+  else tests_failed++;
+
+  arena_destroy(arena);
+}
+
+// ── Test: MSE loss ───────────────────────────────────────────────────
+
+static void test_gradcheck_mse(void) {
+  printf("\n[gradcheck: MSE loss]\n");
+
+  mem_arena *arena = arena_create(MiB(32));
+  model_state *model = PUSH_STRUCT(arena, model_state);
+
+  Var *input = var_create(arena, model, 4, 2, VAR_FLAG_NONE);
+  Var *W = var_create(arena, model, 3, 4, VAR_FLAG_PARAMETER | VAR_FLAG_REQUIRES_GRAD);
+  Var *target = var_create(arena, model, 3, 2, VAR_FLAG_NONE);
+
+  Var *pred = var_matmul(arena, model, W, input);
+  Var *loss = var_mse(arena, model, pred, target);
+
+  Graph graph = build_graph(arena, model, loss);
+  assert(graph.size > 0);
+
+  prng_seed(778899, 6);
+  fill_rand(W->val, -0.5f, 0.5f);
+  fill_rand(input->val, 0.5f, 1.5f);
+  fill_rand(target->val, 0.0f, 1.0f);
+
+  f32 h = 1e-2f;
+  f32 tol = 1e-2f;
+
+  printf("  W (3x4, 12 params)... ");
+  u32 fw = gradcheck_param(&graph, loss, W, h, tol);
+  printf("%s (%u failures)\n", fw == 0 ? "OK" : "FAIL", fw);
+
+  if (fw == 0) tests_passed++;
+  else tests_failed++;
+
+  arena_destroy(arena);
+}
+
 // ── Main ─────────────────────────────────────────────────────────────
 
 int main(void) {
@@ -321,6 +440,9 @@ int main(void) {
   test_gradcheck_mlp();
   test_gradcheck_softmax();
   test_gradcheck_sub();
+  test_gradcheck_broadcast_add();
+  test_gradcheck_tanh_mul();
+  test_gradcheck_mse();
   test_gradcheck_reinforce();
 
   printf("\n---\nTests: %u passed, %u failed\n", tests_passed, tests_failed);

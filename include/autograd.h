@@ -38,10 +38,13 @@ struct Var {
 };
 
 extern const VarType VAR_TYPE_RELU;
+extern const VarType VAR_TYPE_TANH;
 extern const VarType VAR_TYPE_SOFTMAX;
 extern const VarType VAR_TYPE_ADD;
 extern const VarType VAR_TYPE_SUB;
+extern const VarType VAR_TYPE_MUL;
 extern const VarType VAR_TYPE_MATMUL;
+extern const VarType VAR_TYPE_MSE;
 extern const VarType VAR_TYPE_REINFORCE_LOSS;
 
 typedef struct {
@@ -70,12 +73,15 @@ Var *var_create(mem_arena *arena, model_state *model, u32 rows, u32 cols,
                 u32 flags);
 
 Var *var_relu(mem_arena *arena, model_state *model, Var *input);
+Var *var_tanh(mem_arena *arena, model_state *model, Var *input);
 Var *var_softmax(mem_arena *arena, model_state *model, Var *input);
 
 Var *var_add(mem_arena *arena, model_state *model, Var *a, Var *b);
 Var *var_sub(mem_arena *arena, model_state *model, Var *a, Var *b);
+Var *var_mul(mem_arena *arena, model_state *model, Var *a, Var *b);
 Var *var_matmul(mem_arena *arena, model_state *model, Var *a, Var *b);
 
+Var *var_mse(mem_arena *arena, model_state *model, Var *pred, Var *target);
 Var *var_reinforce_loss(mem_arena *arena, model_state *model, Var *probs,
                         Var *rt);
 

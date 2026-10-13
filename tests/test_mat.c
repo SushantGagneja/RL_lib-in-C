@@ -274,6 +274,84 @@ static void test_add_sub(mem_arena *arena) {
   printf("%s\n", ok ? "OK" : "FAIL");
 }
 
+static void test_softmax_per_column(mem_arena *arena) {
+  printf("  softmax per-column (4x3 matrix)... ");
+  matrix *in = create_matrix(arena, 4, 3);
+  matrix *out = create_matrix(arena, 4, 3);
+
+  prng_seed(777, 8);
+  fill_rand(in, -5.0f, 5.0f);
+  softmax(out, in);
+
+  b32 ok = true;
+  for (u32 c = 0; c < 3; c++) {
+    f32 col_sum = 0.0f;
+    for (u32 r = 0; r < 4; r++) {
+      col_sum += out->data[r * 3 + c];
+    }
+    if (fabsf(col_sum - 1.0f) > 1e-6f) {
+      ok = false;
+      break;
+    }
+  }
+  ASSERT_TRUE(ok, "each column of batched softmax independently sums to 1.0");
+  printf("%s\n", ok ? "OK" : "FAIL");
+}
+
+static void test_broadcast_add(mem_arena *arena) {
+  printf("  broadcast add A(3x4) + b(3x1)... ");
+  matrix *a = create_matrix(arena, 3, 4);
+  matrix *b = create_matrix(arena, 3, 1);
+  matrix *out = create_matrix(arena, 3, 4);
+
+  for (u32 i = 0; i < 12; i++) a->data[i] = (f32)i;
+  b->data[0] = 10.0f;
+  b->data[1] = 20.0f;
+  b->data[2] = 30.0f;
+
+  add(out, a, b);
+
+  b32 ok = true;
+  for (u32 r = 0; r < 3; r++) {
+    for (u32 c = 0; c < 4; c++) {
+      f32 expected = a->data[r * 4 + c] + b->data[r];
+      if (fabsf(out->data[r * 4 + c] - expected) > 1e-6f) {
+        ok = false;
+        break;
+      }
+    }
+  }
+  ASSERT_TRUE(ok, "broadcast addition matches expectation");
+  printf("%s\n", ok ? "OK" : "FAIL");
+}
+
+static void test_mul_tanh_mse(mem_arena *arena) {
+  printf("  mul, tanh, mse... ");
+  matrix *a = create_matrix(arena, 2, 2);
+  matrix *b = create_matrix(arena, 2, 2);
+  matrix *mul_out = create_matrix(arena, 2, 2);
+  matrix *tanh_out = create_matrix(arena, 2, 2);
+  matrix *mse_out = create_matrix(arena, 1, 1);
+
+  a->data[0] = 2.0f; a->data[1] = -3.0f; a->data[2] = 0.5f; a->data[3] = 4.0f;
+  b->data[0] = 3.0f; b->data[1] = 2.0f;  b->data[2] = 4.0f; b->data[3] = -1.0f;
+
+  mul(mul_out, a, b);
+  b32 ok_mul = (mul_out->data[0] == 6.0f && mul_out->data[1] == -6.0f &&
+                mul_out->data[2] == 2.0f && mul_out->data[3] == -4.0f);
+
+  tanh_act(tanh_out, a);
+  b32 ok_tanh = (fabsf(tanh_out->data[0] - tanhf(2.0f)) < 1e-6f &&
+                 fabsf(tanh_out->data[1] - tanhf(-3.0f)) < 1e-6f);
+
+  mse_loss(mse_out, a, b);
+  // diffs: (2-3)^2=1, (-3-2)^2=25, (0.5-4)^2=12.25, (4-(-1))^2=25. sum = 63.25. mean = 15.8125
+  b32 ok_mse = fabsf(mse_out->data[0] - 15.8125f) < 1e-5f;
+
+  ASSERT_TRUE(ok_mul && ok_tanh && ok_mse, "mul, tanh, mse operations");
+  printf("%s\n", (ok_mul && ok_tanh && ok_mse) ? "OK" : "FAIL");
+}
+
 // ── Main ─────────────────────────────────────────────────────────────
 
 int main(void) {
@@ -287,16 +365,17 @@ int main(void) {
   test_matmul_tn(arena);
   test_matmul_tt(arena);
 
-  printf("\n[softmax]\n");
+  printf("\n[softmax & batching]\n");
   test_softmax_sums_to_one(arena);
   test_softmax_positive(arena);
   test_softmax_large_values(arena);
+  test_softmax_per_column(arena);
 
-  printf("\n[relu]\n");
+  printf("\n[activations & elementwise]\n");
   test_relu(arena);
-
-  printf("\n[add/sub]\n");
   test_add_sub(arena);
+  test_broadcast_add(arena);
+  test_mul_tanh_mse(arena);
 
   printf("\n---\nPassed: %u  Failed: %u\n\n", tests_passed, tests_failed);
 

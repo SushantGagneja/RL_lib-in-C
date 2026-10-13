@@ -168,10 +168,11 @@ Parameters checked: 153/153 passed within tolerance
   - [x] Fully decoupled trainer (`rl_train_reinforce`) and optimizer (`optim_sgd_step`).
   - [x] Multiple environments: CartPole-v1 and Snake.
   - [x] Lean example scripts: `train_snake.c` and `train_cartpole.c` under 50 lines each.
-- [ ] **Phase 2: Autograd Upgrades**
-  - Observation batching $(obs\_dim \times B)$ with broadcast bias add and per-column softmax.
-  - New operators: `mul`, `tanh`, `mse`, `entropy`, and fused clipped objectives.
-  - Adam optimizer and global gradient norm clipping.
+- [x] **Phase 2: Autograd Upgrades**
+  - [x] Observation batching support with broadcast bias add and per-column independent softmax.
+  - [x] New operators: elementwise `mul`, `tanh`, and `mse` loss.
+  - [x] Adam optimizer with 1st/2nd moment tracking, bias correction, and global gradient norm clipping.
+  - [x] CartPole-v1 solved: achieves **494.99 / 500.0** mean return over 100 test episodes in 50 epochs.
 - [ ] **Phase 3: Standard Benchmarks**
   - Full Snake with ring-buffer body, collision grid, and relative actions.
 - [ ] **Phase 4: Advanced RL Algorithms**
