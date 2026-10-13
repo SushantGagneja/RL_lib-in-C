@@ -245,6 +245,9 @@ Graph build_graph(mem_arena *arena, model_state *model, Var *out_var) {
 }
 
 void forward_pass(Graph *graph) {
+  if (graph == NULL || graph->size == 0) {
+    return;
+  }
   for (u32 i = 0; i < graph->size; i++) {
     Var *cur = graph->vars[i];
 
@@ -255,6 +258,9 @@ void forward_pass(Graph *graph) {
 }
 
 void backward_pass(Graph *graph) {
+  if (graph == NULL || graph->size == 0) {
+    return;
+  }
   for (u32 i = 0; i < graph->size; i++) {
     Var *cur = graph->vars[i];
 

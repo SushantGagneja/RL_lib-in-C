@@ -13,6 +13,9 @@
 /mat
 /mnist
 /arena
+/cRL
+/test_mat
+/test_gradcheck
 /exercise/arena
 /exercise/autograd
 /exercise/mat
