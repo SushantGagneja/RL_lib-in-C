@@ -28,20 +28,18 @@ static void test_cartpole_reset_and_bounds(mem_arena *arena) {
   ASSERT_TRUE(env->act_dim == 2, "act dim 2");
   ASSERT_TRUE(env->max_steps == 500, "max steps 500");
 
-  prng_state rng;
-  prng_seed_r(&rng, 12345, 1);
-  env->reset(env, &rng);
+  env->reset(env, 12345);
 
-  f32 obs[4] = {0};
+  real obs[4] = {0};
   env->observe(env, obs);
-  ASSERT_TRUE(fabsf(obs[0]) <= 0.051f, "x init within bounds");
-  ASSERT_TRUE(fabsf(obs[1]) <= 0.051f, "x_dot init within bounds");
-  ASSERT_TRUE(fabsf(obs[2]) <= 0.051f, "theta init within bounds");
-  ASSERT_TRUE(fabsf(obs[3]) <= 0.051f, "theta_dot init within bounds");
+  ASSERT_TRUE(real_fabs(obs[0]) <= 0.051f, "x init within bounds");
+  ASSERT_TRUE(real_fabs(obs[1]) <= 0.051f, "x_dot init within bounds");
+  ASSERT_TRUE(real_fabs(obs[2]) <= 0.051f, "theta init within bounds");
+  ASSERT_TRUE(real_fabs(obs[3]) <= 0.051f, "theta_dot init within bounds");
 
   b32 done = false;
   b32 truncated = false;
-  f32 r = env->step(env, 1, &done, &truncated);
+  real r = env->step(env, 1, &done, &truncated);
   ASSERT_TRUE(r == 1.0f, "step reward 1.0");
   ASSERT_TRUE(!done, "not done after 1 step");
   ASSERT_TRUE(!truncated, "not truncated after 1 step");
@@ -49,12 +47,35 @@ static void test_cartpole_reset_and_bounds(mem_arena *arena) {
   printf("OK\n");
 }
 
+static void test_cartpole_determinism(mem_arena *arena) {
+  printf("  cartpole same seed gives same trajectory... ");
+  Env *a = env_cartpole_create(arena);
+  Env *b = env_cartpole_create(arena);
+  a->reset(a, 777);
+  b->reset(b, 777);
+
+  b32 same = true;
+  for (u32 t = 0; t < 50; t++) {
+    real oa[4], ob[4];
+    a->observe(a, oa);
+    b->observe(b, ob);
+    for (u32 i = 0; i < 4; i++) {
+      if (oa[i] != ob[i]) same = false;
+    }
+    b32 da = false, ta = false, db = false, tb = false;
+    real ra = a->step(a, t % 2, &da, &ta);
+    real rb = b->step(b, t % 2, &db, &tb);
+    if (ra != rb || da != db || ta != tb) same = false;
+    if (da || ta) break;
+  }
+  ASSERT_TRUE(same, "identical seed => identical CartPole trajectories");
+  printf("OK\n");
+}
+
 static void test_cartpole_termination(mem_arena *arena) {
   printf("  cartpole termination on fall... ");
   Env *env = env_cartpole_create(arena);
-  prng_state rng;
-  prng_seed_r(&rng, 42, 1);
-  env->reset(env, &rng);
+  env->reset(env, 42);
 
   b32 done = false;
   b32 truncated = false;
@@ -74,14 +95,13 @@ static void test_snake_reset_and_step(mem_arena *arena) {
   ASSERT_TRUE(env->obs_dim == 108, "snake obs dim 108 (3x36 channels)");
   ASSERT_TRUE(env->act_dim == 4, "snake act dim 4 (left, right, up, down)");
 
-  prng_state rng;
-  prng_seed_r(&rng, 999, 1);
-  env->reset(env, &rng);
+  env->reset(env, 999);
 
-  f32 obs[108] = {0};
+  real obs[108] = {0};
   env->observe(env, obs);
 
-  // Check channel activations: channel 0 (head), channel 1 (food), channel 2 (body segments)
+  // Check channel activations: channel 0 (head), channel 1 (food), channel 2
+  // (body segments)
   u32 head_count = 0, food_count = 0, body_count = 0;
   for (u32 i = 0; i < 36; i++) {
     if (obs[i] == 1.0f) head_count++;
@@ -100,16 +120,25 @@ static void test_snake_reset_and_step(mem_arena *arena) {
   printf("OK\n");
 }
 
+static void test_snake_grid_validation(mem_arena *arena) {
+  printf("  snake grid validation... ");
+  // Not a perfect square.
+  ASSERT_TRUE(env_snake_create(arena, 35) == NULL, "non-square grid rejected");
+  // Larger than MAX_SNAKE_LEN (289 > 256).
+  ASSERT_TRUE(env_snake_create(arena, 289) == NULL, "oversized grid rejected");
+  ASSERT_TRUE(env_snake_create(arena, 0) == NULL, "zero grid rejected");
+  ASSERT_TRUE(env_snake_create(arena, 36) != NULL, "valid 6x6 grid accepted");
+  printf("OK\n");
+}
+
 static void test_snake_wall_death(mem_arena *arena) {
   printf("  snake wall collision... ");
   Env *env = env_snake_create(arena, 36);
-  prng_state rng;
-  prng_seed_r(&rng, 555, 1);
-  env->reset(env, &rng);
+  env->reset(env, 555);
 
   b32 done = false;
   b32 truncated = false;
-  f32 r = 0.0f;
+  real r = 0.0f;
   // Step left 5 times from middle (3), hits wall at x < 0
   for (u32 i = 0; i < 5; i++) {
     r = env->step(env, 0, &done, &truncated);
@@ -121,38 +150,77 @@ static void test_snake_wall_death(mem_arena *arena) {
   printf("OK\n");
 }
 
-typedef struct {
-  i32 x;
-  i32 y;
-} SnakeTestPos;
-
-typedef struct {
-  SnakeTestPos body[256];
-  u32 body_len;
-} SnakeTestState;
-
 static void test_snake_self_collision(mem_arena *arena) {
   printf("  snake self-collision... ");
   Env *env = env_snake_create(arena, 36);
-  prng_state rng;
-  prng_seed_r(&rng, 101, 1);
-  env->reset(env, &rng);
+  env->reset(env, 101);
 
-  SnakeTestState *s = (SnakeTestState *)env->state;
-  s->body_len = 5;
-  s->body[0] = (SnakeTestPos){2, 2};
-  s->body[1] = (SnakeTestPos){2, 1};
-  s->body[2] = (SnakeTestPos){3, 1};
-  s->body[3] = (SnakeTestPos){3, 2};
-  s->body[4] = (SnakeTestPos){3, 3};
+  // A 2x2 loop; moving DOWN from the head (2,2) enters the neck (2,1), which is
+  // NOT the vacating tail here (the tail is (3,3) after the extra segment), so
+  // this is a genuine self-collision.
+  const i32 xs[5] = {2, 2, 3, 3, 3};
+  const i32 ys[5] = {2, 1, 1, 2, 3};
+  snake_test_set_body(env, xs, ys, 5);
+  snake_test_set_food(env, 0, 0);
 
   b32 done = false;
   b32 truncated = false;
-
-  f32 r = env->step(env, 1, &done, &truncated);
+  real r = env->step(env, 3, &done, &truncated); // DOWN -> (2,1) = neck
   ASSERT_TRUE(done, "snake detects true self-collision");
   ASSERT_TRUE(!truncated, "self-collision is not timeout");
   ASSERT_TRUE(r == -10.0f, "self-collision penalty -10.0");
+  printf("OK\n");
+}
+
+static void test_snake_tail_vacate(mem_arena *arena) {
+  printf("  snake can follow its own tail... ");
+  Env *env = env_snake_create(arena, 36);
+  env->reset(env, 202);
+
+  // 2x2 loop: head (2,2), tail (2,1). Moving DOWN into the tail cell is legal
+  // because the tail vacates this step (no food eaten).
+  const i32 xs[4] = {2, 3, 3, 2};
+  const i32 ys[4] = {2, 2, 1, 1};
+  snake_test_set_body(env, xs, ys, 4);
+  snake_test_set_food(env, 0, 0); // ensure no growth
+
+  b32 done = false;
+  b32 truncated = false;
+  env->step(env, 3, &done, &truncated); // DOWN -> (2,1) = vacating tail
+  ASSERT_TRUE(!done, "moving into the vacating tail is legal");
+  printf("OK\n");
+}
+
+static void test_snake_eat_grows(mem_arena *arena) {
+  printf("  snake eating grows and respawns food... ");
+  Env *env = env_snake_create(arena, 36);
+  env->reset(env, 303);
+
+  const i32 xs[1] = {2};
+  const i32 ys[1] = {2};
+  snake_test_set_body(env, xs, ys, 1);
+  snake_test_set_food(env, 3, 2); // immediately to the right
+
+  real obs[108];
+  env->observe(env, obs);
+  real food_before = 0.0f;
+  for (u32 i = 0; i < 36; i++) food_before += obs[36 + i];
+
+  b32 done = false, truncated = false;
+  real r = env->step(env, 1, &done, &truncated); // RIGHT into food
+
+  ASSERT_TRUE(r == 20.0f, "food reward +20");
+  ASSERT_TRUE(!done, "not done after eating");
+
+  env->observe(env, obs);
+  u32 head_count = 0, body_count = 0;
+  for (u32 i = 0; i < 36; i++) {
+    if (obs[i] == 1.0f) head_count++;
+    if (obs[72 + i] == 1.0f) body_count++;
+  }
+  ASSERT_TRUE(head_count == 1, "head still present");
+  ASSERT_TRUE(body_count == 1, "body grew to 1 segment after eating");
+  ASSERT_TRUE(food_before == 1.0f, "food present before eating");
   printf("OK\n");
 }
 
@@ -161,10 +229,14 @@ int main(void) {
   printf("\n=== Environment Interface Unit Tests ===\n\n");
 
   test_cartpole_reset_and_bounds(arena);
+  test_cartpole_determinism(arena);
   test_cartpole_termination(arena);
   test_snake_reset_and_step(arena);
+  test_snake_grid_validation(arena);
   test_snake_wall_death(arena);
   test_snake_self_collision(arena);
+  test_snake_tail_vacate(arena);
+  test_snake_eat_grows(arena);
 
   printf("\n---\nPassed: %u  Failed: %u\n\n", tests_passed, tests_failed);
   arena_destroy(arena);

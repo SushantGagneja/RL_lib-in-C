@@ -11,4 +11,12 @@
 // max_steps: 100
 Env *env_snake_create(mem_arena *arena, u32 grid_size);
 
+// Test/debug helper. Overwrites the snake body with `len` segments, given head
+// first as parallel (x, y) arrays. Lets tests construct positions without
+// duplicating the private SnakeState layout.
+void snake_test_set_body(Env *e, const i32 *xs, const i32 *ys, u32 len);
+
+// Test/debug helper. Places the food at (x, y).
+void snake_test_set_food(Env *e, i32 x, i32 y);
+
 #endif // ENVS_SNAKE_H

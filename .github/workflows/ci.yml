@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  # Build and run the full test suite (`make test` also builds and runs the
+  # f64 gradient check) with the strict warning set promoted to errors.
+  test:
+    name: ${{ matrix.os }} / ${{ matrix.cc }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            cc: gcc
+          - os: ubuntu-latest
+            cc: clang
+          - os: macos-latest
+            cc: clang
+    env:
+      CC: ${{ matrix.cc }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and test (warnings as errors)
+        run: make ERR=1 test
+
+  # AddressSanitizer + UndefinedBehaviorSanitizer run over every test binary.
+  sanitizers:
+    name: ASAN/UBSAN (ubuntu-latest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Sanitizer build and tests
+        run: make asan

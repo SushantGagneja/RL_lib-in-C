@@ -1,14 +1,17 @@
 /**
  * bench.c — Multi-seed benchmark harness for cRL.
  *
- * Evaluates Random, Greedy-Heuristic, and Trained policies on CartPole-v1
- * and Snake. Every number in the README benchmark table must come from
- * running this binary.
+ * Evaluates Random, a stronger Greedy baseline, and a Trained policy on
+ * CartPole-v1 and Snake, using identical evaluation seeds for every policy so
+ * the comparison is apples-to-apples. Statistics use Welford's method in f64
+ * and report the sample (n-1) standard deviation.
+ *
+ * Output is written to bench_results.md and echoed to stdout.
  *
  * Usage:
- *   ./bench                  # Run all benchmarks
- *   ./bench cartpole         # CartPole only
- *   ./bench snake            # Snake only
+ *   ./crl_bench                  # both environments
+ *   ./crl_bench cartpole         # CartPole only
+ *   ./crl_bench snake            # Snake only
  */
 
 #include "arena.h"
@@ -17,126 +20,218 @@
 #include "nn.h"
 #include "rl.h"
 #include <math.h>
+#include <stdarg.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #define NUM_SEEDS 5
 #define EVAL_EPISODES 100
 
 static const u64 SEEDS[NUM_SEEDS] = {42, 100, 2024, 777, 9999};
 
-typedef struct {
-  f32 mean;
-  f32 std;
-} Stat;
+static FILE *g_out = NULL;
 
-static Stat compute_stat(const f32 *vals, u32 n) {
-  f32 sum = 0.0f, sq = 0.0f;
-  for (u32 i = 0; i < n; i++) {
-    sum += vals[i];
-    sq += vals[i] * vals[i];
+// Prints to stdout and, if open, to the markdown results file.
+static void emit(const char *fmt, ...) {
+  va_list args;
+  va_start(args, fmt);
+  vprintf(fmt, args);
+  va_end(args);
+  if (g_out != NULL) {
+    va_start(args, fmt);
+    vfprintf(g_out, fmt, args);
+    va_end(args);
   }
-  f32 mean = sum / (f32)n;
-  f32 var = sq / (f32)n - mean * mean;
-  return (Stat){.mean = mean, .std = sqrtf(var > 0.0f ? var : 0.0f)};
 }
 
-/* ── Random policy baseline ───────────────────────────────────────── */
+typedef struct {
+  double mean;
+  double std; // sample (n-1) std
+  double worst;
+  double best;
+} Stat;
 
-static f32 eval_random(Env *env, prng_state *rng, u32 episodes) {
-  f32 total = 0.0f;
-  for (u32 ep = 0; ep < episodes; ep++) {
-    env->reset(env, rng);
+// Welford's online algorithm in double: numerically stable and returns the
+// sample standard deviation (n-1), unlike the naive E[x^2]-mean^2 in real.
+static Stat compute_stat(const double *v, u32 n) {
+  double mean = 0.0, m2 = 0.0;
+  double worst = v[0], best = v[0];
+  u32 count = 0;
+  for (u32 i = 0; i < n; i++) {
+    count++;
+    double d = v[i] - mean;
+    mean += d / (double)count;
+    m2 += d * (v[i] - mean);
+    if (v[i] < worst) worst = v[i];
+    if (v[i] > best) best = v[i];
+  }
+  double std = (count > 1) ? sqrt(m2 / (double)(count - 1)) : 0.0;
+  return (Stat){.mean = mean, .std = std, .worst = worst, .best = best};
+}
+
+// Identical per-episode start seeds for every policy.
+static void make_eval_seeds(u64 *seeds, u32 n, u64 base) {
+  prng_state r;
+  prng_seed_r(&r, base, 11);
+  for (u32 i = 0; i < n; i++) {
+    u64 hi = prng_rand_r(&r);
+    u64 lo = prng_rand_r(&r);
+    seeds[i] = (hi << 32) ^ lo;
+  }
+}
+
+/* ── Random baseline ──────────────────────────────────────────────── */
+
+static double eval_random(Env *env, const u64 *seeds, u32 n) {
+  double total = 0.0;
+  for (u32 ep = 0; ep < n; ep++) {
+    env->reset(env, seeds[ep]);
+    prng_state r;
+    prng_seed_r(&r, seeds[ep] ^ 0xdeadbeefULL, 1);
     for (u32 t = 0; t < env->max_steps; t++) {
-      u32 act = prng_randn_r(rng, env->act_dim);
+      u32 act = prng_range_r(&r, env->act_dim);
       b32 done = false, trunc = false;
       total += env->step(env, act, &done, &trunc);
       if (done || trunc) break;
     }
   }
-  return total / (f32)episodes;
+  return total / (double)n;
 }
 
-/* ── Greedy heuristic baseline for CartPole ────────────────────────  */
+/* ── Greedy CartPole baseline (PD controller) ─────────────────────── */
 
-static f32 eval_cartpole_greedy(Env *env, prng_state *rng, u32 episodes) {
-  f32 total = 0.0f;
-  f32 obs[4];
-  for (u32 ep = 0; ep < episodes; ep++) {
-    env->reset(env, rng);
+static double eval_cartpole_greedy(Env *env, const u64 *seeds, u32 n) {
+  double total = 0.0;
+  real obs[4];
+  for (u32 ep = 0; ep < n; ep++) {
+    env->reset(env, seeds[ep]);
     for (u32 t = 0; t < env->max_steps; t++) {
       env->observe(env, obs);
-      // PD controller: push right if angle + angular_vel > 0
       u32 act = (obs[2] + obs[3] > 0.0f) ? 1 : 0;
       b32 done = false, trunc = false;
       total += env->step(env, act, &done, &trunc);
       if (done || trunc) break;
     }
   }
-  return total / (f32)episodes;
+  return total / (double)n;
 }
 
-/* ── Greedy heuristic baseline for Snake ──────────────────────────  */
+/* ── Greedy Snake baseline (BFS to food, avoiding body/walls) ─────── */
 
-static f32 eval_snake_greedy(Env *env, prng_state *rng, u32 episodes) {
-  f32 total = 0.0f;
-  u32 grid_size = env->obs_dim / 3; // obs_dim = 3 * grid_size
-  u32 side = (u32)sqrtf((f32)grid_size);
-  f32 *obs = malloc(sizeof(f32) * env->obs_dim);
+// Action encoding matches envs/snake.c: LEFT=0, RIGHT=1, UP=2, DOWN=3
+// (UP increases y, DOWN decreases y).
+static u32 snake_greedy_action(const real *obs, u32 grid, u32 side) {
+  if (grid > 256) return 0;
 
-  for (u32 ep = 0; ep < episodes; ep++) {
-    env->reset(env, rng);
+  i32 hx = -1, hy = -1, fx = -1, fy = -1;
+  for (u32 i = 0; i < grid; i++) {
+    if (obs[i] == 1.0f) {
+      hx = (i32)(i % side);
+      hy = (i32)(i / side);
+    }
+    if (obs[grid + i] == 1.0f) {
+      fx = (i32)(i % side);
+      fy = (i32)(i / side);
+    }
+  }
+  if (hx < 0 || fx < 0) return 0;
+
+  bool blocked[256];
+  for (u32 i = 0; i < grid; i++) blocked[i] = (obs[2 * grid + i] == 1.0f);
+  i32 h_idx = hy * (i32)side + hx;
+  blocked[h_idx] = false; // the head is the start, not an obstacle
+
+  static const i32 DX[4] = {-1, 1, 0, 0};
+  static const i32 DY[4] = {0, 0, 1, -1};
+
+  i32 dist[256], par[256], q[256];
+  for (u32 i = 0; i < grid; i++) {
+    dist[i] = -1;
+    par[i] = -1;
+  }
+  u32 head_q = 0, tail_q = 0;
+  q[tail_q++] = h_idx;
+  dist[h_idx] = 0;
+  i32 food_idx = fy * (i32)side + fx;
+
+  while (head_q < tail_q) {
+    i32 cur = q[head_q++];
+    if (cur == food_idx) break;
+    i32 cx = cur % (i32)side, cy = cur / (i32)side;
+    for (u32 d = 0; d < 4; d++) {
+      i32 nx = cx + DX[d], ny = cy + DY[d];
+      if (nx < 0 || nx >= (i32)side || ny < 0 || ny >= (i32)side) continue;
+      i32 nidx = ny * (i32)side + nx;
+      if (dist[nidx] != -1) continue;
+      if (blocked[nidx] && nidx != food_idx) continue;
+      dist[nidx] = dist[cur] + 1;
+      par[nidx] = cur;
+      q[tail_q++] = nidx;
+    }
+  }
+
+  if (dist[food_idx] >= 0 && par[food_idx] >= 0) {
+    // Walk back to the first step away from the head.
+    i32 step = food_idx;
+    while (par[step] != h_idx && par[step] != -1) {
+      step = par[step];
+    }
+    i32 sx = step % (i32)side, sy = step / (i32)side;
+    if (sx > hx) return 1; // RIGHT
+    if (sx < hx) return 0; // LEFT
+    if (sy > hy) return 2; // UP
+    if (sy < hy) return 3; // DOWN
+    return 0;
+  }
+
+  // No path to food: take any safe move (avoid walls and body), else turn.
+  for (u32 d = 0; d < 4; d++) {
+    i32 nx = hx + DX[d], ny = hy + DY[d];
+    if (nx < 0 || nx >= (i32)side || ny < 0 || ny >= (i32)side) continue;
+    i32 nidx = ny * (i32)side + nx;
+    if (blocked[nidx]) continue;
+    if (d == 0) return 0;
+    if (d == 1) return 1;
+    if (d == 2) return 2;
+    return 3;
+  }
+  return 0;
+}
+
+static double eval_snake_greedy(Env *env, const u64 *seeds, u32 n) {
+  double total = 0.0;
+  u32 grid = env->obs_dim / 3;
+  u32 side = (u32)sqrt((double)grid);
+  real *obs = malloc(sizeof(real) * env->obs_dim);
+
+  for (u32 ep = 0; ep < n; ep++) {
+    env->reset(env, seeds[ep]);
     for (u32 t = 0; t < env->max_steps; t++) {
       env->observe(env, obs);
-
-      // Find head and food positions from one-hot channels
-      i32 hx = -1, hy = -1, fx = -1, fy = -1;
-      for (u32 i = 0; i < grid_size; i++) {
-        if (obs[i] == 1.0f) {
-          hx = (i32)(i % side);
-          hy = (i32)(i / side);
-        }
-        if (obs[grid_size + i] == 1.0f) {
-          fx = (i32)(i % side);
-          fy = (i32)(i / side);
-        }
-      }
-
-      // Step along axis of max food displacement
-      u32 act = 0;
-      if (hx >= 0 && fx >= 0) {
-        i32 dx = fx - hx;
-        i32 dy = fy - hy;
-        if (abs(dx) >= abs(dy)) {
-          act = (dx > 0) ? 1 : 0; // RIGHT : LEFT
-        } else {
-          act = (dy > 0) ? 2 : 3; // UP : DOWN
-        }
-      }
-
+      u32 act = snake_greedy_action(obs, grid, side);
       b32 done = false, trunc = false;
       total += env->step(env, act, &done, &trunc);
       if (done || trunc) break;
     }
   }
   free(obs);
-  return total / (f32)episodes;
+  return total / (double)n;
 }
 
-/* ── Trained policy evaluation ────────────────────────────────────  */
+/* ── Training ─────────────────────────────────────────────────────── */
 
-static f32 train_and_eval_cartpole(mem_arena *arena, u64 seed, u32 epochs) {
+static model_state *train_cartpole(mem_arena *arena, u64 seed, u32 epochs) {
   model_state *model = model_create(arena);
   Env *env = env_cartpole_create(arena);
-
   prng_state model_rng;
   prng_seed_r(&model_rng, seed, 1);
 
   const u32 hidden[] = {64, 64};
   nn_build_discrete_actor(arena, model, &model_rng, env->obs_dim, hidden, 2,
                           env->act_dim, 32);
-  model->forward_graph = build_graph(arena, model, model->output);
   model->cost_graph = build_graph(arena, model, model->cost);
 
   RLConfig cfg = {
@@ -150,26 +245,19 @@ static f32 train_and_eval_cartpole(mem_arena *arena, u64 seed, u32 epochs) {
       .max_grad_norm = 0.5f,
       .batch_size = 32,
   };
-
   rl_train_reinforce(env, model, &cfg, arena);
-
-  prng_state eval_rng;
-  prng_seed_r(&eval_rng, seed + 5000, 1);
-  RLEvalResult res = rl_evaluate(env, model, &eval_rng, EVAL_EPISODES, true);
-  return res.mean_reward;
+  return model;
 }
 
-static f32 train_and_eval_snake(mem_arena *arena, u64 seed, u32 epochs) {
+static model_state *train_snake(mem_arena *arena, u64 seed, u32 epochs) {
   model_state *model = model_create(arena);
   Env *env = env_snake_create(arena, 36);
-
   prng_state model_rng;
   prng_seed_r(&model_rng, seed, 1);
 
   const u32 hidden[] = {128, 128};
   nn_build_discrete_actor(arena, model, &model_rng, env->obs_dim, hidden, 2,
                           env->act_dim, 32);
-  model->forward_graph = build_graph(arena, model, model->output);
   model->cost_graph = build_graph(arena, model, model->cost);
 
   RLConfig cfg = {
@@ -183,104 +271,223 @@ static f32 train_and_eval_snake(mem_arena *arena, u64 seed, u32 epochs) {
       .max_grad_norm = 0.5f,
       .batch_size = 32,
   };
-
   rl_train_reinforce(env, model, &cfg, arena);
-
-  prng_state eval_rng;
-  prng_seed_r(&eval_rng, seed + 5000, 1);
-  RLEvalResult res = rl_evaluate(env, model, &eval_rng, EVAL_EPISODES, true);
-  return res.mean_reward;
+  return model;
 }
 
-/* ── Print helpers ────────────────────────────────────────────────  */
+/* ── Throughput micro-benchmarks ─────────────────────────────────── */
 
-static void print_row(const char *policy, Stat s) {
-  printf("| %-30s | %8.2f ± %5.2f |\n", policy, s.mean, s.std);
+static double now_seconds(void) {
+  return (double)clock() / (double)CLOCKS_PER_SEC;
 }
 
-static void print_table_header(const char *env_name) {
-  printf("\n╔══════════════════════════════════════════════════╗\n");
-  printf("║  %s Benchmark (%d seeds × %d episodes)  \n",
-         env_name, NUM_SEEDS, EVAL_EPISODES);
-  printf("╚══════════════════════════════════════════════════╝\n\n");
-  printf("| %-30s | %16s |\n", "Policy", "Return (mean±std)");
-  printf("|%s|%s|\n",
-         "--------------------------------", "------------------");
+// Environment stepping throughput with random actions (no rendering).
+static void bench_env_throughput(void) {
+  emit("\n=== Throughput ===\n");
+  emit("\n`Env.step()` throughput (random policy, single core, excludes "
+       "`observe()`):\n\n");
+  emit("| Environment | Steps/sec |\n|---|---|\n");
+
+  const char *names[2] = {"CartPole-v1", "Snake 6x6"};
+  for (u32 e = 0; e < 2; e++) {
+    mem_arena *arena = arena_create(GiB(1));
+    Env *env = (e == 0) ? env_cartpole_create(arena) : env_snake_create(arena, 36);
+    prng_state r;
+    prng_seed_r(&r, 12345, 7);
+    env->reset(env, 1);
+
+    const u64 target = 200000;
+    u64 steps = 0;
+    double t0 = now_seconds();
+    while (steps < target) {
+      u32 act = prng_range_r(&r, env->act_dim);
+      b32 done = false, trunc = false;
+      env->step(env, act, &done, &trunc);
+      if (done || trunc) env->reset(env, prng_rand_r(&r));
+      steps++;
+    }
+    double dt = now_seconds() - t0;
+    double rate = (double)steps / dt;
+    printf("  [throughput] %-12s %8.0f steps/sec\n", names[e], rate);
+    emit("| %s | %.0f |\n", names[e], rate);
+    arena_destroy(arena);
+  }
 }
 
-/* ── Main ─────────────────────────────────────────────────────────  */
+// Naive triple-loop GEMM used as the comparison point for the NN kernel.
+static void matmul_naive(matrix *out, const matrix *a, const matrix *b) {
+  for (u32 i = 0; i < out->rows; i++) {
+    for (u32 j = 0; j < out->cols; j++) {
+      real sum = 0.0f;
+      for (u32 k = 0; k < a->cols; k++) {
+        sum += a->data[i * a->cols + k] * b->data[k * b->cols + j];
+      }
+      out->data[i * out->cols + j] = sum;
+    }
+  }
+}
+
+static void bench_matmul_throughput(void) {
+  const u32 N = 256;
+  mem_arena *arena = arena_create(MiB(64));
+  matrix *a = mat_create(arena, N, N);
+  matrix *b = mat_create(arena, N, N);
+  matrix *c = mat_create(arena, N, N);
+  prng_seed(2024, 1);
+  mat_fill_rand(a, -1.0f, 1.0f);
+  mat_fill_rand(b, -1.0f, 1.0f);
+
+  const double flops_per_call = 2.0 * (double)N * N * N;
+  volatile real sink = 0.0f;
+
+  const u32 reps_lib = 200;
+  double t0 = now_seconds();
+  for (u32 i = 0; i < reps_lib; i++) {
+    mat_matmul(c, a, b, 1, 0, 0);
+    sink += c->data[0];
+  }
+  double dt_lib = now_seconds() - t0;
+  double gflops_lib = flops_per_call * reps_lib / dt_lib / 1e9;
+
+  const u32 reps_naive = 2;
+  t0 = now_seconds();
+  for (u32 i = 0; i < reps_naive; i++) {
+    matmul_naive(c, a, b);
+    sink += c->data[N - 1];
+  }
+  double dt_naive = now_seconds() - t0;
+  double gflops_naive = flops_per_call * reps_naive / dt_naive / 1e9;
+
+  emit("\nMatMul %ux%u (single core, -O3):\n\n", N, N);
+  emit("| Implementation | GFLOPS |\n|---|---|\n");
+  emit("| `mat_matmul` (NN kernel) | %.3f |\n", gflops_lib);
+  emit("| Naive triple loop | %.3f |\n", gflops_naive);
+  printf("  [throughput] matmul %ux%u kernel %.3f GFLOPS | naive %.3f GFLOPS\n",
+         N, N, gflops_lib, gflops_naive);
+  (void)sink;
+
+  arena_destroy(arena);
+}
+
+/* ── Main ─────────────────────────────────────────────────────────── */
 
 int main(int argc, char **argv) {
   b32 do_cartpole = true;
   b32 do_snake = true;
+  b32 do_throughput = true;
 
   if (argc > 1) {
     if (strcmp(argv[1], "cartpole") == 0) {
       do_snake = false;
+      do_throughput = false;
     } else if (strcmp(argv[1], "snake") == 0) {
       do_cartpole = false;
+      do_throughput = false;
+    } else if (strcmp(argv[1], "throughput") == 0) {
+      do_cartpole = false;
+      do_snake = false;
     }
+  }
+
+  g_out = fopen("bench_results.md", "w");
+  if (g_out != NULL) {
+    emit("# cRL benchmark results\n\n");
+    emit("Generated by `make bench`. %d seeds x %d eval episodes per policy.\n",
+         NUM_SEEDS, EVAL_EPISODES);
+    emit("Evaluation seeds are identical across policies; std is the sample "
+         "(n-1) standard deviation computed in f64.\n");
   }
 
   if (do_cartpole) {
-    print_table_header("CartPole-v1");
-
-    f32 random_vals[NUM_SEEDS], greedy_vals[NUM_SEEDS],
-        trained_vals[NUM_SEEDS];
-
+    double rnd[NUM_SEEDS], grd[NUM_SEEDS], tr_grd[NUM_SEEDS], tr_sto[NUM_SEEDS];
+    emit("\n=== CartPole-v1 ===\n");
     for (u32 s = 0; s < NUM_SEEDS; s++) {
       mem_arena *arena = arena_create(GiB(1));
       Env *env = env_cartpole_create(arena);
-      prng_state rng;
-      prng_seed_r(&rng, SEEDS[s], 1);
+      u64 eval_seeds[EVAL_EPISODES];
+      make_eval_seeds(eval_seeds, EVAL_EPISODES, SEEDS[s] + 5000);
 
-      random_vals[s] = eval_random(env, &rng, EVAL_EPISODES);
-      greedy_vals[s] = eval_cartpole_greedy(env, &rng, EVAL_EPISODES);
-      trained_vals[s] = train_and_eval_cartpole(arena, SEEDS[s], 50);
+      rnd[s] = eval_random(env, eval_seeds, EVAL_EPISODES);
+      grd[s] = eval_cartpole_greedy(env, eval_seeds, EVAL_EPISODES);
 
-      printf("  [seed %llu] Random: %.1f | Greedy: %.1f | Trained: %.1f\n",
-             (unsigned long long)SEEDS[s], random_vals[s], greedy_vals[s],
-             trained_vals[s]);
+      model_state *model = train_cartpole(arena, SEEDS[s], 50);
+      tr_grd[s] = rl_evaluate_seeded(env, model, eval_seeds, EVAL_EPISODES, true)
+                      .mean_reward;
+      tr_sto[s] =
+          rl_evaluate_seeded(env, model, eval_seeds, EVAL_EPISODES, false)
+              .mean_reward;
 
+      printf("  [seed %-4llu] Random: %6.1f | Greedy: %6.1f | Trained(greedy): "
+             "%6.1f | Trained(stoch): %6.1f\n",
+             (unsigned long long)SEEDS[s], rnd[s], grd[s], tr_grd[s], tr_sto[s]);
       arena_destroy(arena);
     }
 
-    printf("\n");
-    print_row("Random", compute_stat(random_vals, NUM_SEEDS));
-    print_row("Greedy (PD controller)", compute_stat(greedy_vals, NUM_SEEDS));
-    print_row("Trained (REINFORCE, 50ep)", compute_stat(trained_vals, NUM_SEEDS));
-    printf("\n");
+    emit("\n| Policy | Return (mean ± sample std) | Best seed | Worst seed |\n");
+    emit("|---|---|---|---|\n");
+    Stat a = compute_stat(rnd, NUM_SEEDS);
+    Stat b = compute_stat(grd, NUM_SEEDS);
+    Stat c = compute_stat(tr_grd, NUM_SEEDS);
+    Stat d = compute_stat(tr_sto, NUM_SEEDS);
+    emit("| Random | %.2f ± %.2f | %.2f | %.2f |\n", a.mean, a.std, a.best,
+         a.worst);
+    emit("| Greedy (PD controller) | %.2f ± %.2f | %.2f | %.2f |\n", b.mean,
+         b.std, b.best, b.worst);
+    emit("| **Trained (REINFORCE, greedy eval)** | %.2f ± %.2f | %.2f | %.2f |\n",
+         c.mean, c.std, c.best, c.worst);
+    emit("| Trained (REINFORCE, stochastic eval) | %.2f ± %.2f | %.2f | %.2f |\n",
+         d.mean, d.std, d.best, d.worst);
   }
 
   if (do_snake) {
-    print_table_header("Snake 6×6");
-
-    f32 random_vals[NUM_SEEDS], greedy_vals[NUM_SEEDS],
-        trained_vals[NUM_SEEDS];
-
+    double rnd[NUM_SEEDS], grd[NUM_SEEDS], tr_grd[NUM_SEEDS], tr_sto[NUM_SEEDS];
+    emit("\n=== Snake 6x6 ===\n");
     for (u32 s = 0; s < NUM_SEEDS; s++) {
       mem_arena *arena = arena_create(GiB(1));
       Env *env = env_snake_create(arena, 36);
-      prng_state rng;
-      prng_seed_r(&rng, SEEDS[s], 1);
+      u64 eval_seeds[EVAL_EPISODES];
+      make_eval_seeds(eval_seeds, EVAL_EPISODES, SEEDS[s] + 5000);
 
-      random_vals[s] = eval_random(env, &rng, EVAL_EPISODES);
-      greedy_vals[s] = eval_snake_greedy(env, &rng, EVAL_EPISODES);
-      trained_vals[s] = train_and_eval_snake(arena, SEEDS[s], 200);
+      rnd[s] = eval_random(env, eval_seeds, EVAL_EPISODES);
+      grd[s] = eval_snake_greedy(env, eval_seeds, EVAL_EPISODES);
 
-      printf("  [seed %llu] Random: %.1f | Greedy: %.1f | Trained: %.1f\n",
-             (unsigned long long)SEEDS[s], random_vals[s], greedy_vals[s],
-             trained_vals[s]);
+      model_state *model = train_snake(arena, SEEDS[s], 200);
+      tr_grd[s] = rl_evaluate_seeded(env, model, eval_seeds, EVAL_EPISODES, true)
+                      .mean_reward;
+      tr_sto[s] =
+          rl_evaluate_seeded(env, model, eval_seeds, EVAL_EPISODES, false)
+              .mean_reward;
 
+      printf("  [seed %-4llu] Random: %6.1f | Greedy(BFS): %6.1f | "
+             "Trained(greedy): %6.1f | Trained(stoch): %6.1f\n",
+             (unsigned long long)SEEDS[s], rnd[s], grd[s], tr_grd[s], tr_sto[s]);
       arena_destroy(arena);
     }
 
-    printf("\n");
-    print_row("Random", compute_stat(random_vals, NUM_SEEDS));
-    print_row("Greedy (food heuristic)", compute_stat(greedy_vals, NUM_SEEDS));
-    print_row("Trained (REINFORCE, 200ep)", compute_stat(trained_vals, NUM_SEEDS));
-    printf("\n");
+    emit("\n| Policy | Return (mean ± sample std) | Best seed | Worst seed |\n");
+    emit("|---|---|---|---|\n");
+    Stat a = compute_stat(rnd, NUM_SEEDS);
+    Stat b = compute_stat(grd, NUM_SEEDS);
+    Stat c = compute_stat(tr_grd, NUM_SEEDS);
+    Stat d = compute_stat(tr_sto, NUM_SEEDS);
+    emit("| Random | %.2f ± %.2f | %.2f | %.2f |\n", a.mean, a.std, a.best,
+         a.worst);
+    emit("| Greedy (BFS to food) | %.2f ± %.2f | %.2f | %.2f |\n", b.mean, b.std,
+         b.best, b.worst);
+    emit("| **Trained (REINFORCE, greedy eval)** | %.2f ± %.2f | %.2f | %.2f |\n",
+         c.mean, c.std, c.best, c.worst);
+    emit("| Trained (REINFORCE, stochastic eval) | %.2f ± %.2f | %.2f | %.2f |\n",
+         d.mean, d.std, d.best, d.worst);
   }
 
+  if (do_throughput) {
+    bench_env_throughput();
+    bench_matmul_throughput();
+  }
+
+  if (g_out != NULL) {
+    fclose(g_out);
+    printf("\nWrote bench_results.md\n");
+  }
   return 0;
 }

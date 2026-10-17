@@ -16,13 +16,22 @@
 /cRL
 /train_snake
 /train_cartpole
+/train_a2c
 /test_mat
 /test_gradcheck
+/test_gradcheck_double
 /test_envs
+/test_rl
 /crl_bench
 /exercise/arena
 /exercise/autograd
 /exercise/mat
+
+# Out-of-tree object trees (double-precision gradcheck build)
+/build/
+
+# Generated benchmark report
+/bench_results.md
 
 #  MNIST data files
 /*.mat

@@ -22,7 +22,6 @@ int main(int argc, char **argv) {
   const u32 hidden_dims[] = {128, 128};
   nn_build_discrete_actor(arena, model, &model_rng, env->obs_dim, hidden_dims, 2,
                           env->act_dim, 32);
-  model->forward_graph = build_graph(arena, model, model->output);
   model->cost_graph = build_graph(arena, model, model->cost);
 
   RLConfig cfg = {

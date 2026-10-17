@@ -1,6 +1,5 @@
 #include "snake.h"
 #include <math.h>
-#include <stdlib.h>
 #include <string.h>
 
 typedef enum {
@@ -17,6 +16,10 @@ typedef struct {
 
 #define MAX_SNAKE_LEN 256
 
+#define SNAKE_FOOD_REWARD 20.0f
+#define SNAKE_DEATH_REWARD -10.0f
+#define SNAKE_WIN_REWARD 100.0f
+
 typedef struct {
   SnakePos body[MAX_SNAKE_LEN];
   u32 body_len;
@@ -28,15 +31,15 @@ typedef struct {
   u32 steps;
   u32 max_steps;
   u32 foods_eaten;
-  SnakeAction last_action;
+  b32 won;
 
-  prng_state *rng;
+  prng_state rng; // owned by the environment, seeded in reset()
 } SnakeState;
 
 static SnakePos random_food_pos(prng_state *rng, u32 cols, u32 rows) {
   return (SnakePos){
-      .x = (i32)prng_randn_r(rng, cols),
-      .y = (i32)prng_randn_r(rng, rows),
+      .x = (i32)prng_range_r(rng, cols),
+      .y = (i32)prng_range_r(rng, rows),
   };
 }
 
@@ -50,41 +53,30 @@ static b32 is_body_at(const SnakeState *s, i32 x, i32 y) {
 }
 
 static void respawn_food(SnakeState *s) {
-  if (s->rng == NULL) return;
   u32 attempts = 0;
   do {
-    s->food = random_food_pos(s->rng, s->cols, s->rows);
+    s->food = random_food_pos(&s->rng, s->cols, s->rows);
     attempts++;
   } while (is_body_at(s, s->food.x, s->food.y) && attempts < 100);
 }
 
-static void snake_reset(Env *e, prng_state *rng) {
+static void snake_reset(Env *e, u64 seed) {
   SnakeState *s = (SnakeState *)e->state;
-  s->rng = rng;
+  prng_seed_r(&s->rng, seed, 1);
 
   s->body_len = 1;
   s->body[0] = (SnakePos){.x = (i32)(s->cols / 2), .y = (i32)(s->rows / 2)};
 
-  respawn_food(s);
-
   s->steps = 0;
   s->foods_eaten = 0;
-  s->last_action = SNAKE_RIGHT;
+  s->won = false;
+
+  respawn_food(s);
 }
 
-static f32 snake_step(Env *e, u32 action, b32 *done, b32 *truncated) {
+static real snake_step(Env *e, u32 action, b32 *done, b32 *truncated) {
   SnakeState *s = (SnakeState *)e->state;
   SnakeAction act = (SnakeAction)(action % 4);
-
-  // Prevent instant 180-degree reversal into own neck if length > 1
-  if (s->body_len > 1) {
-    if ((act == SNAKE_LEFT && s->last_action == SNAKE_RIGHT) ||
-        (act == SNAKE_RIGHT && s->last_action == SNAKE_LEFT) ||
-        (act == SNAKE_UP && s->last_action == SNAKE_DOWN) ||
-        (act == SNAKE_DOWN && s->last_action == SNAKE_UP)) {
-      act = s->last_action;
-    }
-  }
 
   SnakePos new_head = s->body[0];
   if (act == SNAKE_LEFT) {
@@ -96,62 +88,66 @@ static f32 snake_step(Env *e, u32 action, b32 *done, b32 *truncated) {
   } else if (act == SNAKE_DOWN) {
     new_head.y -= 1;
   }
-  s->last_action = act;
   s->steps++;
 
-  // 1. Wall collision check
+  *done = false;
+  *truncated = false;
+
+  // 1. Wall collision.
   b32 hit_wall = (new_head.x < 0 || new_head.x >= (i32)s->cols ||
                   new_head.y < 0 || new_head.y >= (i32)s->rows);
   if (hit_wall) {
     *done = true;
-    *truncated = false;
-    return -10.0f;
+    return SNAKE_DEATH_REWARD;
   }
 
-  // 2. Self collision check (head collides with any existing body segment)
-  b32 hit_self = false;
-  for (u32 i = 0; i < s->body_len; i++) {
+  // 2. Self collision. The tail cell (body[body_len-1]) moves away this step
+  // unless the snake is about to eat, so moving into it is legal.
+  b32 ate_food = (new_head.x == s->food.x && new_head.y == s->food.y);
+  u32 occupied = s->body_len;
+  if (!ate_food && occupied > 0) {
+    occupied -= 1; // exclude the vacating tail
+  }
+  for (u32 i = 0; i < occupied; i++) {
     if (s->body[i].x == new_head.x && s->body[i].y == new_head.y) {
-      hit_self = true;
-      break;
+      *done = true;
+      return SNAKE_DEATH_REWARD;
     }
   }
-  if (hit_self) {
-    *done = true;
-    *truncated = false;
-    return -10.0f;
-  }
 
-  // 3. Move body
-  b32 ate_food = (new_head.x == s->food.x && new_head.y == s->food.y);
-  f32 reward = 0.0f;
-
+  // 3. Move the body forward.
+  real reward = 0.0f;
   if (ate_food) {
-    reward += 20.0f;
+    reward += SNAKE_FOOD_REWARD;
     s->foods_eaten++;
     if (s->body_len < MAX_SNAKE_LEN) {
       s->body_len++;
     }
   }
 
-  // Shift body segments backwards
   for (u32 i = s->body_len - 1; i > 0; i--) {
     s->body[i] = s->body[i - 1];
   }
   s->body[0] = new_head;
 
+  // 4. Win when the snake fills the whole board.
+  if (ate_food && s->body_len >= s->grid_size) {
+    s->won = true;
+    *done = true;
+    return reward + SNAKE_WIN_REWARD;
+  }
+
   if (ate_food) {
     respawn_food(s);
   }
 
-  *done = false;
   *truncated = (s->steps >= s->max_steps);
   return reward;
 }
 
-static void snake_observe(Env *e, f32 *obs_out) {
+static void snake_observe(Env *e, real *obs_out) {
   SnakeState *s = (SnakeState *)e->state;
-  memset(obs_out, 0, sizeof(f32) * e->obs_dim);
+  memset(obs_out, 0, sizeof(real) * e->obs_dim);
 
   // Channel 0: Head position
   if (s->body[0].x >= 0 && s->body[0].x < (i32)s->cols &&
@@ -181,8 +177,26 @@ static void snake_destroy(Env *e) {
   (void)e;
 }
 
+void snake_test_set_body(Env *e, const i32 *xs, const i32 *ys, u32 len) {
+  SnakeState *s = (SnakeState *)e->state;
+  if (len > MAX_SNAKE_LEN) len = MAX_SNAKE_LEN;
+  s->body_len = len;
+  for (u32 i = 0; i < len; i++) {
+    s->body[i] = (SnakePos){.x = xs[i], .y = ys[i]};
+  }
+}
+
+void snake_test_set_food(Env *e, i32 x, i32 y) {
+  SnakeState *s = (SnakeState *)e->state;
+  s->food = (SnakePos){.x = x, .y = y};
+}
+
 Env *env_snake_create(mem_arena *arena, u32 grid_size) {
-  u32 side = (u32)sqrtf((f32)grid_size);
+  if (grid_size == 0 || grid_size > MAX_SNAKE_LEN) {
+    return NULL;
+  }
+
+  u32 side = (u32)real_sqrt((real)grid_size);
   if (side * side != grid_size) {
     return NULL;
   }
@@ -195,7 +209,7 @@ Env *env_snake_create(mem_arena *arena, u32 grid_size) {
   s->grid_size = grid_size;
   s->max_steps = 100;
   s->body_len = 1;
-  s->rng = NULL;
+  prng_seed_r(&s->rng, 0, 1);
 
   env->obs_dim = 3 * grid_size;
   env->act_dim = 4;

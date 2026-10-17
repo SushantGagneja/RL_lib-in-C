@@ -1,4 +1,5 @@
 #include "autograd.h"
+#include <string.h>
 
 static void var_relu_forward(Var *var);
 static void var_relu_backward(Var *var);
@@ -25,7 +26,7 @@ static b32 var_shape_matmul(Var *a, Var *b, u32 *rows, u32 *cols);
 static b32 var_shape_scalar(Var *a, Var *b, u32 *rows, u32 *cols);
 
 const VarType VAR_TYPE_RELU = {
-    .name = "relu",
+    .name = "mat_relu",
     .num_inputs = 1,
     .shape = var_shape_same,
     .forward = var_relu_forward,
@@ -41,7 +42,7 @@ const VarType VAR_TYPE_TANH = {
 };
 
 const VarType VAR_TYPE_SOFTMAX = {
-    .name = "softmax",
+    .name = "mat_softmax",
     .num_inputs = 1,
     .shape = var_shape_same,
     .forward = var_softmax_forward,
@@ -49,7 +50,7 @@ const VarType VAR_TYPE_SOFTMAX = {
 };
 
 const VarType VAR_TYPE_ADD = {
-    .name = "add",
+    .name = "mat_add",
     .num_inputs = 2,
     .shape = var_shape_broadcast,
     .forward = var_add_forward,
@@ -57,7 +58,7 @@ const VarType VAR_TYPE_ADD = {
 };
 
 const VarType VAR_TYPE_SUB = {
-    .name = "sub",
+    .name = "mat_sub",
     .num_inputs = 2,
     .shape = var_shape_broadcast,
     .forward = var_sub_forward,
@@ -65,7 +66,7 @@ const VarType VAR_TYPE_SUB = {
 };
 
 const VarType VAR_TYPE_MUL = {
-    .name = "mul",
+    .name = "mat_mul",
     .num_inputs = 2,
     .shape = var_shape_same,
     .forward = var_mul_forward,
@@ -73,7 +74,7 @@ const VarType VAR_TYPE_MUL = {
 };
 
 const VarType VAR_TYPE_MATMUL = {
-    .name = "matmul",
+    .name = "mat_matmul",
     .num_inputs = 2,
     .shape = var_shape_matmul,
     .forward = var_matmul_forward,
@@ -89,7 +90,7 @@ const VarType VAR_TYPE_MSE = {
 };
 
 const VarType VAR_TYPE_REINFORCE_LOSS = {
-    .name = "reinforce_loss",
+    .name = "mat_reinforce_loss",
     .num_inputs = 2,
     .shape = var_shape_same,
     .forward = var_reinforce_forward,
@@ -104,10 +105,10 @@ Var *var_create(mem_arena *arena, model_state *model, u32 rows, u32 cols,
   out->index = model->num_vars++;
   out->flags = flags;
   out->type = NULL;
-  out->val = create_matrix(arena, rows, cols);
+  out->val = mat_create(arena, rows, cols);
 
   if (flags & VAR_FLAG_REQUIRES_GRAD) {
-    out->grad = create_matrix(arena, rows, cols);
+    out->grad = mat_create(arena, rows, cols);
   }
 
   if (flags & VAR_FLAG_PARAMETER) {
@@ -262,94 +263,83 @@ Var *var_reinforce_loss(mem_arena *arena, model_state *model, Var *probs,
   return create_node(arena, model, &VAR_TYPE_REINFORCE_LOSS, probs, rt);
 }
 
-Graph build_graph(mem_arena *arena, model_state *model, Var *out_var) {
+// Iterative post-order DFS producing a topological order (every node appears
+// after all of its inputs). One frame per node is enough because a node is
+// pushed at most once, guarded by the `state` array.
+typedef struct {
+  Var *node;
+  u32 next_input;
+} DfsFrame;
+
+Graph build_graph_multi(mem_arena *arena, model_state *model, Var **roots,
+                        u32 num_roots) {
   Graph graph = {0};
-  if (arena == NULL || model == NULL || out_var == NULL ||
+  if (arena == NULL || model == NULL || roots == NULL || num_roots == 0 ||
       model->num_vars == 0) {
     fprintf(stderr,
-            "[cRL ERROR] build_graph failed: arena=%p model=%p out_var=%p "
-            "model->num_vars=%u\n",
-            (void *)arena, (void *)model, (void *)out_var,
+            "[cRL ERROR] build_graph failed: arena=%p model=%p roots=%p "
+            "num_roots=%u model->num_vars=%u\n",
+            (void *)arena, (void *)model, (void *)roots, num_roots,
             model ? model->num_vars : 0);
     return graph;
   }
 
-  b8 *visited = calloc(model->num_vars, sizeof(*visited));
-  Var **stack = malloc(sizeof(*stack) * model->num_vars);
-  Var **out = malloc(sizeof(*out) * model->num_vars);
+  u32 num_vars = model->num_vars;
+  u8 *state = PUSH_ARRAY(arena, u8, num_vars); // 0=unvisited, 1=on stack, 2=done
+  DfsFrame *stack = PUSH_ARRAY_UNINIT(arena, DfsFrame, num_vars);
+  Var **out = PUSH_ARRAY_UNINIT(arena, Var *, num_vars);
+  CRL_ASSERT(state != NULL && stack != NULL && out != NULL,
+             "Arena out of memory in build_graph");
 
-  if (visited == NULL || stack == NULL || out == NULL) {
-    fprintf(stderr, "[cRL ERROR] build_graph failed: allocation failure\n");
-    free(visited);
-    free(stack);
-    free(out);
-    return graph;
-  }
-
-  u32 stack_size = 0;
   u32 out_size = 0;
 
-  stack[stack_size++] = out_var;
+  for (u32 r = 0; r < num_roots; r++) {
+    Var *root = roots[r];
+    CRL_ASSERT(root != NULL, "build_graph: NULL root");
+    CRL_ASSERT(root->index < num_vars, "build_graph: root index out of range");
 
-  while (stack_size > 0) {
-    Var *cur = stack[--stack_size];
-
-    if (cur->index >= model->num_vars) {
-      continue;
+    if (state[root->index] == 2) {
+      continue; // already emitted from an earlier root
     }
 
-    if (visited[cur->index]) {
-      if (out_size < model->num_vars) {
-        out[out_size++] = cur;
-      }
-      continue;
-    }
+    u32 sp = 0;
+    stack[sp++] = (DfsFrame){root, 0};
+    state[root->index] = 1;
 
-    visited[cur->index] = true;
+    while (sp > 0) {
+      DfsFrame *frame = &stack[sp - 1];
+      Var *cur = frame->node;
+      u32 num_inputs = (cur->type != NULL) ? cur->type->num_inputs : 0;
 
-    if (stack_size < model->num_vars) {
-      stack[stack_size++] = cur;
-    }
-
-    u32 num_inputs = cur->type != NULL ? cur->type->num_inputs : 0;
-    for (u32 i = 0; i < num_inputs; i++) {
-      Var *input = cur->inputs[i];
-
-      if (input->index >= model->num_vars || visited[input->index]) {
+      if (frame->next_input < num_inputs) {
+        Var *input = cur->inputs[frame->next_input++];
+        if (input != NULL && state[input->index] == 0) {
+          state[input->index] = 1;
+          CRL_ASSERT(sp < num_vars, "build_graph: DFS stack overflow");
+          stack[sp++] = (DfsFrame){input, 0};
+        }
         continue;
       }
 
-      for (u32 j = 0; j < stack_size; j++) {
-        if (stack[j] == input) {
-          for (u32 k = j; k < stack_size - 1; k++) {
-            stack[k] = stack[k + 1];
-          }
-          stack_size--;
-        }
-      }
-
-      if (stack_size < model->num_vars) {
-        stack[stack_size++] = input;
-      }
+      state[cur->index] = 2;
+      CRL_ASSERT(out_size < num_vars, "build_graph: output overflow");
+      out[out_size++] = cur;
+      sp--;
     }
   }
 
-  if (out_size == 0) {
-    fprintf(stderr,
-            "[cRL ERROR] build_graph failed: zero reachable nodes from out_var\n");
-  }
+  CRL_ASSERT(out_size > 0, "build_graph: zero reachable nodes");
 
   graph.vars = PUSH_ARRAY_UNINIT(arena, Var *, out_size);
-  if (graph.vars != NULL) {
-    graph.size = out_size;
-    memcpy(graph.vars, out, sizeof(*out) * out_size);
-  }
-
-  free(visited);
-  free(stack);
-  free(out);
+  CRL_ASSERT(graph.vars != NULL, "Arena out of memory in build_graph");
+  memcpy(graph.vars, out, sizeof(Var *) * out_size);
+  graph.size = out_size;
 
   return graph;
+}
+
+Graph build_graph(mem_arena *arena, model_state *model, Var *out_var) {
+  return build_graph_multi(arena, model, &out_var, 1);
 }
 
 void forward_pass(Graph *graph) {
@@ -365,59 +355,74 @@ void forward_pass(Graph *graph) {
   }
 }
 
+void graph_zero_activation_grads(Graph *graph) {
+  if (graph == NULL || graph->size == 0) {
+    return;
+  }
+  for (u32 i = 0; i < graph->size; i++) {
+    Var *cur = graph->vars[i];
+    if ((cur->flags & VAR_FLAG_REQUIRES_GRAD) == 0) {
+      continue;
+    }
+    if (cur->flags & VAR_FLAG_PARAMETER) {
+      continue; // parameters accumulate, never cleared here
+    }
+    mat_clear(cur->grad);
+  }
+}
+
+void backward_pass_accumulate(Graph *graph) {
+  if (graph == NULL || graph->size == 0) {
+    return;
+  }
+  for (i32 i = (i32)graph->size - 1; i >= 0; i--) {
+    Var *cur = graph->vars[i];
+    if ((cur->flags & VAR_FLAG_REQUIRES_GRAD) == 0) {
+      continue;
+    }
+    if (cur->type != NULL && cur->type->backward != NULL) {
+      cur->type->backward(cur);
+    }
+  }
+}
+
 void backward_pass_from(Graph *graph, Var *loss_var, b32 seed_one) {
   if (graph == NULL || graph->size == 0) {
     return;
   }
 
+  // Clear every activation gradient except the seed node, whose gradient the
+  // caller may have already populated.
   for (u32 i = 0; i < graph->size; i++) {
     Var *cur = graph->vars[i];
-
     if ((cur->flags & VAR_FLAG_REQUIRES_GRAD) == 0) {
       continue;
     }
-
     if (cur->flags & VAR_FLAG_PARAMETER) {
       continue;
     }
-
     if (!seed_one && cur == loss_var) {
       continue;
     }
-
     mat_clear(cur->grad);
   }
 
   Var *root = (loss_var != NULL) ? loss_var : graph->vars[graph->size - 1];
-  i64 root_idx = -1;
+
+  b32 found = false;
   for (u32 i = 0; i < graph->size; i++) {
     if (graph->vars[i] == root) {
-      root_idx = (i64)i;
+      found = true;
       break;
     }
   }
-
-  if (root_idx < 0) {
-    fprintf(stderr,
-            "[cRL ERROR] backward_pass_from: specified loss_var not found in graph\n");
-    return;
-  }
+  CRL_ASSERT(found, "backward_pass_from: specified loss_var not in graph");
 
   if (seed_one && root->grad != NULL) {
     mat_fill(root->grad, 1.0f);
   }
 
-  for (i64 i = root_idx; i >= 0; i--) {
-    Var *cur = graph->vars[i];
-
-    if ((cur->flags & VAR_FLAG_REQUIRES_GRAD) == 0) {
-      continue;
-    }
-
-    if (cur->type != NULL && cur->type->backward != NULL) {
-      cur->type->backward(cur);
-    }
-  }
+  backward_pass_accumulate(graph);
 }
 
 void backward_pass(Graph *graph) {
@@ -431,71 +436,78 @@ static b32 var_requires_grad(Var *var) {
   return var != NULL && (var->flags & VAR_FLAG_REQUIRES_GRAD);
 }
 
-static void var_relu_forward(Var *var) { relu(var->val, var->inputs[0]->val); }
+static void var_relu_forward(Var *var) {
+  CRL_CHECK(mat_relu(var->val, var->inputs[0]->val));
+}
 
 static void var_relu_backward(Var *var) {
   Var *input = var->inputs[0];
   if (var_requires_grad(input)) {
-    relu_add_grad(input->grad, input->val, var->grad);
+    CRL_CHECK(mat_relu_add_grad(input->grad, input->val, var->grad));
   }
 }
 
-static void var_tanh_forward(Var *var) { tanh_act(var->val, var->inputs[0]->val); }
+static void var_tanh_forward(Var *var) {
+  CRL_CHECK(mat_tanh(var->val, var->inputs[0]->val));
+}
 
 static void var_tanh_backward(Var *var) {
   Var *input = var->inputs[0];
   if (var_requires_grad(input)) {
-    tanh_add_grad(input->grad, var->val, var->grad);
+    CRL_CHECK(mat_tanh_add_grad(input->grad, var->val, var->grad));
   }
 }
 
 static void var_softmax_forward(Var *var) {
-  softmax(var->val, var->inputs[0]->val);
+  CRL_CHECK(mat_softmax(var->val, var->inputs[0]->val));
 }
 
 static void var_softmax_backward(Var *var) {
   Var *input = var->inputs[0];
   if (var_requires_grad(input)) {
-    softmax_add_grad(input->grad, var->val, var->grad);
+    CRL_CHECK(mat_softmax_add_grad(input->grad, var->val, var->grad));
   }
 }
 
 static void var_add_forward(Var *var) {
-  add(var->val, var->inputs[0]->val, var->inputs[1]->val);
+  CRL_CHECK(mat_add(var->val, var->inputs[0]->val, var->inputs[1]->val));
 }
 
 static void var_add_backward(Var *var) {
   Var *a = var->inputs[0];
   Var *b = var->inputs[1];
-  add_broadcast_grad(var_requires_grad(a) ? a->grad : NULL,
-                     var_requires_grad(b) ? b->grad : NULL, var->grad);
+  CRL_CHECK(mat_add_broadcast_grad(var_requires_grad(a) ? a->grad : NULL,
+                                   var_requires_grad(b) ? b->grad : NULL,
+                                   var->grad));
 }
 
 static void var_sub_forward(Var *var) {
-  sub(var->val, var->inputs[0]->val, var->inputs[1]->val);
+  CRL_CHECK(mat_sub(var->val, var->inputs[0]->val, var->inputs[1]->val));
 }
 
 static void var_sub_backward(Var *var) {
   Var *a = var->inputs[0];
   Var *b = var->inputs[1];
-  sub_broadcast_grad(var_requires_grad(a) ? a->grad : NULL,
-                     var_requires_grad(b) ? b->grad : NULL, var->grad);
+  CRL_CHECK(mat_sub_broadcast_grad(var_requires_grad(a) ? a->grad : NULL,
+                                   var_requires_grad(b) ? b->grad : NULL,
+                                   var->grad));
 }
 
 static void var_mul_forward(Var *var) {
-  mul(var->val, var->inputs[0]->val, var->inputs[1]->val);
+  CRL_CHECK(mat_mul(var->val, var->inputs[0]->val, var->inputs[1]->val));
 }
 
 static void var_mul_backward(Var *var) {
   Var *a = var->inputs[0];
   Var *b = var->inputs[1];
-  mul_add_grad(var_requires_grad(a) ? a->grad : NULL,
-               var_requires_grad(b) ? b->grad : NULL,
-               a->val, b->val, var->grad);
+  CRL_CHECK(mat_mul_add_grad(var_requires_grad(a) ? a->grad : NULL,
+                             var_requires_grad(b) ? b->grad : NULL, a->val,
+                             b->val, var->grad));
 }
 
 static void var_matmul_forward(Var *var) {
-  matmul(var->val, var->inputs[0]->val, var->inputs[1]->val, 1, 0, 0);
+  CRL_CHECK(
+      mat_matmul(var->val, var->inputs[0]->val, var->inputs[1]->val, 1, 0, 0));
 }
 
 static void var_matmul_backward(Var *var) {
@@ -503,28 +515,29 @@ static void var_matmul_backward(Var *var) {
   Var *b = var->inputs[1];
 
   if (var_requires_grad(a)) {
-    matmul(a->grad, var->grad, b->val, 0, 0, 1);
+    CRL_CHECK(mat_matmul(a->grad, var->grad, b->val, 0, 0, 1));
   }
 
   if (var_requires_grad(b)) {
-    matmul(b->grad, a->val, var->grad, 0, 1, 0);
+    CRL_CHECK(mat_matmul(b->grad, a->val, var->grad, 0, 1, 0));
   }
 }
 
 static void var_mse_forward(Var *var) {
-  mse_loss(var->val, var->inputs[0]->val, var->inputs[1]->val);
+  CRL_CHECK(mat_mse_loss(var->val, var->inputs[0]->val, var->inputs[1]->val));
 }
 
 static void var_mse_backward(Var *var) {
   Var *pred = var->inputs[0];
   Var *target = var->inputs[1];
   if (var_requires_grad(pred)) {
-    mse_add_grad(pred->grad, pred->val, target->val, var->grad);
+    CRL_CHECK(mat_mse_add_grad(pred->grad, pred->val, target->val, var->grad));
   }
 }
 
 static void var_reinforce_forward(Var *var) {
-  reinforce_loss(var->val, var->inputs[0]->val, var->inputs[1]->val);
+  CRL_CHECK(mat_reinforce_loss(var->val, var->inputs[0]->val,
+                               var->inputs[1]->val));
 }
 
 static void var_reinforce_backward(Var *var) {
@@ -532,7 +545,8 @@ static void var_reinforce_backward(Var *var) {
   Var *rt = var->inputs[1];
 
   if (var_requires_grad(probs)) {
-    reinforce_add_grad(probs->grad, probs->val, rt->val, var->grad);
+    CRL_CHECK(
+        mat_reinforce_add_grad(probs->grad, probs->val, rt->val, var->grad));
   }
 }
 

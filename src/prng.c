@@ -20,21 +20,21 @@ void prng_seed(u64 initstate, u64 initseq) {
 u32 prng_rand_r(prng_state *rng) {
   u64 oldstate = rng->state;
   rng->state = oldstate * 6364136223846793005ULL + rng->inc;
-  u32 xorshifted = ((oldstate >> 18u) ^ oldstate) >> 27u;
+  u32 xorshifted = (u32)(((oldstate >> 18u) ^ oldstate) >> 27u);
   u32 rot = oldstate >> 59u;
   return (xorshifted >> rot) | (xorshifted << ((-rot) & 31));
 }
 
 u32 prng_rand(void) { return prng_rand_r(&s_prng_state); }
 
-u32 prng_randn_r(prng_state *rng, u32 range) { 
-  return (u32)(((u64)prng_rand_r(rng) * range) >> 32); 
+u32 prng_range_r(prng_state *rng, u32 range) {
+  return (u32)(((u64)prng_rand_r(rng) * range) >> 32);
 }
 
-u32 randn(u32 range) { return prng_randn_r(&s_prng_state, range); }
+u32 prng_range(u32 range) { return prng_range_r(&s_prng_state, range); }
 
-f32 prng_randf_r(prng_state *rng) {
+real prng_randf_r(prng_state *rng) {
   return (prng_rand_r(rng) >> 8) * (1.0f / 16777216.0f);
 }
 
-f32 prng_randf(void) { return prng_randf_r(&s_prng_state); }
+real prng_randf(void) { return prng_randf_r(&s_prng_state); }

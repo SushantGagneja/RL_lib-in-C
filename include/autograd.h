@@ -93,7 +93,25 @@ Var *var_reinforce_loss(mem_arena *arena, model_state *model, Var *probs,
                         Var *rt);
 
 Graph build_graph(mem_arena *arena, model_state *model, Var *out_var);
+
+// Builds a single graph reachable from several roots. This is required when a
+// model has more than one output (e.g. an actor-critic with separate policy and
+// value heads): a single "fake" root such as `logits + value` is wrong because
+// the result of `add` is not the softmax/action distribution.
+Graph build_graph_multi(mem_arena *arena, model_state *model, Var **roots,
+                        u32 num_roots);
+
 void forward_pass(Graph *graph);
+
+// Zeroes every activation (non-parameter) gradient in the graph. Parameter
+// gradients are left untouched so they can accumulate across minibatches.
+void graph_zero_activation_grads(Graph *graph);
+
+// Reverse sweep only: runs every node's backward in reverse topological order
+// without clearing or seeding anything. The caller must have cleared activation
+// gradients and seeded the root gradient(s) first.
+void backward_pass_accumulate(Graph *graph);
+
 void backward_pass(Graph *graph);
 void backward_pass_from(Graph *graph, Var *loss_var, b32 seed_one);
 
