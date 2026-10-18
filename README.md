@@ -80,8 +80,10 @@ so there is nothing to attribute and no external license to carry.
   model's shapes or scalar width is rejected without mutating anything.
 - **Installable and packageable** — `make install` puts the headers in
   `include/rl_lib/`, builds `librl_lib.a` plus a versioned shared library, and
-  writes a `rl_lib.pc` pkg-config file. There is no CMake and no build-time
-  dependency beyond `make`, a C99 compiler, and `libm`.
+  writes a `rl_lib.pc` pkg-config file; the CMake project installs the same
+  layout (plus a `find_package` config) and is the path on Windows. Either way,
+  there is no build-time dependency beyond the compiler, `libm` and the build
+  system itself.
 
 ---
 
