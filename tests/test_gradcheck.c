@@ -649,6 +649,193 @@ static void test_gradcheck_ppo_policy(void) {
   arena_dispose(arena);
 }
 
+// ── Test: continuous (Gaussian) PPO surrogate ──────────────────────────
+// Checks the clipped-surrogate gradient with respect to both the raw mean-head
+// output and the learnable log standard deviation, on an asymmetric
+// two-dimensional action box. `min_action` and `max_action` are deliberately
+// different per dimension, so a per-dimension indexing mistake cannot cancel.
+static void test_gradcheck_gaussian_ppo(void) {
+  printf("\n[gradcheck: Gaussian PPO surrogate (B=4, act_dim=2)]\n");
+  Arena *arena = arena_new(MiB(16));
+
+  const u32 act_dim = 2;
+  const u32 batch = 4;
+
+  Mat *raw_mean = mat_new(arena, act_dim, batch);
+  Mat *log_std = mat_new(arena, act_dim, 1);
+  Mat *us = mat_new(arena, act_dim, batch);
+  Mat *mean_grad = mat_new(arena, act_dim, batch);
+  Mat *log_std_grad = mat_new(arena, act_dim, 1);
+  Mat *loss_out = mat_new(arena, 1, 1);
+  Mat *seed_grad = mat_new(arena, 1, 1);
+  RL_LIB_ASSERT(raw_mean && log_std && us && mean_grad && log_std_grad &&
+                    loss_out && seed_grad,
+                "arena out of memory in Gaussian PPO test");
+  seed_grad->data[0] = 1.0f;
+
+  const real min_action[2] = {-2.0f, -0.5f};
+  const real max_action[2] = {2.0f, 0.5f};
+  const real clip = 0.2f;
+  real advantages[4] = {1.1f, -0.6f, 0.9f, -1.4f};
+
+  rng_seed_g(24680, 13);
+  mat_rand(raw_mean, -1.5f, 1.5f);
+  log_std->data[0] = -0.3f;
+  log_std->data[1] = 0.4f;
+
+  // Pre-squash samples (the surrogate's density is a function of u, not of the
+  // action), well inside the mean clamp, so finite differences see a smooth
+  // function.
+  for (u32 b = 0; b < batch; b++) {
+    us->data[b] = (real)(-1.4 + 0.7 * (double)b);
+    us->data[(u64)batch + b] = (real)(-0.3 + 0.19 * (double)b);
+  }
+
+  Mat *logp = mat_new(arena, 1, batch);
+  RL_LIB_CHECK(mat_gaussian_logp(logp, raw_mean, log_std, us, min_action,
+                                 max_action, batch));
+
+  // Place each ratio clearly inside or outside the clip range by construction:
+  // ratio = exp(new_logp - old_logp), so an offset of +/-0.5 gives ~0.61 or
+  // ~1.65, far from the 0.8/1.2 boundaries -- finite differences then never
+  // straddle the kink. The advantage signs make two columns clip-binding (zero
+  // gradient) and two active (non-zero gradient).
+  const real offsets[4] = {-0.5f, 0.5f, 0.5f, -0.5f};
+  real old_logp[4];
+  for (u32 b = 0; b < batch; b++) {
+    old_logp[b] = logp->data[b] - offsets[b];
+  }
+
+  // The log-density must agree with the textbook form, evaluated independently
+  // in double precision: log N(u | mu, sigma) - log(half) - log(1 - tanh(u)^2).
+  // That pins down both the log(sech^2(u)) identity and the -log(half) Jacobian
+  // term of the squash.
+  u32 lp_bad = 0;
+  for (u32 b = 0; b < batch; b++) {
+    double acc = 0.0;
+    for (u32 d = 0; d < act_dim; d++) {
+      const double uu = (double)us->data[(u64)d * batch + b];
+      const double mu = (double)raw_mean->data[(u64)d * batch + b];
+      const double sigma = exp((double)log_std->data[d]);
+      const double half = 0.5 * ((double)max_action[d] - (double)min_action[d]);
+      const double e = (uu - mu) / sigma;
+      const double th = tanh(uu);
+      acc += -0.5 * e * e - log(sigma) - 0.5 * log(2.0 * 3.141592653589793) -
+             log(half) - log(1.0 - th * th);
+    }
+    if (fabs(acc - (double)logp->data[b]) > 1e-4 * (1.0 + fabs(acc))) {
+      lp_bad++;
+    }
+  }
+  printf("  log-density vs textbook form (4 columns)... %s (%u bad)\n",
+         lp_bad == 0 ? "OK" : "FAIL", lp_bad);
+
+  mat_zero(mean_grad);
+  mat_zero(log_std_grad);
+  RL_LIB_CHECK(mat_gaussian_ppo_loss(loss_out, raw_mean, log_std, us,
+                                     advantages, old_logp, min_action,
+                                     max_action, clip, batch));
+  RL_LIB_CHECK(mat_gaussian_ppo_add_grad(
+      mean_grad, log_std_grad, raw_mean, log_std, us, advantages, old_logp,
+      min_action, max_action, clip, batch, seed_grad));
+
+  const real h = GRAD_H;
+  const real tol = GRAD_TOL;
+  u32 failures = lp_bad;
+  u32 nonzero = 0;
+
+  for (u32 i = 0; i < act_dim * batch; i++) {
+    const real orig = raw_mean->data[i];
+
+    raw_mean->data[i] = orig + h;
+    RL_LIB_CHECK(mat_gaussian_ppo_loss(loss_out, raw_mean, log_std, us,
+                                       advantages, old_logp, min_action,
+                                       max_action, clip, batch));
+    const real up = loss_out->data[0];
+
+    raw_mean->data[i] = orig - h;
+    RL_LIB_CHECK(mat_gaussian_ppo_loss(loss_out, raw_mean, log_std, us,
+                                       advantages, old_logp, min_action,
+                                       max_action, clip, batch));
+    const real dn = loss_out->data[0];
+
+    raw_mean->data[i] = orig;
+
+    const real numeric = (up - dn) / ((real)2 * h);
+    const real analytic = mean_grad->data[i];
+    const real denom = real_fmax(
+        (real)1.0, real_fmax(real_fabs(numeric), real_fabs(analytic)));
+    const real rel = real_fabs(numeric - analytic) / denom;
+
+    if (real_fabs(analytic) > 1e-4f) nonzero++;
+    total_params_checked++;
+    if (rel < tol) {
+      params_ok++;
+    } else {
+      failures++;
+    }
+  }
+  printf("  raw mean (2x4, 8 elements, %u non-zero)... %s (%u failures)\n",
+         nonzero, failures == 0 ? "OK" : "FAIL", failures);
+
+  u32 lfailures = 0;
+  u32 lnz = 0;
+  for (u32 i = 0; i < act_dim; i++) {
+    const real orig = log_std->data[i];
+
+    log_std->data[i] = orig + h;
+    RL_LIB_CHECK(mat_gaussian_ppo_loss(loss_out, raw_mean, log_std, us,
+                                       advantages, old_logp, min_action,
+                                       max_action, clip, batch));
+    const real up = loss_out->data[0];
+
+    log_std->data[i] = orig - h;
+    RL_LIB_CHECK(mat_gaussian_ppo_loss(loss_out, raw_mean, log_std, us,
+                                       advantages, old_logp, min_action,
+                                       max_action, clip, batch));
+    const real dn = loss_out->data[0];
+
+    log_std->data[i] = orig;
+
+    const real numeric = (up - dn) / ((real)2 * h);
+    const real analytic = log_std_grad->data[i];
+    const real denom = real_fmax(
+        (real)1.0, real_fmax(real_fabs(numeric), real_fabs(analytic)));
+    const real rel = real_fabs(numeric - analytic) / denom;
+
+    if (real_fabs(analytic) > 1e-4f) lnz++;
+    total_params_checked++;
+    if (rel < tol) {
+      params_ok++;
+    } else {
+      lfailures++;
+    }
+  }
+  printf("  log_std (2x1, %u non-zero)... %s (%u failures)\n", lnz,
+         lfailures == 0 ? "OK" : "FAIL", lfailures);
+
+  // Gaussian entropy: d(mean H)/d(log_std_d) = 1.
+  Mat *ent = mat_new(arena, 1, 1);
+  mat_zero(log_std_grad);
+  RL_LIB_CHECK(mat_gaussian_entropy(ent, log_std));
+  RL_LIB_CHECK(mat_gaussian_entropy_add_grad(log_std_grad, log_std, seed_grad));
+  u32 efailures = 0;
+  for (u32 i = 0; i < act_dim; i++) {
+    if (real_fabs(log_std_grad->data[i] - (real)1.0) > tol) efailures++;
+    total_params_checked++;
+    if (efailures == 0) params_ok++;
+  }
+  printf("  entropy d/d(log_std)... %s (%u failures)\n",
+         efailures == 0 ? "OK" : "FAIL", efailures);
+
+  if (failures + lfailures + efailures == 0 && nonzero > 0 && lnz > 0)
+    tests_passed++;
+  else
+    tests_failed++;
+
+  arena_dispose(arena);
+}
+
 // ── Test: input gradient and mat_mul with both sides requiring grad ──────
 static void test_gradcheck_input_and_mul(void) {
   printf("\n[gradcheck: input gradient & mat_mul both sides]\n");
@@ -711,6 +898,7 @@ int main(void) {
   test_gradcheck_mse();
   test_gradcheck_fused_policy();
   test_gradcheck_ppo_policy();
+  test_gradcheck_gaussian_ppo();
   test_gradcheck_reinforce();
   test_gradcheck_input_and_mul();
 

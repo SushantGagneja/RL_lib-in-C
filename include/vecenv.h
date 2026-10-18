@@ -45,4 +45,15 @@ void vecenv_step(VecEnv *v, const u32 *actions);
 // Samples a uniform-random action for every env into actions_out.
 void vecenv_sample_uniform(VecEnv *v, Rng *rng, u32 *actions_out);
 
+// Continuous-action counterpart of vecenv_step: `actions` holds
+// num_envs * act_dim values, one act_dim-long action per sub-environment
+// (env-major, like `obs`). Auto-reset behaves exactly as in vecenv_step.
+void vecenv_step_continuous(VecEnv *v, const real *actions);
+
+// Copies the action bounds advertised by the sub-environments (act_dim entries
+// each) into *min_out / *max_out. Either output may be NULL. Only valid for
+// continuous-action vecenvs.
+void vecenv_action_bounds(const VecEnv *v, const real **min_out,
+                          const real **max_out);
+
 #endif // VECENV_H

@@ -81,6 +81,13 @@ typedef struct {
   Tensor *batch_value;
   Tensor *value;
 
+  // Continuous (diagonal-Gaussian) policy: the mean head and its batched view,
+  // plus a learnable log standard deviation that is a parameter *outside* every
+  // schedule (the Gaussian policy loss accumulates into its gradient directly).
+  Tensor *mean;
+  Tensor *batch_mean;
+  Tensor *log_std;
+
   Schedule fwd;
   Schedule train;
   Schedule loss_plan;

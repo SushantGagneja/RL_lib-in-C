@@ -426,6 +426,50 @@ static void test_null_args(void) {
   printf("OK\n");
 }
 
+// ── Continuous models round-trip their learnable log_std as well ──────
+
+static void test_continuous_round_trip(void) {
+  printf("  continuous model round-trip (log_std included)... ");
+
+  Arena *a1 = arena_new(MiB(8));
+  Arena *a2 = arena_new(MiB(8));
+  Rng rng;
+  rng_seed(&rng, 21, 1);
+
+  Net *src = net_new(a1);
+  Net *dst = net_new(a2);
+  const u32 hidden[2] = {8, 8};
+  // Re-seed between the two builds so both models start from the same weights.
+  rng_seed(&rng, 21, 1);
+  continuous_actor_critic_build(a1, src, &rng, 3, hidden, 2, 2, 4, -1.25f);
+  rng_seed(&rng, 21, 1);
+  continuous_actor_critic_build(a2, dst, &rng, 3, hidden, 2, 2, 4, -1.25f);
+
+  ASSERT_TRUE(src->n_params == dst->n_params, "matching parameter counts");
+  ASSERT_TRUE(params_identical(src, dst),
+              "identically seeded models start out identical");
+
+  // Move the learned log standard deviation away from its initial value: the
+  // point of this test is that it is a first-class parameter.
+  src->log_std->val->data[0] = REAL_C(0.75);
+  src->log_std->val->data[1] = REAL_C(-0.5);
+  ASSERT_TRUE(!params_identical(src, dst), "log_std makes them differ");
+
+  ASSERT_TRUE(net_save(src, SAVE_PATH), "net_save succeeds");
+  ASSERT_TRUE(net_load(dst, SAVE_PATH), "net_load succeeds");
+  ASSERT_TRUE(params_identical(src, dst),
+              "every parameter matches, log_std included");
+  ASSERT_TRUE(dst->log_std->val->data[0] == REAL_C(0.75),
+              "log_std value restored");
+  ASSERT_TRUE(dst->log_std->val->data[1] == REAL_C(-0.5),
+              "second log_std component restored");
+
+  remove(SAVE_PATH);
+  arena_dispose(a1);
+  arena_dispose(a2);
+  printf("OK\n");
+}
+
 int main(void) {
   printf("\n=== Checkpoint tests ===\n\n");
 
@@ -434,6 +478,7 @@ int main(void) {
   test_partial_files();
   test_failure_modes();
   test_null_args();
+  test_continuous_round_trip();
 
   printf("\n---\nTests: %u passed, %u failed\n\n", tests_passed, tests_failed);
   return tests_failed > 0 ? 1 : 0;

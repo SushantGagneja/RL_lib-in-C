@@ -18,6 +18,7 @@
 /train_cartpole
 /train_a2c
 /train_ppo
+/train_ppo_continuous
 /hello_rl
 /hello_rl.ckpt
 /test_mat

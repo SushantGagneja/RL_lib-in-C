@@ -47,13 +47,25 @@ so there is nothing to attribute and no external license to carry.
   architecture, so `net_set_batch_size` can rebuild the batched training graph
   for a new minibatch size without touching the weights — `TrainCfg.batch_size`
   is a runtime knob, not a build-time constant.
+- **Continuous (squashed Gaussian) policies** — `continuous_actor_critic_build`
+  adds a mean head plus a *learnable* log standard deviation (a first-class
+  parameter: the optimiser, gradient clipping and checkpointing all cover it).
+  Samples are squashed into the environment's action box with tanh and the
+  density carries the squash's log-determinant Jacobian, the construction SAC and
+  Stable-Baselines3 use. Per-dimension action bounds are supported. The density
+  is evaluated at the sampled pre-squash coordinate (returned by the sampler)
+  rather than recovered from the action, which removes the `atanh` singularity at
+  the bounds; the mean and `log_std` carry documented clamps so the density
+  cannot spike outside the box or divide by a collapsed sigma.
 - **Optimizers** — SGD and Adam with bias correction and global gradient-norm
   clipping (with a non-finite guard).
 - **Algorithms** — REINFORCE with mean-baseline normalization, Advantage
-  Actor-Critic (A2C) with GAE-λ and an entropy bonus, and PPO with the clipped
-  surrogate objective (multiple epochs of shuffled minibatches).
-- **Environments** — CartPole-like and grid Snake behind a common `Env`
-  interface (`reset(env, seed)`, `step`, `observe`, `clone`).
+  Actor-Critic (A2C) with GAE-λ and an entropy bonus, PPO with the clipped
+  surrogate objective (multiple epochs of shuffled minibatches), and continuous
+  PPO on the squashed Gaussian policy.
+- **Environments** — CartPole-like, grid Snake, and Pendulum-v1 behind a common
+  `Env` interface (`reset(env, seed)`, `step` or `step_continuous`, `observe`,
+  `clone`, plus the action bounds a continuous policy needs).
 - **Vectorized environments** (`VecEnv`) — N independent cloned envs stepped in
   lockstep with per-env auto-reset, terminal-observation capture for
   bootstrapping, and deterministic seeding. Used by the PPO trainer.
@@ -177,6 +189,37 @@ more sample-efficient than the REINFORCE baseline above, which is the expected
 result of on-policy data reuse. The Snake result is unchanged: PPO is not
 wired into the Snake benchmark.
 
+### Pendulum-v1 (continuous PPO, 8 envs × 128 steps, 1200 updates)
+
+`examples/train_ppo_continuous.c`, mean **undiscounted** episode return over 100
+greedy episodes after 1200 updates:
+
+| Seed | Greedy eval return | Last training update (stochastic) |
+|---|---|---|
+| 42 | -185.15 | -148.05 |
+| 7 | -197.74 | -147.83 |
+| 123 | -174.63 | -130.23 |
+
+A random policy scores about -1200, and a policy that never applies torque
+about -1000, so every seed lands in the "keep the pendulum near the bottom and
+damp it" regime rather than a perfect swing-up and balance. Read this as
+"stable and clearly learned", not "solved".
+
+Two knobs decide whether this reproduces:
+
+- **Learning rate.** Pendulum's good policies sit in a narrow basin and Adam
+  moves every parameter by roughly `lr` per minibatch. At `lr = 3e-4` with 10
+  epochs all three seeds peak near -150 around update 250 and then fall into the
+  do-nothing basin (-1200); `2e-4` still collapses seed 42. At `1e-4` with 5
+  epochs every seed stays between -130 and -240 for the whole run.
+- **Exploration.** `log_std`'s gradient is mean-zero noise once the sampled
+  actions stay inside the box, so `sigma` random-walks upward; a small entropy
+  bonus (`0.01`) keeps it in place. `gamma = 0.9` (not 0.99) keeps the value
+  targets small over the 200-step episodes, which the value head conditions on
+  much better.
+
+The same seed gives byte-identical evaluation returns at `-O2` and `-O3`.
+
 ---
 
 ## Build & test
@@ -202,6 +245,7 @@ make snake              # train Snake
 make cartpole           # train CartPole
 make a2c                # train CartPole with A2C
 make ppo                # train CartPole with PPO
+make ppo-continuous     # train Pendulum-v1 with continuous-action PPO
 make hello              # the minimal end-to-end example
 
 make bench              # multi-seed benchmarks -> bench_results.md
@@ -219,12 +263,12 @@ make clean
 
 | Suite | What it covers |
 |---|---|
-| `test_gradcheck` (f64) | 10 suites / 248 parameters vs central differences, `h = 1e-5`, tolerance `1e-6` |
+| `test_gradcheck` (f64) | 11 suites / 260 parameters vs central differences, `h = 1e-5`, tolerance `1e-6`; includes the Gaussian PPO surrogate and its log-density against an independent double-precision formula |
 | `test_mat` | 13 checks over MatMul (NN/NT/TN/TT), SIMD-vs-scalar agreement, softmax, ReLU, add/sub, broadcast add, mul/tanh/MSE |
-| `test_gradcheck` (f32) | the same 10 suites in the default build (looser tolerance) |
-| `test_envs` | 45 checks: CartPole bounds/termination/determinism; Snake reset, grid validation, wall/self collision, tail vacate, eating; VecEnv shape, determinism, independent clones, and auto-reset terminal-observation capture |
-| `test_rl` | 47 checks: GAE vs a hand-computed trajectory, one Adam step, grad clipping, actor-critic build, value-head learning, batched-vs-per-sample gradient equivalence, a parameter registry grown past 128 entries, rebuilding the batched graph for a new minibatch size (weights preserved, batch and single-sample inference agree), CartPole learning smoke tests for REINFORCE and PPO, and same-seed determinism for both |
-| `test_checkpoint` | 53 checks: byte-exact parameter round trips, bit-exact Adam-state resume, parameter-only and optimiser-only files, and rejection of missing, corrupt, truncated, wrong-width, wrongly-sized and wrongly-shaped files — each verified to leave the model untouched |
+| `test_gradcheck` (f32) | the same 11 suites in the default build (looser tolerance) |
+| `test_envs` | 175 checks: CartPole bounds/termination/determinism; Snake reset, grid validation, wall/self collision, tail vacate, eating; Pendulum reset, hand-computed Euler dynamics, torque clamp, speed cap, determinism, clone independence and 200-step truncation; VecEnv shape, determinism, independent clones, auto-reset terminal-observation capture, and vectorized continuous stepping with action bounds |
+| `test_rl` | 71 checks: GAE vs a hand-computed trajectory, one Adam step, grad clipping, actor-critic build, value-head learning, batched-vs-per-sample gradient equivalence, a parameter registry grown past 128 entries, rebuilding the batched graph for a new minibatch size (weights preserved, batch and single-sample inference agree), the continuous builder (per-dimension bounds, sampled `u`/squash round trip, `log_std` registered as a parameter and surviving a rebuild), CartPole learning smoke tests for REINFORCE and PPO with same-seed determinism, and a Pendulum continuous-PPO learning smoke test plus determinism |
+| `test_checkpoint` | 61 checks: byte-exact parameter round trips, bit-exact Adam-state resume, parameter-only and optimiser-only files, a continuous model round trip including `log_std`, and rejection of missing, corrupt, truncated, wrong-width, wrongly-sized and wrongly-shaped files — each verified to leave the model untouched |
 
 `make test-double` then rebuilds the library with `-DRL_LIB_USE_DOUBLE` and runs
 every one of those suites in f64, so the f64 path is not only exercised by the
@@ -235,23 +279,27 @@ Representative output:
 ```
 === Autograd gradient checks (f64) ===
   ...
+  [gradcheck: Gaussian PPO surrogate (B=4, act_dim=2)]
+  log-density vs textbook form (4 columns)... OK (0 bad)
+  ...
 ---
-Tests: 10 passed, 0 failed
-Parameters checked: 248/248 passed within tolerance
+Tests: 11 passed, 0 failed
+Parameters checked: 260/260 passed within tolerance
 
 --- test_mat ---
   SIMD path == scalar reference... (backend neon, max diff 1.43e-06) OK
 Passed: 13  Failed: 0
 
 --- test_envs ---
-Passed: 45  Failed: 0
+Passed: 175  Failed: 0
 
 --- test_rl ---
-Tests: 25 passed, 0 failed
+Tests: 71 passed, 0 failed
 
 --- test_checkpoint ---
   Adam state resumes a run exactly... OK
-Tests: 53 passed, 0 failed
+  continuous model round-trip (log_std included)... OK
+Tests: 61 passed, 0 failed
 ```
 
 ---
@@ -287,12 +335,14 @@ Tests: 53 passed, 0 failed
 │   └── rl.c                 # Rollout, REINFORCE, A2C, PPO/GAE, evaluation
 ├── envs/
 │   ├── snake.h / snake.c        # Grid Snake: 3-channel obs, 4 actions
-│   └── cartpole.h / cartpole.c  # CartPole-like physics
+│   ├── cartpole.h / cartpole.c  # CartPole-like physics
+│   └── pendulum.h / pendulum.c  # Pendulum-v1: continuous torque, max 200 steps
 ├── examples/
 │   ├── train_snake.c
 │   ├── train_cartpole.c
 │   ├── train_a2c.c
 │   ├── train_ppo.c
+│   ├── train_ppo_continuous.c   # Pendulum-v1 with a squashed Gaussian policy
 │   ├── hello_rl.c           # Smallest end-to-end program (also used by CI)
 │   └── bench.c              # Multi-seed harness + throughput micro-benchmarks
 ├── tests/
@@ -338,6 +388,13 @@ Tests: 53 passed, 0 failed
   library to f64 with `-DRL_LIB_USE_DOUBLE`; the gradient check uses this, and
   `make test-double` now runs every suite in f64 as well.
 - **Snake is not solved.** REINFORCE + Adam plateaus well below a BFS planner.
+- **Continuous PPO is stable, not solved.** Pendulum converges to -130..-240
+  (a random policy is about -1200), and the configuration is sensitive to the
+  learning rate — see the Pendulum section. The squashed-Gaussian policy also
+  clamps the mean to ±5 and `log_std` to [-6, 2] on read (documented constants in
+  `linalg.h`), which the textbook construction does not do, and the entropy bonus
+  uses the *pre-squash* Gaussian entropy because the squashed density's entropy
+  has no closed form.
 - **The arena is bump-only.** Nothing is reused within a run except through the
   `arena_mark`/`arena_rewind` temp scopes, and rebuilding a batched graph leaves
   its predecessor in the arena. `MAX_ARITY` is 2 because every operation in the
@@ -382,3 +439,22 @@ Tests: 53 passed, 0 failed
         auto-reset, terminal-observation capture, deterministic seeding.
   - [x] PPO with the clipped surrogate objective (multi-epoch shuffled
         minibatches, gradient-checked loss, `tests/test_rl.c`, `make ppo`).
+- [x] **Phase 6: Continuous actions**
+  - [x] Squashed-Gaussian policy: mean head + learnable `log_std`, per-dimension
+        action bounds, log-density from the sampled pre-squash coordinate, and a
+        gradient-checked PPO surrogate (`test_gradcheck`, f32 + f64) that is also
+        checked against the textbook density formula in double precision.
+  - [x] Pendulum-v1 behind the continuous part of the `Env` interface
+        (`step_continuous`, action bounds, 200-step truncation) plus
+        `vecenv_step_continuous` / `vecenv_action_bounds`.
+  - [x] `train_ppo_continuous` (truncation-aware GAE bootstrap, one optimiser step
+        per minibatch), `evaluate_continuous[_seeded]`, a learning smoke test in
+        `test_rl`, a checkpoint round trip, and `make ppo-continuous`
+        (Pendulum -175..-200 across three seeds over 1200 updates).
+
+### Remaining
+
+- [ ] Threaded `VecEnv` (C11 atomics barrier; macOS has no `pthread_barrier_t`).
+- [ ] SIMD completeness: f64 kernels, the TT case, k-blocking.
+- [ ] Snake parity attempt with PPO + `VecEnv`.
+- [ ] Windows/MSVC build via CMake.

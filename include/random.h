@@ -32,4 +32,7 @@ u32 rng_below_g(u32 range);
 real rng_unit(Rng *rng);
 real rng_unit_g(void);
 
+// Standard normal, via Box-Muller.
+real rng_normal(Rng *rng);
+
 #endif

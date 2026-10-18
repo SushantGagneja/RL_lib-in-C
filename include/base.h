@@ -44,6 +44,9 @@ typedef double real;
 #define real_pow pow
 #define real_fmax fmax
 #define real_fmin fmin
+#define real_fmod fmod
+#define real_atanh atanh
+#define real_log1p log1p
 #define REAL_EPS DBL_EPSILON
 #else
 typedef float real;
@@ -58,6 +61,9 @@ typedef float real;
 #define real_pow powf
 #define real_fmax fmaxf
 #define real_fmin fminf
+#define real_fmod fmodf
+#define real_atanh atanhf
+#define real_log1p log1pf
 #define REAL_EPS FLT_EPSILON
 #endif
 

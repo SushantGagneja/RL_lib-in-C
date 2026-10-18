@@ -58,6 +58,19 @@ real rng_unit(Rng *rng) {
   return (real)(rng_u64(rng) >> 11u) * (real)(1.0 / 9007199254740992.0);
 }
 
+real rng_normal(Rng *rng) {
+  // Box-Muller. rng_unit() returns [0, 1), so the log argument can be zero;
+  // redraw in that (vanishingly rare) case rather than returning an infinity.
+  real u = rng_unit(rng);
+  while (u <= (real)0) {
+    u = rng_unit(rng);
+  }
+  const real v = rng_unit(rng);
+  const real two_pi = (real)6.283185307179586476925286766559;
+  return real_sqrt((real)-2 * real_log(u)) *
+         real_cos(two_pi * v);
+}
+
 // Module-wide generator used by the convenience *_g entry points.
 static Rng s_rng = {{0x853C49E6748FEA9BULL, 0xDA3E39CB94B95BDBULL,
                      0x1BADB002C0FFEE00ULL, 0x0DDC0FFEE0ADD1E5ULL}};

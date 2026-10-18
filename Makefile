@@ -10,13 +10,14 @@ endif
 EXTRA_CFLAGS ?=
 CFLAGS = $(WARN) -Iinclude -I. $(EXTRA_CFLAGS)
 
-LIB_SRCS = src/memory.c src/random.c src/simd.c src/linalg.c src/graph.c src/layers.c src/optim.c src/checkpoint.c src/rl.c src/vecenv.c envs/snake.c envs/cartpole.c
+LIB_SRCS = src/memory.c src/random.c src/simd.c src/linalg.c src/graph.c src/layers.c src/optim.c src/checkpoint.c src/rl.c src/vecenv.c envs/snake.c envs/cartpole.c envs/pendulum.c
 LIB_OBJS = $(LIB_SRCS:.c=.o)
 
 TARGET_SNAKE = train_snake
 TARGET_CARTPOLE = train_cartpole
 TARGET_A2C = train_a2c
 TARGET_PPO = train_ppo
+TARGET_PPO_CONT = train_ppo_continuous
 TARGET_HELLO = hello_rl
 
 # ── Version and install layout ──────────────────────────────────────
@@ -57,14 +58,14 @@ SHARED_CFLAGS = $(WARN) -Iinclude -I. -O2 -fPIC $(EXTRA_CFLAGS)
 all: release
 
 release: CFLAGS += -O3
-release: clean $(TARGET_SNAKE) $(TARGET_CARTPOLE) $(TARGET_A2C) $(TARGET_PPO) $(TARGET_HELLO)
+release: clean $(TARGET_SNAKE) $(TARGET_CARTPOLE) $(TARGET_A2C) $(TARGET_PPO) $(TARGET_PPO_CONT) $(TARGET_HELLO)
 
 debug: CFLAGS += -g -fsanitize=undefined
-debug: clean $(TARGET_SNAKE) $(TARGET_CARTPOLE) $(TARGET_A2C) $(TARGET_PPO) $(TARGET_HELLO)
+debug: clean $(TARGET_SNAKE) $(TARGET_CARTPOLE) $(TARGET_A2C) $(TARGET_PPO) $(TARGET_PPO_CONT) $(TARGET_HELLO)
 
 # AddressSanitizer + UndefinedBehaviorSanitizer build of everything.
 asan: CFLAGS += -g -O1 -fsanitize=address,undefined -fno-omit-frame-pointer
-asan: clean $(TARGET_SNAKE) $(TARGET_CARTPOLE) $(TARGET_A2C) $(TARGET_PPO) test_mat test_gradcheck test_envs test_rl test_checkpoint
+asan: clean $(TARGET_SNAKE) $(TARGET_CARTPOLE) $(TARGET_A2C) $(TARGET_PPO) $(TARGET_PPO_CONT) test_mat test_gradcheck test_envs test_rl test_checkpoint
 	@echo ""
 	@echo "=== ASAN/UBSAN: running all tests ==="
 	./test_mat
@@ -83,6 +84,9 @@ $(TARGET_A2C): $(LIB_OBJS) examples/train_a2c.o
 	$(CC) $(CFLAGS) -o $@ $^ -lm
 
 $(TARGET_PPO): $(LIB_OBJS) examples/train_ppo.o
+	$(CC) $(CFLAGS) -o $@ $^ -lm
+
+$(TARGET_PPO_CONT): $(LIB_OBJS) examples/train_ppo_continuous.o
 	$(CC) $(CFLAGS) -o $@ $^ -lm
 
 $(TARGET_HELLO): $(LIB_OBJS) examples/hello_rl.o
@@ -226,6 +230,9 @@ a2c: release
 ppo: release
 	./$(TARGET_PPO)
 
+ppo-continuous: release
+	./$(TARGET_PPO_CONT)
+
 hello: $(TARGET_HELLO)
 	./$(TARGET_HELLO)
 
@@ -252,10 +259,10 @@ bench-throughput: $(BENCH_BIN)
 # ── Cleanup ─────────────────────────────────────────────────────────
 
 clean:
-	rm -f $(LIB_OBJS) examples/train_snake.o examples/train_cartpole.o examples/train_a2c.o examples/train_ppo.o examples/hello_rl.o examples/bench.o
-	rm -f $(TARGET_SNAKE) $(TARGET_CARTPOLE) $(TARGET_A2C) $(TARGET_PPO) $(TARGET_HELLO) $(TEST_BINS) $(BENCH_BIN)
+	rm -f $(LIB_OBJS) examples/train_snake.o examples/train_cartpole.o examples/train_a2c.o examples/train_ppo.o examples/train_ppo_continuous.o examples/hello_rl.o examples/bench.o
+	rm -f $(TARGET_SNAKE) $(TARGET_CARTPOLE) $(TARGET_A2C) $(TARGET_PPO) $(TARGET_PPO_CONT) $(TARGET_HELLO) $(TEST_BINS) $(BENCH_BIN)
 	rm -f $(TEST_GRAD_DOUBLE_BIN) $(LIB_STATIC) $(SHARED_REAL) $(SHARED_LINK) $(SHARED_EXTRA_LINKS) rl_lib.pc
 	rm -rf build
 
 .PHONY: all release debug asan test test-double gradcheck-double clean lib install uninstall \
-        snake cartpole a2c ppo hello bench bench-cartpole bench-snake bench-throughput
+        snake cartpole a2c ppo ppo-continuous hello bench bench-cartpole bench-snake bench-throughput

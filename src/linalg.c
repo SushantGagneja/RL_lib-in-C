@@ -931,6 +931,20 @@ static real ppo_clamp(real x, real lo, real hi) {
   return x < lo ? lo : (x > hi ? hi : x);
 }
 
+// Numerical guard on the importance ratio. exp() overflows f32 at ~88 nats, and
+// a single overflowing sample would poison the whole minibatch's gradient with
+// Inf, so the log-ratio is clamped before the exponential. A ratio beyond
+// e^+-20 is far outside PPO's trust region (the clip range is +-0.2), so the
+// clamp only ever engages on samples whose gradient the surrogate already
+// discounts.
+#define PPO_LOG_RATIO_MAX ((real)20)
+
+// exp(new_logp - old_logp) with the overflow guard applied.
+static real ppo_ratio(real new_logp, real old_logp) {
+  return real_exp(ppo_clamp(new_logp - old_logp, -PPO_LOG_RATIO_MAX,
+                            PPO_LOG_RATIO_MAX));
+}
+
 b32 mat_ppo_policy_loss(Mat *out, const Mat *logits, const u32 *actions,
                         const real *advantages, const real *old_logp,
                         real clip_eps, u32 batch_size) {
@@ -955,7 +969,7 @@ b32 mat_ppo_policy_loss(Mat *out, const Mat *logits, const u32 *actions,
     }
     const real lse = column_logsumexp(logits, b);
     const real new_logp = logits->data[(u64)chosen * batch_size + b] - lse;
-    const real ratio = real_exp(new_logp - old_logp[b]);
+    const real ratio = ppo_ratio(new_logp, old_logp[b]);
     const real adv = advantages[b];
     const real surr1 = ratio * adv;
     const real surr2 = ppo_clamp(ratio, lo, hi) * adv;
@@ -991,7 +1005,7 @@ b32 mat_ppo_policy_add_grad(Mat *logits_grad, const Mat *logits,
     }
     const real lse = column_logsumexp(logits, b);
     const real new_logp = logits->data[(u64)chosen * batch_size + b] - lse;
-    const real ratio = real_exp(new_logp - old_logp[b]);
+    const real ratio = ppo_ratio(new_logp, old_logp[b]);
     const real adv = advantages[b];
     const real surr1 = ratio * adv;
     const real surr2 = ppo_clamp(ratio, lo, hi) * adv;
@@ -1008,6 +1022,320 @@ b32 mat_ppo_policy_add_grad(Mat *logits_grad, const Mat *logits,
       logits_grad->data[(u64)a * batch_size + b] +=
           g_scale * dnew * (indicator - p);
     }
+  }
+  return true;
+}
+
+// ── Squashed diagonal-Gaussian policy (continuous actions) ────────────
+// Actions live in a box, so the policy is a diagonal Gaussian over a pre-squash
+// coordinate u, squashed into that box with tanh:
+//
+//   u_d = mu_d + exp(log_std_d) * eps,   eps ~ N(0, 1)
+//   a_d = center_d + half_d * tanh(u_d)
+//
+// with center_d = (min_d + max_d) / 2 and half_d = (max_d - min_d) / 2. The
+// density is the Gaussian density on u, corrected by the log-determinant of the
+// squash:
+//
+//   log pi(a) = log N(u | mu, sigma) - log(half_d) - log(sech^2(u_d))
+//
+// Four numerical decisions make this safe on a bounded action space; each one
+// was paid for by a failure of a simpler design.
+//
+//   * The density is evaluated at the *sampled* u, which the sampler hands back
+//     next to the action. Recovering u from the action instead needs atanh, which
+//     is infinite at a = +-half, and once the mean walks outside the box the
+//     recovered u no longer describes the sample that was drawn. That mismatch
+//     produced log-probabilities off by hundreds of nats and diverged training.
+//   * log(sech^2(u)) = 2 * (log 2 - |u| - log1p(exp(-2|u|))), which stays finite
+//     for any u -- unlike log(1 - tanh(u)^2) evaluated through tanh, which is
+//     -inf as soon as tanh saturates in f32 (|u| > ~9).
+//   * The mean is clamped to +-RL_GAUSSIAN_MEAN_BOUND. The squash does not bound the
+//     mean, and the density's peak height grows like exp(2|mu|), so an unclamped
+//     mean lets the policy chase a spiking density far outside the box.
+//     Gradients pass through the clamp unchanged (straight-through) because an
+//     exact zero gradient outside the bound would park the mean head forever.
+//   * log_std is clamped on read to [RL_GAUSSIAN_LOG_STD_MIN, RL_GAUSSIAN_LOG_STD_MAX], which
+//     floors sigma (no division by zero, no collapsed exploration) and keeps the
+//     noise from swamping the box. The clamp zeroes the gradient when active, so
+//     the parameter is not driven further into the wall.
+//
+// The score gradients are the plain Gaussian ones, because the squash's
+// Jacobian depends on the sample but not on mu or log_std:
+//
+//   d(log pi)/d(mu)      = (u - mu) / sigma^2
+//   d(log pi)/d(log_std) = (u - mu)^2 / sigma^2 - 1
+//
+// `min_action` and `max_action` each hold act_dim entries, matching
+// Env.action_min / Env.action_max.
+
+// Mean head output for action dimension d, column b, clamped into
+// [-RL_GAUSSIAN_MEAN_BOUND, RL_GAUSSIAN_MEAN_BOUND]. A single-column mean is broadcast.
+static real gaussian_mean_at(const Mat *raw_mean, u32 d, u32 b) {
+  real m =
+      raw_mean->data[(u64)d * raw_mean->cols + (raw_mean->cols == 1u ? 0u : b)];
+  if (m > RL_GAUSSIAN_MEAN_BOUND) {
+    m = RL_GAUSSIAN_MEAN_BOUND;
+  }
+  if (m < -RL_GAUSSIAN_MEAN_BOUND) {
+    m = -RL_GAUSSIAN_MEAN_BOUND;
+  }
+  return m;
+}
+
+// log_std for dimension d after the read-time clamp. `deriv_out` (optional)
+// receives 1 while the gradient should reach the parameter and 0 when the clamp
+// is active.
+static real gaussian_log_std_at(const Mat *log_std, u32 d, real *deriv_out) {
+  real l = log_std->data[(u64)d * log_std->cols];
+  b32 inside = true;
+  if (l > RL_GAUSSIAN_LOG_STD_MAX) {
+    l = RL_GAUSSIAN_LOG_STD_MAX;
+    inside = false;
+  } else if (l < RL_GAUSSIAN_LOG_STD_MIN) {
+    l = RL_GAUSSIAN_LOG_STD_MIN;
+    inside = false;
+  }
+  if (deriv_out != NULL) {
+    *deriv_out = inside ? (real)1 : (real)0;
+  }
+  return l;
+}
+
+// log(sech^2(u)) = log(1 - tanh(u)^2), computed without ever forming tanh(u)^2
+// so it stays finite and accurate for arbitrarily large |u|.
+static real gaussian_log_sech2(real u) {
+  const real a = real_fabs(u);
+  const real log_2 = (real)0.69314718055994530942;
+  return (real)2 *
+         ((log_2 - a) - real_log1p(real_exp((real)-2 * a)));
+}
+
+// log pi(a) summed over the action dimensions for column b of an
+// (act_dim x batch_size) pre-squash sample block.
+static real gaussian_logp_at(const Mat *raw_mean, const Mat *log_std,
+                             const Mat *u, const real *min_action,
+                             const real *max_action, u32 batch_size, u32 b) {
+  const real log_2pi = (real)1.8378770664093454835606594728112;
+  real acc = (real)0;
+  for (u32 d = 0; d < raw_mean->rows; d++) {
+    const real half = ((real)0.5) * (max_action[d] - min_action[d]);
+    const real uu = u->data[(u64)d * batch_size + b];
+    const real log_sigma = gaussian_log_std_at(log_std, d, NULL);
+    const real eps =
+        (uu - gaussian_mean_at(raw_mean, d, b)) / real_exp(log_sigma);
+    acc += (real)-0.5 * eps * eps - log_sigma - (real)0.5 * log_2pi -
+           real_log(half) - gaussian_log_sech2(uu);
+  }
+  return acc;
+}
+
+b32 mat_gaussian_sample(Mat *action_out, Mat *u_out, const Mat *raw_mean,
+                        const Mat *log_std, const real *min_action,
+                        const real *max_action, Rng *rng) {
+  if (action_out == NULL || u_out == NULL || raw_mean == NULL ||
+      log_std == NULL || rng == NULL || min_action == NULL ||
+      max_action == NULL) {
+    return false;
+  }
+  if (action_out->rows != raw_mean->rows || action_out->cols != 1u ||
+      u_out->rows != raw_mean->rows || u_out->cols != 1u ||
+      raw_mean->cols != 1u || log_std->rows != raw_mean->rows ||
+      log_std->cols != 1u) {
+    return false;
+  }
+
+  for (u32 d = 0; d < raw_mean->rows; d++) {
+    const real center = ((real)0.5) * (min_action[d] + max_action[d]);
+    const real half = ((real)0.5) * (max_action[d] - min_action[d]);
+    const real sigma = real_exp(gaussian_log_std_at(log_std, d, NULL));
+    const real u = gaussian_mean_at(raw_mean, d, 0u) + sigma * rng_normal(rng);
+    u_out->data[d] = u;
+    action_out->data[d] = center + half * real_tanh(u);
+  }
+  return true;
+}
+
+// Inverse of the squash for an action that was not produced by
+// mat_gaussian_sample (a stored replay, say). Near the bounds this is
+// lossy -- atanh blows up at a = +-half, so the normalised action is clamped
+// just inside the box -- which is exactly why the training path carries u
+// instead of re-deriving it from the action.
+b32 mat_gaussian_unsquash(Mat *u_out, const Mat *actions,
+                          const real *min_action, const real *max_action) {
+  if (u_out == NULL || actions == NULL || min_action == NULL ||
+      max_action == NULL) {
+    return false;
+  }
+  if (u_out->rows != actions->rows || u_out->cols != actions->cols) {
+    return false;
+  }
+
+  const real limit = (real)1 - (real)1e-6;
+  for (u32 d = 0; d < actions->rows; d++) {
+    const real center = ((real)0.5) * (min_action[d] + max_action[d]);
+    const real half = ((real)0.5) * (max_action[d] - min_action[d]);
+    for (u32 b = 0; b < actions->cols; b++) {
+      real x = (actions->data[(u64)d * actions->cols + b] - center) / half;
+      if (x > limit) {
+        x = limit;
+      }
+      if (x < -limit) {
+        x = -limit;
+      }
+      u_out->data[(u64)d * actions->cols + b] = real_atanh(x);
+    }
+  }
+  return true;
+}
+
+b32 mat_gaussian_logp(Mat *out, const Mat *raw_mean, const Mat *log_std,
+                      const Mat *u, const real *min_action,
+                      const real *max_action, u32 batch_size) {
+  if (out == NULL || raw_mean == NULL || log_std == NULL || u == NULL ||
+      min_action == NULL || max_action == NULL) {
+    return false;
+  }
+  const u32 act_dim = raw_mean->rows;
+  if (act_dim == 0u || batch_size == 0u || out->rows != 1u ||
+      out->cols != batch_size || u->rows != act_dim || u->cols != batch_size ||
+      log_std->rows != act_dim || log_std->cols != 1u ||
+      (raw_mean->cols != 1u && raw_mean->cols != batch_size)) {
+    return false;
+  }
+
+  for (u32 b = 0; b < batch_size; b++) {
+    out->data[b] = gaussian_logp_at(raw_mean, log_std, u, min_action,
+                                    max_action, batch_size, b);
+  }
+  return true;
+}
+
+b32 mat_gaussian_ppo_loss(Mat *out, const Mat *raw_mean, const Mat *log_std,
+                          const Mat *u, const real *advantages,
+                          const real *old_logp, const real *min_action,
+                          const real *max_action, real clip_eps,
+                          u32 batch_size) {
+  if (out == NULL || raw_mean == NULL || log_std == NULL || u == NULL ||
+      advantages == NULL || old_logp == NULL || min_action == NULL ||
+      max_action == NULL) {
+    return false;
+  }
+  const u32 act_dim = raw_mean->rows;
+  if (act_dim == 0u || batch_size == 0u || out->rows != 1u ||
+      out->cols != 1u || clip_eps <= (real)0 ||
+      raw_mean->cols != batch_size || u->rows != act_dim ||
+      u->cols != batch_size || log_std->rows != act_dim ||
+      log_std->cols != 1u) {
+    return false;
+  }
+
+  const real lo = (real)1 - clip_eps;
+  const real hi = (real)1 + clip_eps;
+  real acc = (real)0;
+  for (u32 b = 0; b < batch_size; b++) {
+    const real new_logp = gaussian_logp_at(raw_mean, log_std, u, min_action,
+                                           max_action, batch_size, b);
+    const real ratio = ppo_ratio(new_logp, old_logp[b]);
+    const real adv = advantages[b];
+    const real surr1 = ratio * adv;
+    const real surr2 = ppo_clamp(ratio, lo, hi) * adv;
+    acc += (surr1 < surr2) ? surr1 : surr2;
+  }
+  out->data[0] = -acc / (real)batch_size;
+  return true;
+}
+
+b32 mat_gaussian_ppo_add_grad(Mat *mean_grad, Mat *log_std_grad,
+                              const Mat *raw_mean, const Mat *log_std,
+                              const Mat *u, const real *advantages,
+                              const real *old_logp, const real *min_action,
+                              const real *max_action, real clip_eps,
+                              u32 batch_size, const Mat *grad) {
+  if (mean_grad == NULL || log_std_grad == NULL || raw_mean == NULL ||
+      log_std == NULL || u == NULL || advantages == NULL ||
+      old_logp == NULL || min_action == NULL || max_action == NULL ||
+      grad == NULL) {
+    return false;
+  }
+  const u32 act_dim = raw_mean->rows;
+  if (act_dim == 0u || batch_size == 0u || clip_eps <= (real)0 ||
+      raw_mean->cols != batch_size || mean_grad->rows != act_dim ||
+      mean_grad->cols != batch_size || u->rows != act_dim ||
+      u->cols != batch_size || log_std->rows != act_dim ||
+      log_std->cols != 1u || log_std_grad->rows != act_dim ||
+      log_std_grad->cols != 1u) {
+    return false;
+  }
+
+  const real lo = (real)1 - clip_eps;
+  const real hi = (real)1 + clip_eps;
+  const real g_scale = grad->data[0] / (real)batch_size;
+
+  for (u32 b = 0; b < batch_size; b++) {
+    const real new_logp = gaussian_logp_at(raw_mean, log_std, u, min_action,
+                                           max_action, batch_size, b);
+    const real ratio = ppo_ratio(new_logp, old_logp[b]);
+    const real adv = advantages[b];
+    const real surr1 = ratio * adv;
+    const real surr2 = ppo_clamp(ratio, lo, hi) * adv;
+
+    // Same rule as the discrete loss: the unclipped branch carries the gradient
+    // whenever it is the minimum (which includes the in-range case).
+    const real d_ratio = (surr1 <= surr2) ? adv : (real)0;
+    // loss = -mean(min), so d(loss)/d(new_logp) = -d_ratio * ratio.
+    const real dnew = -d_ratio * ratio;
+
+    for (u32 d = 0; d < act_dim; d++) {
+      real ld_deriv = (real)0;
+      const real log_sigma = gaussian_log_std_at(log_std, d, &ld_deriv);
+      const real inv_sigma = real_exp(-log_sigma);
+      const real eps =
+          (u->data[(u64)d * batch_size + b] - gaussian_mean_at(raw_mean, d, b)) *
+          inv_sigma;
+      // The squash's Jacobian depends on the sample, not on mu or log_std, so
+      // d(new_logp)/d(mu) = eps / sigma and d(new_logp)/d(log_std) = eps^2 - 1.
+      mean_grad->data[(u64)d * batch_size + b] +=
+          g_scale * dnew * eps * inv_sigma;
+      log_std_grad->data[(u64)d * log_std_grad->cols] +=
+          g_scale * dnew * (eps * eps - (real)1) * ld_deriv;
+    }
+  }
+  return true;
+}
+
+b32 mat_gaussian_entropy(Mat *out, const Mat *log_std) {
+  if (out == NULL || log_std == NULL || out->rows != 1u || out->cols != 1u ||
+      log_std->cols != 1u) {
+    return false;
+  }
+  // H = sum_d log(sigma_d) + 0.5 * D * log(2*pi*e)
+  real acc = (real)0;
+  for (u32 d = 0; d < log_std->rows; d++) {
+    acc += gaussian_log_std_at(log_std, d, NULL);
+  }
+  const real log_2pi_e = (real)2.8378770664093454835606594728112;
+  out->data[0] = acc + (real)0.5 * (real)log_std->rows * log_2pi_e;
+  return true;
+}
+
+b32 mat_gaussian_entropy_add_grad(Mat *log_std_grad, const Mat *log_std,
+                                  const Mat *grad) {
+  if (log_std_grad == NULL || log_std == NULL || grad == NULL) {
+    return false;
+  }
+  if (log_std_grad->rows != log_std->rows || log_std_grad->cols != 1u ||
+      log_std->cols != 1u) {
+    return false;
+  }
+  // d(mean H)/d(log_std_d) = 1, since H does not depend on the mean and the
+  // batch mean of a constant-per-sample quantity is that constant. The
+  // read-time clamp zeroes the gradient while it is active.
+  const real scale = grad->data[0];
+  for (u32 d = 0; d < log_std->rows; d++) {
+    real ld_deriv = (real)0;
+    (void)gaussian_log_std_at(log_std, d, &ld_deriv);
+    log_std_grad->data[(u64)d * log_std_grad->cols] += scale * ld_deriv;
   }
   return true;
 }

@@ -26,7 +26,7 @@ independently reimplemented, and carried through the Phase 0–5 roadmap.
     post-order walk.
   - `linalg.c` / `linalg.h` — row-pointer kernels with hoisted scalars; NN/NT/
     TN/TT matrix multiply, activations, losses, and their gradients re-derived
-    (numerically identical: the f64 gradient check still passes, 248/248).
+    (numerically identical: the f64 gradient check still passes, 260/260).
   - `memory.c` / `memory.h` — bump allocator reimplemented (`base`/`cap`/
     `offset`).
   - `random.c` / `random.h` — PCG32 replaced by **xoshiro256\*\*** seeded with
@@ -59,6 +59,13 @@ independently reimplemented, and carried through the Phase 0–5 roadmap.
 - **Numerics.** `sample_action` uses strict `<`; the misleading `randn` name is
   gone (it was always a uniform range); Adam clipping guards against non-finite
   global norms.
+- **Non-finite PPO gradients late in a run.** Both PPO surrogates now compute the
+  importance ratio as `exp(clamp(new_logp - old_logp, ±20))`. `exp` overflows f32
+  at ~88 nats, and a single overflowing sample poisoned a whole minibatch's
+  gradient with `Inf` — seen as `clip_grad_norm: non-finite gradient norm` around
+  update 800 of a Pendulum run. A ratio past `e^20` is far outside PPO's trust
+  region (`ppo_clip` is 0.2), so the clamp only engages where the surrogate's own
+  clip is already discounting the sample.
 - **Failures are loud.** `RL_LIB_ASSERT` / `RL_LIB_CHECK` replace silent `false`
   returns, empty-graph no-ops, and unchecked arena pointers; `arena_alloc`
   aborts on OOM.
@@ -78,7 +85,8 @@ independently reimplemented, and carried through the Phase 0–5 roadmap.
   run can be stopped and resumed. Loads validate the scalar width, parameter
   count, payload size and every shape, and stage the payload before writing, so a
   rejected file leaves the model untouched. Covered by `tests/test_checkpoint.c`
-  (53 checks), including a bit-exact Adam-state resume test.
+  (61 checks), including a bit-exact Adam-state resume and a continuous-model round
+  trip that covers the learnable `log_std`.
 - **Packaging**: `make lib` builds `librl_lib.a` and a versioned shared library
   (`librl_lib.<major>.dylib` / `librl_lib.so.<version>` with a soname); `make
   install PREFIX=...` installs headers into `include/rl_lib/`, both libraries and
@@ -108,15 +116,35 @@ independently reimplemented, and carried through the Phase 0–5 roadmap.
   GAE-λ, and truncation-aware bootstrapping. Covered by a new f64/f32 gradient
   check, CartPole learning and same-seed determinism tests, and
   `examples/train_ppo.c`.
-- `make ppo`, `EXTRA_CFLAGS` Makefile support, and a scalar-backend CI job.
+- **Continuous actions** (`mat_gaussian_*` kernels, `envs/pendulum.c`,
+  `train_ppo_continuous`): `continuous_actor_critic_build` adds a mean head plus a
+  *learnable* `log_std` parameter (so the optimiser, the gradient clip and the
+  checkpoint writer all cover it); actions are tanh-squashed into agent-supplied
+  per-dimension bounds and the density carries the squash's log-determinant. The
+  density is evaluated at the sampled pre-squash coordinate `u` — which
+  `mat_gaussian_sample` returns next to the action — rather than recovered from
+  the action with `atanh`, which is infinite at the bounds and, once a mean
+  drifted outside the box, described samples that were never drawn. `Env` gained
+  `continuous`, `action_min` / `action_max` and `step_continuous`; `VecEnv` gained
+  `vecenv_step_continuous` / `vecenv_action_bounds`; Pendulum-v1 implements the
+  Gymnasium dynamics (dt 0.05, torque ±2, 200-step truncation); and
+  `train_ppo_continuous` / `evaluate_continuous[_seeded]` reuse the discrete
+  trainer's rollout, GAE and minibatch machinery. Covered by new Pendulum and
+  continuous-`VecEnv` tests, `log_std` gradient checks in f32 and f64, a
+  log-density check against the textbook formula in double precision, a learning
+  smoke test, a checkpoint round trip, and `make ppo-continuous`.
+- `make ppo`, `make ppo-continuous`, `EXTRA_CFLAGS` Makefile support, and a
+  scalar-backend CI job.
 - `make gradcheck-double`: builds the library in f64 (`-DRL_LIB_USE_DOUBLE`, the
   `real` scalar typedef) so the gradient check runs with `h = 1e-5` and a
   `1e-6` tolerance. Input/activation gradients and an elementwise `mul` with
   both operands requiring grad are checked too.
-- `tests/test_rl.c`: GAE against a hand-computed trajectory, a single Adam step,
-  gradient-norm clipping, actor-critic construction and value-head learning,
-  batched-vs-per-sample gradient equivalence, CartPole learning smoke tests for
-  REINFORCE and PPO, and same-seed determinism for both.
+- `tests/test_rl.c` (71 checks): GAE against a hand-computed trajectory, a single
+  Adam step, gradient-norm clipping, actor-critic and continuous actor-critic
+  construction, value-head learning, batched-vs-per-sample gradient equivalence,
+  a parameter registry grown past 128 entries, rebuilding the batched graph for a
+  new minibatch size, CartPole learning smoke tests for REINFORCE and PPO with
+  same-seed determinism, and a Pendulum continuous-PPO learning smoke test.
 - `make asan` (ASAN + UBSAN) and a GitHub Actions workflow running `make test`
   with warnings as errors on gcc/clang/macOS, plus the sanitizer target.
 - `examples/train_a2c.c` and `examples/train_ppo.c`.

@@ -64,6 +64,7 @@ typedef enum {
   NET_ARCH_NONE = 0,
   NET_ARCH_ACTOR,
   NET_ARCH_ACTOR_CRITIC,
+  NET_ARCH_CONTINUOUS,
 } NetArchKind;
 
 // The architecture a builder used, kept so the batched training subgraph can be
@@ -120,9 +121,9 @@ static NetArchSpec *record_arch(Arena *arena, Net *model, NetArchKind kind,
   return arch;
 }
 
-// The batched training view: input (obs_dim x B) -> batch_logits
-// (act_dim x B) and, for an actor-critic, batch_value (1 x B), sharing every
-// parameter with the rollout graph. Called by the builders and, when the
+// The batched training view: input (obs_dim x B) -> batch_logits / batch_mean
+// (act_dim x B) and, for the critic-bearing kinds, batch_value (1 x B), sharing
+// every parameter with the rollout graph. Called by the builders and, when the
 // minibatch size changes, by net_set_batch_size.
 static void build_batch_graph(Arena *arena, Net *model, NetArchSpec *arch,
                               u32 batch_size) {
@@ -133,13 +134,19 @@ static void build_batch_graph(Arena *arena, Net *model, NetArchSpec *arch,
     b = dense_apply(arena, model, &arch->trunk[i], b);
     b = tensor_relu(arena, model, b);
   }
-  model->batch_logits = dense_apply(arena, model, &arch->head_a, b);
 
   if (arch->kind == NET_ARCH_ACTOR_CRITIC) {
+    model->batch_logits = dense_apply(arena, model, &arch->head_a, b);
     model->batch_value = dense_apply(arena, model, &arch->head_b, b);
     Tensor *batch_roots[2] = {model->batch_logits, model->batch_value};
     model->train = schedule_from_roots(arena, model, batch_roots, 2);
+  } else if (arch->kind == NET_ARCH_CONTINUOUS) {
+    model->batch_mean = dense_apply(arena, model, &arch->head_a, b);
+    model->batch_value = dense_apply(arena, model, &arch->head_b, b);
+    Tensor *batch_roots[2] = {model->batch_mean, model->batch_value};
+    model->train = schedule_from_roots(arena, model, batch_roots, 2);
   } else {
+    model->batch_logits = dense_apply(arena, model, &arch->head_a, b);
     model->train = schedule_from(arena, model, model->batch_logits);
   }
   arch->batch_size = batch_size;
@@ -217,6 +224,44 @@ void actor_critic_build(Arena *arena, Net *model, Rng *rng, u32 obs_dim,
   NetArchSpec *arch = record_arch(arena, model, NET_ARCH_ACTOR_CRITIC, obs_dim,
                                   act_dim, hidden_dims, num_hidden, trunk,
                                   actor, critic);
+  if (batch_size > 0) {
+    build_batch_graph(arena, model, arch, batch_size);
+  }
+}
+
+void continuous_actor_critic_build(Arena *arena, Net *model, Rng *rng,
+                                   u32 obs_dim, const u32 *hidden_dims,
+                                   u32 num_hidden, u32 act_dim, u32 batch_size,
+                                   real log_std_init) {
+  RL_LIB_ASSERT(act_dim > 0, "continuous_actor_critic_build: act_dim == 0");
+
+  model->input = tensor_create(arena, model, obs_dim, 1, TENSOR_PLAIN);
+
+  Dense *trunk = ARENA_ARR(arena, Dense, num_hidden);
+  Tensor *cur = build_trunk(arena, model, rng, model->input, obs_dim,
+                            hidden_dims, num_hidden, trunk);
+  const u32 trunk_dim = (num_hidden > 0) ? hidden_dims[num_hidden - 1] : obs_dim;
+
+  Dense mean_head = dense_new(arena, model, rng, trunk_dim, act_dim, true, 0.01f);
+  Dense critic = dense_new(arena, model, rng, trunk_dim, 1, true, 1.0f);
+
+  model->mean = dense_apply(arena, model, &mean_head, cur);
+  model->value = dense_apply(arena, model, &critic, cur);
+
+  // One learnable log standard deviation per action dimension. This is a
+  // parameter, so the optimiser, gradient clipping and checkpointing all cover
+  // it automatically, but it is deliberately outside every schedule: no op
+  // consumes it, and the Gaussian policy loss accumulates its gradient directly.
+  model->log_std =
+      tensor_create(arena, model, act_dim, 1, TENSOR_PARAM | TENSOR_GRAD);
+  mat_fill(model->log_std->val, log_std_init);
+
+  Tensor *forward_roots[2] = {model->mean, model->value};
+  model->fwd = schedule_from_roots(arena, model, forward_roots, 2);
+
+  NetArchSpec *arch = record_arch(arena, model, NET_ARCH_CONTINUOUS, obs_dim,
+                                  act_dim, hidden_dims, num_hidden, trunk,
+                                  mean_head, critic);
   if (batch_size > 0) {
     build_batch_graph(arena, model, arch, batch_size);
   }

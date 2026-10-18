@@ -88,3 +88,49 @@ void vecenv_sample_uniform(VecEnv *v, Rng *rng, u32 *actions_out) {
     actions_out[i] = rng_below(rng, v->act_dim);
   }
 }
+
+// Same stepping and auto-reset logic as vecenv_step, for environments whose
+// action is a real vector. `actions` holds num_envs * act_dim values, one
+// act_dim-long action per sub-environment (env-major, matching `obs`).
+void vecenv_step_continuous(VecEnv *v, const real *actions) {
+  RL_LIB_ASSERT(v != NULL && actions != NULL,
+                "vecenv_step_continuous: NULL argument");
+  for (u32 i = 0; i < v->num_envs; i++) {
+    Env *e = v->envs[i];
+    RL_LIB_ASSERT(e->step_continuous != NULL,
+                  "vecenv_step_continuous: env does not implement "
+                  "step_continuous");
+    b32 done = false;
+    b32 truncated = false;
+    const real r =
+        e->step_continuous(e, actions + (u64)i * v->act_dim, &done, &truncated);
+    v->rewards[i] = r;
+
+    if (done || truncated) {
+      // Capture the terminal observation, then auto-reset in place.
+      e->observe(e, v->final_obs + (u64)i * v->obs_dim);
+      e->reset(e, vecenv_next_seed(v));
+    }
+    e->observe(e, v->obs + (u64)i * v->obs_dim);
+
+    v->dones[i] = (b8)(done || truncated);
+    v->terminals[i] = (b8)done;
+    v->truncateds[i] = (b8)truncated;
+  }
+  v->step_count++;
+}
+
+void vecenv_action_bounds(const VecEnv *v, const real **min_out,
+                          const real **max_out) {
+  RL_LIB_ASSERT(v != NULL && v->num_envs > 0,
+                "vecenv_action_bounds: NULL or empty vecenv");
+  RL_LIB_ASSERT(v->envs[0]->continuous && v->envs[0]->action_min != NULL &&
+                    v->envs[0]->action_max != NULL,
+                "vecenv_action_bounds: env has no continuous action bounds");
+  if (min_out != NULL) {
+    *min_out = v->envs[0]->action_min;
+  }
+  if (max_out != NULL) {
+    *max_out = v->envs[0]->action_max;
+  }
+}

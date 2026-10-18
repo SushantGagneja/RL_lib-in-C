@@ -18,16 +18,16 @@ program has to initialise: one arena, one random generator, and you are running.
 | [`version.h`](#versionh) | `RL_LIB_VERSION_*` |
 | [`memory.h`](#memoryh) | `Arena` bump allocator |
 | [`random.h`](#randomh) | `Rng` (xoshiro256\*\*) |
-| [`linalg.h`](#linalgh) | `Mat` plus every matrix / activation / loss / gradient kernel |
+| [`linalg.h`](#linalgh) | `Mat` plus every matrix / activation / loss / gradient kernel, including the squashed-Gaussian policy kernels |
 | [`simd.h`](#simdh) | matrix-multiply backend selection and probing |
 | [`graph.h`](#graphh) | `Tensor`, `Net`, reverse-mode autograd |
-| [`layers.h`](#layersh) | `Dense`, `mlp_new`, `actor_build`, `actor_critic_build` |
+| [`layers.h`](#layersh) | `Dense`, `mlp_new`, `actor_build`, `actor_critic_build`, `continuous_actor_critic_build` |
 | [`optim.h`](#optimh) | `zero_grad`, `sgd_step`, `Adam`, `clip_grad_norm` |
 | [`checkpoint.h`](#checkpointh) | `net_save` / `net_load` / `checkpoint_save` / `checkpoint_load` |
-| [`env.h`](#envh) | the `Env` interface every environment implements |
+| [`env.h`](#envh) | the `Env` interface every environment implements, discrete and continuous |
 | [`vecenv.h`](#vecenvh) | `VecEnv`, synchronised parallel environments |
-| [`rl.h`](#rlh) | `TrainCfg`, `Rollout`, `train_reinforce`, `train_a2c`, `train_ppo`, `evaluate` |
-| [`envs/`](#environments) | CartPole, Grid Snake |
+| [`rl.h`](#rlh) | `TrainCfg`, `Rollout`, `train_reinforce`, `train_a2c`, `train_ppo`, `train_ppo_continuous`, `evaluate`, `evaluate_continuous` |
+| [`envs/`](#environments) | CartPole, Grid Snake, Pendulum-v1 |
 
 Three conventions run through the whole API and are worth reading first:
 
@@ -58,8 +58,8 @@ typedef uint32_t b32;  // word-sized boolean
 `real` is the scalar type of the math stack: `float`, or `double` when the
 library is built with `-DRL_LIB_USE_DOUBLE`. Alongside it come
 `real_fabs/real_sqrt/real_exp/real_log/real_tanh/real_sin/real_cos/real_pow/real_fmax/real_fmin`,
-`REAL_C(x)` (an exactly-representable literal for the current mode) and
-`REAL_EPS`.
+the continuous-policy helpers `real_atanh/real_log1p/real_fmod`, `REAL_C(x)` (an
+exactly-representable literal for the current mode) and `REAL_EPS`.
 
 ```c
 #define KiB(n) ((u64)(n) << 10)   // also MiB(n), GiB(n)
@@ -255,6 +255,82 @@ The loss-specific entries are exact rather than numerically differentiated: thei
 gradients are cross-checked against finite differences in `tests/test_gradcheck.c`,
 which is what keeps the closed forms honest.
 
+### Continuous (squashed Gaussian) policy
+
+The continuous policy is a diagonal Gaussian over a pre-squash coordinate `u`,
+squashed into the environment's action box with `tanh`:
+
+```
+u_d = mean_d + exp(log_std_d) * eps,   eps ~ N(0, 1)
+a_d = center_d + half_d * tanh(u_d)
+log pi(a) = log N(u | mean, sigma) - log(half_d) - log(sech^2(u_d))
+```
+
+with `center_d` / `half_d` the midpoint and half-width of
+`[action_min[d], action_max[d]]` (per dimension, so asymmetric boxes work). The
+density carries the squash's log-determinant — the construction SAC and
+Stable-Baselines3 use.
+
+```c
+#define RL_GAUSSIAN_MEAN_BOUND  ((real)5)    // mean clamp half-width
+#define RL_GAUSSIAN_LOG_STD_MIN ((real)-6)   // sigma >= ~2.5e-3
+#define RL_GAUSSIAN_LOG_STD_MAX ((real)2)    // sigma <= ~7.4
+
+b32 mat_gaussian_sample(Mat *action_out, Mat *u_out, const Mat *raw_mean,
+                        const Mat *log_std, const real *min_action,
+                        const real *max_action, Rng *rng);
+b32 mat_gaussian_unsquash(Mat *u_out, const Mat *actions, const real *min_action,
+                          const real *max_action);
+b32 mat_gaussian_logp(Mat *out, const Mat *raw_mean, const Mat *log_std,
+                      const Mat *u, const real *min_action,
+                      const real *max_action, u32 batch_size);
+b32 mat_gaussian_ppo_loss(Mat *out, const Mat *raw_mean, const Mat *log_std,
+                          const Mat *u, const real *advantages,
+                          const real *old_logp, const real *min_action,
+                          const real *max_action, real clip_eps, u32 batch_size);
+b32 mat_gaussian_ppo_add_grad(Mat *mean_grad, Mat *log_std_grad,
+                              const Mat *raw_mean, const Mat *log_std,
+                              const Mat *u, const real *advantages,
+                              const real *old_logp, const real *min_action,
+                              const real *max_action, real clip_eps,
+                              u32 batch_size, const Mat *grad);
+b32 mat_gaussian_entropy(Mat *out, const Mat *log_std);
+b32 mat_gaussian_entropy_add_grad(Mat *log_std_grad, const Mat *log_std,
+                                  const Mat *grad);
+```
+
+**The sample is the input, not the action.** `mat_gaussian_sample` writes both
+the squashed action *and* the `u` it came from, and the loss, the log-density and
+the gradient all take `u`. Recovering `u` from the action instead needs `atanh`,
+which is infinite at the bounds; once a mean drifts outside the box the recovered
+value stops describing the sample that was actually drawn (this cost a training
+run: log-probabilities off by hundreds of nats, then a non-finite gradient).
+`mat_gaussian_unsquash` is provided for actions that were not sampled here (a
+stored replay, say), and is documented as lossy near the bounds for that reason.
+`raw_mean` may be `act_dim x 1` (broadcast over the batch) or `act_dim x batch`;
+`log_std` is always `act_dim x 1`.
+
+Three further guards keep this finite on a bounded action space:
+
+* `log(sech^2(u)) = 2 * (log 2 - |u| - log1p(exp(-2|u|)))`, which stays finite
+  for any `u`, unlike `log(1 - tanh(u)^2)` computed through `tanh`, which is
+  `-inf` as soon as `tanh` saturates in f32 (`|u| > ~9`).
+* The mean is clamped to `±RL_GAUSSIAN_MEAN_BOUND` on read, with the gradient
+  passed straight through, so the density cannot spike outside the box (its peak
+  grows like `exp(2|mean|)`) while the mean head never loses its gradient.
+* `log_std` is clamped to `[RL_GAUSSIAN_LOG_STD_MIN, RL_GAUSSIAN_LOG_STD_MAX]` on
+  read, which floors `sigma` (no division by zero, no collapsed exploration) and
+  zeroes the gradient while the clamp is active.
+
+The score gradients are the plain Gaussian ones, because the squash's Jacobian
+depends on the sample but not on `mean` or `log_std`:
+`d log pi / d mean = (u - mean) / sigma^2` and
+`d log pi / d log_std = (u - mean)^2 / sigma^2 - 1`.
+
+`mat_gaussian_entropy` returns the mean *pre-squash* Gaussian entropy
+`H = sum_d log(sigma_d) + D/2 * log(2*pi*e)`, the usual stand-in for the entropy
+bonus (the squashed density's entropy has no closed form).
+
 ---
 
 ## `simd.h`
@@ -385,6 +461,9 @@ void actor_build(Arena *arena, Net *model, Rng *rng, u32 obs_dim,
                  const u32 *hidden_dims, u32 num_hidden, u32 act_dim, u32 batch_size);
 void actor_critic_build(Arena *arena, Net *model, Rng *rng, u32 obs_dim,
                         const u32 *hidden_dims, u32 num_hidden, u32 act_dim, u32 batch_size);
+void continuous_actor_critic_build(Arena *arena, Net *model, Rng *rng, u32 obs_dim,
+                                   const u32 *hidden_dims, u32 num_hidden, u32 act_dim,
+                                   u32 batch_size, real log_std_init);
 ```
 
 `dense_new` allocates parameters with He-uniform initialisation
@@ -407,6 +486,31 @@ with a shared trunk and separate actor/value heads. `batch_size` is the
 minibatch size the batched graph starts out built for; it is not a permanent
 choice — see `net_set_batch_size` below.
 
+### Continuous policies
+
+```c
+void continuous_actor_critic_build(Arena *arena, Net *model, Rng *rng, u32 obs_dim,
+                                   const u32 *hidden_dims, u32 num_hidden,
+                                   u32 act_dim, u32 batch_size, real log_std_init);
+```
+
+The continuous counterpart of `actor_critic_build`, recorded as
+`NET_ARCH_CONTINUOUS`:
+
+* rollout inference — `input (obs_dim x 1) -> mean (act_dim x 1)`,
+  `log_std (act_dim x 1)`, `value (1 x 1)`;
+* batched training — `batch_input (obs_dim x B) -> batch_mean (act_dim x B)` and
+  `batch_value (1 x B)`, sharing `log_std`.
+
+`log_std` is a *parameter* (`TENSOR_PARAM | TENSOR_GRAD`, every entry initialised
+to `log_std_init`), not an activation, which is what makes the optimiser, the
+gradient clip and the checkpoint writer cover it. `mean` / `batch_mean` /
+`log_std` are the tensors a trainer needs; `model->output` (the discrete softmax
+head) stays `NULL`, so the discrete trainers reject the model instead of
+misreading the head. The action box itself is *not* part of the architecture: it
+is read from `Env.action_min` / `Env.action_max` at training time, which is what
+lets one policy be evaluated on any env with the same `act_dim`.
+
 ### Changing the minibatch size
 
 ```c
@@ -421,10 +525,11 @@ untouched, and the batch and single-sample graphs keep agreeing. This is what
 lets `TrainCfg.batch_size` be a runtime choice: the trainers call
 `net_set_batch_size` themselves before sizing any buffer from the graph, so
 asking for 8 when the model was built for 64 just works. Returns `false` for a
-model that was not built by `actor_build` / `actor_critic_build` (there is no
-recorded architecture to rebuild from), and `true` immediately when the size
-already matches. Pointers into `batch_input` / `batch_logits` / `batch_value`
-are invalidated by a rebuild.
+model that was not built by `actor_build` / `actor_critic_build` /
+`continuous_actor_critic_build` (there is no recorded architecture to rebuild
+from), and `true` immediately when the size already matches. Pointers into
+`batch_input` / `batch_logits` / `batch_value` / `batch_mean` are invalidated by
+a rebuild.
 
 ---
 
@@ -516,8 +621,14 @@ typedef struct Env Env;
 struct Env {
   u32 obs_dim, act_dim, max_steps;
   void *state;
+
+  b32 continuous;              // actions are a real vector, not an index
+  const real *action_min;      // act_dim entries, or NULL when discrete
+  const real *action_max;
+
   void (*reset)(Env *e, u64 seed);
   real (*step)(Env *e, u32 action, b32 *done, b32 *truncated);
+  real (*step_continuous)(Env *e, const real *action, b32 *done, b32 *truncated);
   void (*observe)(Env *e, real *obs_out);
   Env *(*clone)(Arena *arena, const Env *src);
   void (*destroy)(Env *e);
@@ -531,10 +642,18 @@ observation into a caller-owned `obs_dim`-length buffer. Separating `done` from
 `truncated` is what lets a trainer bootstrap the value of a truncated episode
 instead of treating the time limit as a real terminal state.
 
+A continuous environment sets `continuous`, fills `action_min` / `action_max`
+(one bound per action dimension, which is what the policy's squash needs) and
+implements `step_continuous` instead of `step`; the trainer checks both rather
+than assuming them. `step_continuous` reads an `act_dim`-length vector and
+returns the same `done` / `truncated` pair. The squashed-Gaussian policy already
+guarantees an action inside the box, but environments clamp defensively anyway
+so a hand-written controller cannot corrupt the dynamics.
+
 `clone` allocates a fresh `Env` with an independent copy of the state. It exists
 so `VecEnv` can build N envs from a prototype without the caller knowing the
-environment's internals. Actions are `u32`: the shipped environments are
-discrete, and the interface reflects that rather than hiding it behind a union.
+environment's internals. Discrete actions are `u32`: the interface reflects that
+instead of hiding it behind a union.
 
 Every `Env` owns its own `Rng` state, seeded through `reset`, so an env never
 holds a pointer into a trainer's generator.
@@ -562,7 +681,9 @@ VecEnv *vecenv_new(Arena *arena, const Env *prototype, u32 num_envs);
 void vecenv_reset(VecEnv *v, u64 seed);
 void vecenv_reset_seeds(VecEnv *v, const u64 *seeds);
 void vecenv_step(VecEnv *v, const u32 *actions);
+void vecenv_step_continuous(VecEnv *v, const real *actions);
 void vecenv_sample_uniform(VecEnv *v, Rng *rng, u32 *actions_out);
+void vecenv_action_bounds(const VecEnv *v, const real **min_out, const real **max_out);
 ```
 
 `vecenv_new` clones the prototype `num_envs` times and resets every clone from a
@@ -575,6 +696,13 @@ immediately, so `dones[i]` marks the step that ended an episode and `obs[i]`
 already holds the post-reset observation. The pre-reset observation is preserved
 in `final_obs[i]`, so a trainer can bootstrap correctly. `rewards[i]` is always
 the reward of the step just taken.
+
+`vecenv_step_continuous` is the same loop for real-vector actions: `actions`
+holds `num_envs * act_dim` values in env-major order, and an env that does not
+implement `step_continuous` is reported rather than silently stepped with a
+garbage action. `vecenv_action_bounds` returns the sub-environments' bounds
+(they are clones of one prototype, so the bounds are shared), which is how
+`train_ppo_continuous` sizes a policy without reaching into the env structs.
 
 ---
 
@@ -633,21 +761,33 @@ per-step arrays as separate flat buffers. `gae_compute` fills `advantages` and
 void train_reinforce(Env *env, Net *model, const TrainCfg *config, Arena *train_arena);
 void train_a2c(Env *env, Net *model, const TrainCfg *config, Arena *train_arena);
 void train_ppo(Env *env, Net *model, const TrainCfg *config, Arena *train_arena);
+void train_ppo_continuous(Env *env, Net *model, const TrainCfg *config, Arena *train_arena);
 ```
 
-All three mutate `model`'s parameters in place and allocate their rollout
+All four mutate `model`'s parameters in place and allocate their rollout
 buffers from `train_arena`. `train_reinforce` needs an `actor_build` model;
 `train_a2c` and `train_ppo` need an `actor_critic_build` model. Each applies
 `config->batch_size` to the model first, so the minibatch size is a runtime
 choice — a hand-built graph, which cannot be resized, still has to match.
 
-| | REINFORCE | A2C | PPO |
-|---|---|---|---|
-| Model | `actor_build` | `actor_critic_build` | `actor_critic_build` |
-| Rollout | `rollout_size` episodes | 1 episode | `num_envs x rollout_size` steps |
-| Advantage | discounted return | GAE(`lambda`) | GAE(`lambda`), normalised once |
-| Updates/rollout | 1 pass | 1 | `ppo_epochs` passes, shuffled minibatches |
-| Clipping | – | – | `ppo_clip` |
+`train_ppo_continuous` is `train_ppo` for continuous environments: it needs a
+`continuous_actor_critic_build` model and an env with `continuous` set,
+`step_continuous` implemented and the action bounds filled in. The rollout stores
+the sampled pre-squash coordinate `u` (see `linalg.h`), the surrogate is the
+Gaussian clipped objective, and a truncated episode bootstraps from the value of
+the env's final observation exactly as in the discrete trainer. Everything else —
+the rollout/GAE layout, the advantage normalisation, the PPO-only `TrainCfg`
+fields and the one-optimiser-step-per-minibatch rule — is shared with `train_ppo`.
+
+| | REINFORCE | A2C | PPO | PPO (continuous) |
+|---|---|---|---|---|
+| Model | `actor_build` | `actor_critic_build` | `actor_critic_build` | `continuous_actor_critic_build` |
+| Rollout | `rollout_size` episodes | 1 episode | `num_envs x rollout_size` steps | same |
+| Advantage | discounted return | GAE(`lambda`) | GAE(`lambda`), normalised once | same |
+| Updates/rollout | 1 pass | 1 | `ppo_epochs` passes, shuffled minibatches | same |
+| Clipping | – | – | `ppo_clip` | `ppo_clip` |
+| Policy | categorical | categorical | categorical | squashed Gaussian |
+| Env | discrete | discrete | discrete | `step_continuous` + bounds |
 
 `train_ppo` collects from a `VecEnv` built from `config->num_envs` and takes
 *one* optimiser step per minibatch, not per rollout. Advantages are normalised
@@ -660,11 +800,19 @@ sub-environment.
 EvalResult evaluate(Env *env, Net *model, Rng *rng, u32 episodes, b32 greedy);
 EvalResult evaluate_seeded(Env *env, Net *model, const u64 *seeds,
                            u32 num_episodes, b32 greedy);
+EvalResult evaluate_continuous(Env *env, Net *model, Rng *rng, u32 episodes, b32 greedy);
+EvalResult evaluate_continuous_seeded(Env *env, Net *model, const u64 *seeds,
+                                      u32 num_episodes, b32 greedy);
 ```
 
 `greedy = true` selects `argmax` actions; otherwise they are sampled.
 `evaluate` derives per-episode seeds from `rng`; `evaluate_seeded` uses the
 caller's seeds so two policies can be compared on identical start states.
+
+The `_continuous` variants step the environment through the policy's squash: a
+greedy evaluation applies the same mean clamp the sampler does and then
+`center + half * tanh(mean)`, so it really is the mode of the trained density,
+and a stochastic evaluation draws a fresh `u` per step with the env's own RNG.
 
 ---
 
@@ -692,6 +840,27 @@ so tests can construct a position without duplicating the private state layout.
 
 Both environments treat running into a wall or their own body as a terminal
 `done`, and the step limit as `truncated`.
+
+### `envs/pendulum.h`
+
+```c
+Env *env_pendulum_create(Arena *arena);
+void pendulum_test_set_state(Env *e, real theta, real theta_dot);
+```
+
+Pendulum-v1: `obs_dim 3` (`cos theta, sin theta, theta_dot`), `act_dim 1`,
+200 steps, and the library's only *continuous* environment — it sets
+`continuous`, implements `step_continuous`, and exposes `action_min = {-2}` /
+`action_max = {2}` (torque). The dynamics are Gymnasium's: `dt = 0.05`,
+`g = 10`, `m = l = 1`, `max_speed = 8`, torque clamped to the bounds, and the
+reward is `-(angle_normalize(theta)^2 + 0.1 * theta_dot^2 + 0.001 * u^2)`.
+Episodes end by truncation at 200 steps (`done` is never set), which is exactly
+the case the trainer's bootstrap handles. `pendulum_test_set_state` is the
+testing hook: it installs a state directly so the Euler step can be checked
+against a hand computation.
+
+Train it with `train_ppo_continuous`, which reads the bounds through
+`vecenv_action_bounds` (see [`vecenv.h`](#vecenvh)).
 
 ---
 

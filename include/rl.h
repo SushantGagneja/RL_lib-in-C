@@ -82,6 +82,15 @@ void train_a2c(Env *env, Net *model, const TrainCfg *config,
 void train_ppo(Env *env, Net *model, const TrainCfg *config,
                Arena *train_arena);
 
+// Continuous-action PPO. Same rollout/GAE/minibatching structure as train_ppo,
+// but the policy is the diagonal Gaussian produced by
+// continuous_actor_critic_build(), so actions are real vectors of
+// env->act_dim values clamped to env->action_min/action_max, and the learned
+// log standard deviation is updated by the same optimiser. Requires a
+// continuous-action environment (env->continuous).
+void train_ppo_continuous(Env *env, Net *model, const TrainCfg *config,
+                          Arena *train_arena);
+
 // Evaluates an actor model on an Env across a number of episodes. `greedy`
 // selects argmax actions; otherwise actions are sampled.
 // The seed-less variant derives per-episode seeds from `rng`; the seeded
@@ -91,5 +100,12 @@ EvalResult evaluate(Env *env, Net *model, Rng *rng,
                          u32 episodes, b32 greedy);
 EvalResult evaluate_seeded(Env *env, Net *model, const u64 *seeds,
                                 u32 num_episodes, b32 greedy);
+
+// Continuous counterparts. `deterministic` uses the policy mean (clamped to the
+// environment's bounds) instead of sampling from the Gaussian.
+EvalResult evaluate_continuous(Env *env, Net *model, Rng *rng, u32 episodes,
+                               b32 deterministic);
+EvalResult evaluate_continuous_seeded(Env *env, Net *model, const u64 *seeds,
+                                      u32 num_episodes, b32 deterministic);
 
 #endif // RL_H

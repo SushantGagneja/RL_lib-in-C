@@ -47,6 +47,17 @@ void actor_critic_build(Arena *arena, Net *model, Rng *rng, u32 obs_dim,
                         const u32 *hidden_dims, u32 num_hidden, u32 act_dim,
                         u32 batch_size);
 
+// Continuous-action actor-critic: a mean head (`model->mean`, act_dim x 1) plus
+// a value head, and a learnable log standard deviation (`model->log_std`,
+// act_dim x 1) shared by every batch column. `log_std_init` seeds log(sigma);
+// pass 0 for sigma = 1, or something like -0.5 to start with a smaller
+// exploration noise. `model->output` stays NULL: this model has no action
+// probabilities, so the discrete-only paths cannot be used on it by mistake.
+void continuous_actor_critic_build(Arena *arena, Net *model, Rng *rng,
+                                   u32 obs_dim, const u32 *hidden_dims,
+                                   u32 num_hidden, u32 act_dim, u32 batch_size,
+                                   real log_std_init);
+
 // Rebuilds the batched training subgraph (batch_input -> batch_logits /
 // batch_value) for a new minibatch size. The parameter tensors are shared, not
 // re-created, so the model keeps its weights; only the fixed-size batch views

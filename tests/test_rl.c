@@ -5,6 +5,7 @@
 #include "graph.h"
 #include "base.h"
 #include "envs/cartpole.h"
+#include "envs/pendulum.h"
 #include "linalg.h"
 #include "layers.h"
 #include "optim.h"
@@ -489,6 +490,200 @@ static void test_ppo_determinism(void) {
   printf("OK\n");
 }
 
+// ── Continuous (squashed Gaussian) builder ───────────────────────────
+
+static void test_continuous_builder(void) {
+  printf("  continuous actor-critic builder... ");
+  Arena *arena = arena_new(MiB(64));
+  Net *model = net_new(arena);
+  Rng rng;
+  rng_seed(&rng, 7, 1);
+
+  // Per-dimension bounds, deliberately not symmetric between dimensions.
+  const real lo[2] = {-2.0f, -0.5f};
+  const real hi[2] = {2.0f, 0.5f};
+
+  const u32 hidden[] = {16, 16};
+  continuous_actor_critic_build(arena, model, &rng, 3, hidden, 2, 2, 8, -1.5f);
+
+  ASSERT_TRUE(model->mean != NULL, "mean head built");
+  ASSERT_TRUE(model->batch_mean != NULL, "batched mean built");
+  ASSERT_TRUE(model->value != NULL, "value head built");
+  ASSERT_TRUE(model->batch_value != NULL, "batched value head built");
+  ASSERT_TRUE(model->log_std != NULL, "log_std parameter built");
+  ASSERT_TRUE(model->log_std->val->rows == 2, "one log_std per action dim");
+  ASSERT_TRUE(model->output == NULL,
+              "no discrete softmax head (discrete paths stay unusable)");
+  ASSERT_TRUE(model->fwd.len > 0 && model->train.len > 0, "schedules built");
+  ASSERT_TRUE(net_batch_size(model) == 8, "batch size reported");
+  ASSERT_TRUE(real_fabs(model->log_std->val->data[0] + 1.5f) < 1e-6f,
+              "log_std initialised from log_std_init");
+
+  // log_std must be a registered parameter: that is what makes the optimiser,
+  // the gradient clip and the checkpoint writer cover it.
+  b32 registered = false;
+  for (u32 i = 0; i < model->n_params; i++) {
+    if (model->params[i] == model->log_std) {
+      registered = true;
+    }
+  }
+  ASSERT_TRUE(registered, "log_std is a registered parameter");
+
+  // Samples are squashed into the box, dimension by dimension, and the sampler
+  // hands back the pre-squash coordinate the surrogate's density is defined on.
+  Mat *act = mat_new(arena, 2, 1);
+  Mat *us = mat_new(arena, 2, 1);
+  Mat *back = mat_new(arena, 2, 1);
+  b32 inside = true;
+  real worst = (real)0;
+  for (u32 i = 0; i < 256; i++) {
+    RL_LIB_CHECK(mat_gaussian_sample(act, us, model->mean->val,
+                                     model->log_std->val, lo, hi, &rng));
+    if (act->data[0] < lo[0] || act->data[0] > hi[0] || act->data[1] < lo[1] ||
+        act->data[1] > hi[1]) {
+      inside = false;
+    }
+    // The action is exactly the squash of the returned u, and away from the
+    // bounds the documented inverse recovers u from the action.
+    for (u32 d = 0; d < 2; d++) {
+      const real center = (real)0.5f * (lo[d] + hi[d]);
+      const real half = (real)0.5f * (hi[d] - lo[d]);
+      if (real_fabs(act->data[d] - (center + half * real_tanh(us->data[d]))) >
+          1e-6f) {
+        inside = false;
+      }
+    }
+    RL_LIB_CHECK(mat_gaussian_unsquash(back, act, lo, hi));
+    for (u32 d = 0; d < 2; d++) {
+      const real du = real_fabs(back->data[d] - us->data[d]);
+      if (du > worst) {
+        worst = du;
+      }
+    }
+  }
+  ASSERT_TRUE(inside, "256 samples stay in the box and match their pre-squash u");
+  ASSERT_TRUE(worst < 1e-4f, "the unsquash inverse recovers the sampled u");
+
+  // A batched view can be rebuilt without touching the parameters.
+  net_set_batch_size(arena, model, 16);
+  ASSERT_TRUE(net_batch_size(model) == 16, "batch size raised to 16");
+  ASSERT_TRUE(model->batch_mean->val->cols == 16, "batched mean follows");
+  ASSERT_TRUE(model->batch_value->val->cols == 16, "batched value follows");
+  ASSERT_TRUE(real_fabs(model->log_std->val->data[0] + 1.5f) < 1e-6f,
+              "log_std survives a rebuild");
+
+  arena_dispose(arena);
+  printf("OK\n");
+}
+
+// ── Pendulum learning smoke test (continuous PPO) ────────────────────
+
+static void test_ppo_continuous_learning_smoke(void) {
+  printf("  Pendulum continuous PPO learns... ");
+  Arena *arena = arena_new(GiB(1));
+  Net *model = net_new(arena);
+  Env *env = env_pendulum_create(arena);
+  Rng rng;
+  rng_seed(&rng, 42, 1);
+
+  const u32 hidden[] = {32, 32};
+  const u32 batch = 32;
+  continuous_actor_critic_build(arena, model, &rng, env->obs_dim, hidden, 2,
+                                env->act_dim, batch, -2.0f);
+
+  // Fixed evaluation seeds, so "before" and "after" see the same episodes.
+  u64 seeds[8];
+  Rng seed_rng;
+  rng_seed(&seed_rng, 777, 1);
+  for (u32 i = 0; i < 8; i++) {
+    seeds[i] = ((u64)rng_u32(&seed_rng) << 32) ^ (u64)rng_u32(&seed_rng);
+  }
+  const EvalResult before = evaluate_continuous_seeded(env, model, seeds, 8, true);
+  const real log_std_before = model->log_std->val->data[0];
+
+  TrainCfg cfg = {
+      .epochs = 150,
+      .rollout_size = 128,
+      .max_steps = env->max_steps,
+      .learning_rate = 3e-4f,
+      .gamma = 0.9f,
+      .lambda = 0.95f,
+      .vf_coef = 0.5f,
+      .entropy_coef = 0.0f,
+      .seed = 42,
+      .optim = OPT_ADAM,
+      .max_grad_norm = 0.5f,
+      .batch_size = batch,
+      .num_envs = 8,
+      .ppo_epochs = 4,
+      .ppo_clip = 0.2f,
+  };
+  train_ppo_continuous(env, model, &cfg, arena);
+
+  const EvalResult after = evaluate_continuous_seeded(env, model, seeds, 8, true);
+  printf("(%.1f -> %.1f) ", before.avg_return, after.avg_return);
+  ASSERT_TRUE(after.avg_return > before.avg_return + 100.0f,
+              "the return improves by a wide margin");
+  ASSERT_TRUE(after.avg_steps == (real)env->max_steps,
+              "Pendulum episodes always run to the time limit");
+  ASSERT_TRUE(model->log_std->val->data[0] != log_std_before,
+              "log_std is updated by the optimiser, not frozen");
+  ASSERT_TRUE(real_exp(model->log_std->val->data[0]) > 0.0f,
+              "log_std stays in a sane range");
+  ASSERT_TRUE(evaluate_continuous(env, model, &rng, 4, true).avg_return <= 0.0f,
+              "returns are non-positive, as Pendulum's cost is");
+  ASSERT_TRUE(evaluate_continuous(env, model, &rng, 4, false).avg_return <= 0.0f,
+              "sampled evaluation returns are non-positive too");
+
+  arena_dispose(arena);
+  printf("OK\n");
+}
+
+// ── Continuous PPO same-seed determinism ─────────────────────────────
+
+static void test_ppo_continuous_determinism(void) {
+  printf("  continuous PPO same seed => identical weights... ");
+  real checksum[2];
+
+  for (u32 run = 0; run < 2; run++) {
+    Arena *arena = arena_new(GiB(1));
+    Net *model = net_new(arena);
+    Env *env = env_pendulum_create(arena);
+    Rng rng;
+    rng_seed(&rng, 1234, 1);
+
+    continuous_actor_critic_build(arena, model, &rng, env->obs_dim,
+                                  (u32[]){32, 32}, 2, env->act_dim, 32, -1.0f);
+
+    TrainCfg cfg = {
+        .epochs = 8,
+        .rollout_size = 64,
+        .max_steps = env->max_steps,
+        .learning_rate = 3e-4f,
+        .gamma = 0.9f,
+        .lambda = 0.95f,
+        .vf_coef = 0.5f,
+        .entropy_coef = 0.0f,
+        .seed = 1234,
+        .optim = OPT_ADAM,
+        .max_grad_norm = 0.5f,
+        .batch_size = 32,
+        .num_envs = 4,
+        .ppo_epochs = 4,
+        .ppo_clip = 0.2f,
+    };
+    train_ppo_continuous(env, model, &cfg, arena);
+
+    checksum[run] = param_checksum(model);
+    arena_dispose(arena);
+  }
+
+  printf("(%.6f vs %.6f) ", checksum[0], checksum[1]);
+  ASSERT_TRUE(checksum[0] == checksum[1],
+              "continuous PPO weights identical across runs");
+  printf("OK\n");
+}
+
 // ── Parameter registry is not capped at a fixed count ────────────────
 
 static void test_param_registry_growth(void) {
@@ -673,6 +868,9 @@ int main(void) {
   test_batch_equivalence();
   test_cartpole_learning_smoke();
   test_ppo_learning_smoke();
+  test_continuous_builder();
+  test_ppo_continuous_learning_smoke();
+  test_ppo_continuous_determinism();
   test_determinism();
   test_ppo_determinism();
   test_param_registry_growth();
