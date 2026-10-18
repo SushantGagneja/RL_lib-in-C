@@ -5,6 +5,12 @@ version yet; entries below are grouped by the review that prompted them.
 
 ## Unreleased
 
+### Project renamed
+- The project is now **RL_lib-in-C**: `CRL_*` macros and `[cRL ...]` messages
+  became `RL_LIB_*` / `[RL_lib-in-C ...]`, and the benchmark binary is
+  `rl_lib_bench`.
+- Added an **MIT** `LICENSE`.
+
 ### Rewritten (independence pass)
 - The engine core was reimplemented from scratch:
   - `graph.c` / `graph.h` — the autograd graph no longer uses per-op function

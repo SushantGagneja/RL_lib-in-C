@@ -12,8 +12,7 @@ flatter the algorithms.
 
 ## License
 
-**No `LICENSE` file is included yet — add one before publishing or
-redistributing.**
+MIT — see [`LICENSE`](LICENSE). Copyright (c) 2026 Sushant Gagneja.
 
 The engine here is an original implementation written for this project:
 
@@ -24,9 +23,6 @@ The engine here is an original implementation written for this project:
 are new code. The pseudo-random number generator is **xoshiro256\*\*** with
 SplitMix64 seeding (public domain / CC0). There is no bundled third-party code,
 so there is nothing to attribute and no external license to carry.
-
-Pick and add a license (MIT and Apache-2.0 are both fine for a library like
-this) before distributing.
 
 ---
 
@@ -217,7 +213,6 @@ Tests: 23 passed, 0 failed
 
 ## Known limitations
 
-- **No `LICENSE` yet.** Add one before distributing (see the top of this file).
 - **Performance is modest and honest.** MatMul is a scalar triple loop
   (~16 GFLOPS at 256×256, ~10× a naive loop); there is no SIMD, no threading,
   and no vectorized environments. "High-performance" is not claimed.
