@@ -122,6 +122,14 @@ independently reimplemented, and carried through the Phase 0–5 roadmap.
 - `examples/train_a2c.c` and `examples/train_ppo.c`.
 
 ### Changed
+- **`MAX_PARAMS` is gone.** The parameter registry (`Net.params`) now doubles
+  through the arena, so models are no longer capped at 128 parameters.
+  `MAX_ARITY` stays at 2, which is a property of the op set (every operation is
+  unary or binary) rather than a capacity limit.
+- **The minibatch size is a runtime knob.** `net_set_batch_size` /
+  `net_batch_size` rebuild the batched subgraph from the architecture the
+  builders now record, sharing the existing parameter tensors, and the trainers
+  apply `TrainCfg.batch_size` before sizing anything from the graph.
 - Removed the short-name macros from the linear-algebra header; everything uses
   the `mat_*` names.
 - Extracted a `Dense` struct (`dense_new` / `dense_apply`) and deleted the three

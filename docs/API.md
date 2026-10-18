@@ -307,7 +307,9 @@ typedef struct { Tensor **ops; u32 len; } Schedule;
 
 typedef struct {
   u32 n_tensors;
-  Tensor *params[MAX_PARAMS]; u32 n_params;
+  Tensor **params;       // grows through the arena; no fixed cap
+  u32 n_params, params_cap;
+  NetArchSpec *arch;     // private record of the builder's architecture
   Tensor *input, *output, *advantage, *cost;
   Tensor *batch_input, *batch_logits, *batch_value, *value;
   Schedule fwd, train, loss_plan;
@@ -321,7 +323,9 @@ place — there is no per-operation function-pointer table to keep in sync.
 `Net` is a flat, topologically ordered registry of tensors plus the schedules
 built from them. Parameter tensors carry `TENSOR_PARAM`; `grad` exists only on
 tensors created with `TENSOR_GRAD`. `advantage` and `cost` are the slots the
-trainers seed loss gradients from.
+trainers seed loss gradients from. The parameter table starts at 16 entries and
+doubles through the arena as parameters are registered, so a model is not capped
+at an arbitrary parameter count.
 
 ```c
 Tensor *tensor_create(Arena *arena, Net *model, u32 rows, u32 cols, u32 flags);
@@ -399,8 +403,28 @@ batched input without duplicating weights.
 * batched training — `batch_input (obs_dim x B) -> batch_logits (act_dim x B)`
   and `batch_value (1 x B)`;
 
-with a shared trunk and separate actor/value heads. `batch_size` must be the
-fixed minibatch size the trainer will use (`TrainCfg.batch_size`).
+with a shared trunk and separate actor/value heads. `batch_size` is the
+minibatch size the batched graph starts out built for; it is not a permanent
+choice — see `net_set_batch_size` below.
+
+### Changing the minibatch size
+
+```c
+b32 net_set_batch_size(Arena *arena, Net *model, u32 batch_size);
+u32 net_batch_size(const Net *model);
+```
+
+The builders record the architecture, so the batched subgraph
+(`batch_input -> batch_logits` / `batch_value`) can be rebuilt for a different
+minibatch size while sharing the same parameter tensors — the weights are
+untouched, and the batch and single-sample graphs keep agreeing. This is what
+lets `TrainCfg.batch_size` be a runtime choice: the trainers call
+`net_set_batch_size` themselves before sizing any buffer from the graph, so
+asking for 8 when the model was built for 64 just works. Returns `false` for a
+model that was not built by `actor_build` / `actor_critic_build` (there is no
+recorded architecture to rebuild from), and `true` immediately when the size
+already matches. Pointers into `batch_input` / `batch_logits` / `batch_value`
+are invalidated by a rebuild.
 
 ---
 
@@ -576,10 +600,12 @@ typedef struct {
 typedef struct { real avg_return, avg_steps; } EvalResult;
 ```
 
-`batch_size` must match the `batch_size` the model was built with. `epochs` is
-the number of updates for A2C and PPO and the number of passes for REINFORCE.
-`lambda`, `vf_coef` and `entropy_coef` are ignored by REINFORCE; `num_envs`,
-`ppo_epochs` and `ppo_clip` are PPO-only.
+`batch_size` is the minibatch size to train with. Zero means "use whatever the
+graph is already built for"; a non-zero value is applied to the model through
+`net_set_batch_size`, so it does not have to match the size the model was built
+with. `epochs` is the number of updates for A2C and PPO and the number of passes
+for REINFORCE. `lambda`, `vf_coef` and `entropy_coef` are ignored by REINFORCE;
+`num_envs`, `ppo_epochs` and `ppo_clip` are PPO-only.
 
 ### Rollouts
 
@@ -611,8 +637,9 @@ void train_ppo(Env *env, Net *model, const TrainCfg *config, Arena *train_arena)
 
 All three mutate `model`'s parameters in place and allocate their rollout
 buffers from `train_arena`. `train_reinforce` needs an `actor_build` model;
-`train_a2c` and `train_ppo` need an `actor_critic_build` model and `batch_size`
-matching the graph's batch dimension.
+`train_a2c` and `train_ppo` need an `actor_critic_build` model. Each applies
+`config->batch_size` to the model first, so the minibatch size is a runtime
+choice — a hand-built graph, which cannot be resized, still has to match.
 
 | | REINFORCE | A2C | PPO |
 |---|---|---|---|

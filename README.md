@@ -43,7 +43,10 @@ so there is nothing to attribute and no external license to carry.
 - **Seeded xoshiro256\*\* PRNG** (SplitMix64 seeding, public domain) — isolated
   `Rng` state per environment, weight initializer, and trainer.
 - **Discrete actor / actor-critic builders** with a shared `Dense` struct and
-  He-uniform initialization (tiny-gain policy head).
+  He-uniform initialization (tiny-gain policy head). The builders record the
+  architecture, so `net_set_batch_size` can rebuild the batched training graph
+  for a new minibatch size without touching the weights — `TrainCfg.batch_size`
+  is a runtime knob, not a build-time constant.
 - **Optimizers** — SGD and Adam with bias correction and global gradient-norm
   clipping (with a non-finite guard).
 - **Algorithms** — REINFORCE with mean-baseline normalization, Advantage
@@ -220,7 +223,7 @@ make clean
 | `test_mat` | 13 checks over MatMul (NN/NT/TN/TT), SIMD-vs-scalar agreement, softmax, ReLU, add/sub, broadcast add, mul/tanh/MSE |
 | `test_gradcheck` (f32) | the same 10 suites in the default build (looser tolerance) |
 | `test_envs` | 45 checks: CartPole bounds/termination/determinism; Snake reset, grid validation, wall/self collision, tail vacate, eating; VecEnv shape, determinism, independent clones, and auto-reset terminal-observation capture |
-| `test_rl` | 25 checks: GAE vs a hand-computed trajectory, one Adam step, grad clipping, actor-critic build, value-head learning, batched-vs-per-sample gradient equivalence, CartPole learning smoke tests for REINFORCE and PPO, and same-seed determinism for both |
+| `test_rl` | 47 checks: GAE vs a hand-computed trajectory, one Adam step, grad clipping, actor-critic build, value-head learning, batched-vs-per-sample gradient equivalence, a parameter registry grown past 128 entries, rebuilding the batched graph for a new minibatch size (weights preserved, batch and single-sample inference agree), CartPole learning smoke tests for REINFORCE and PPO, and same-seed determinism for both |
 | `test_checkpoint` | 53 checks: byte-exact parameter round trips, bit-exact Adam-state resume, parameter-only and optimiser-only files, and rejection of missing, corrupt, truncated, wrong-width, wrongly-sized and wrongly-shaped files — each verified to leave the model untouched |
 
 `make test-double` then rebuilds the library with `-DRL_LIB_USE_DOUBLE` and runs
@@ -335,14 +338,14 @@ Tests: 53 passed, 0 failed
   library to f64 with `-DRL_LIB_USE_DOUBLE`; the gradient check uses this, and
   `make test-double` now runs every suite in f64 as well.
 - **Snake is not solved.** REINFORCE + Adam plateaus well below a BFS planner.
-- **Fixed capacity limits.** `MAX_PARAMS` is 128; exceeding it aborts.
-  `MAX_ARITY` is 2 because every operation in the set is unary or binary — that
-  is a property of the op set, not a cap. The arena is bump-only (no reuse
-  within a run except the `arena_mark`/`arena_rewind` temp scopes).
-- **One graph per batch size.** Inference (B=1) and batched training are
-  separate graphs sharing parameter pointers; the batch size is frozen at build
-  time. `TrainCfg.batch_size` is asserted against the graph, not used to resize
-  it.
+- **The arena is bump-only.** Nothing is reused within a run except through the
+  `arena_mark`/`arena_rewind` temp scopes, and rebuilding a batched graph leaves
+  its predecessor in the arena. `MAX_ARITY` is 2 because every operation in the
+  set is unary or binary — a property of the op set, not a capacity cap.
+- **Resizing applies to builder-made models.** `net_set_batch_size` works for
+  graphs from `actor_build` / `actor_critic_build` (which record their
+  architecture); a hand-built graph has no architecture to rebuild from, so its
+  batch size stays fixed and the trainer asserts the match.
 - **Checkpoints cover parameters and optimiser state, not the RNG.** A resumed
   run re-derives its generator from `TrainCfg.seed`, so it continues from the
   saved weights but is not bit-identical to a run that was never interrupted.

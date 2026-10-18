@@ -1,4 +1,5 @@
 #include "rl.h"
+#include "layers.h"
 #include "vecenv.h"
 #include <math.h>
 #include <stdio.h>
@@ -121,6 +122,18 @@ static void shuffle_samples(real **obs, u32 *actions, real *values, real *extra_
   free(b_copy);
 }
 
+// Applies TrainCfg.batch_size to the model before anything is sized from the
+// graph. A model built by actor_build / actor_critic_build can rebuild its
+// batched subgraph for the requested minibatch size, which makes the batch size
+// a runtime knob; a hand-built graph has no recorded architecture, so the size
+// stays fixed and the assertions in the trainers report the mismatch.
+static void apply_config_batch_size(Arena *arena, Net *model,
+                                    const TrainCfg *config) {
+  if (config->batch_size > 0) {
+    (void)net_set_batch_size(arena, model, config->batch_size);
+  }
+}
+
 void train_reinforce(Env *env, Net *model, const TrainCfg *config,
                         Arena *train_arena) {
   RL_LIB_ASSERT(env != NULL && model != NULL && config != NULL,
@@ -128,6 +141,7 @@ void train_reinforce(Env *env, Net *model, const TrainCfg *config,
   RL_LIB_ASSERT(model->fwd.len > 0,
              "train_reinforce: forward_graph is empty (forgot schedule_from?)");
   RL_LIB_ASSERT(train_arena != NULL, "train_reinforce: NULL arena");
+  apply_config_batch_size(train_arena, model, config);
 
   u32 rollout_size = config->rollout_size > 0 ? config->rollout_size : 32;
   u32 max_steps = config->max_steps > 0 ? config->max_steps : env->max_steps;
@@ -327,11 +341,14 @@ void train_a2c(Env *env, Net *model, const TrainCfg *config,
                   Arena *train_arena) {
   RL_LIB_ASSERT(env != NULL && model != NULL && config != NULL,
              "train_a2c: NULL argument");
+  RL_LIB_ASSERT(train_arena != NULL, "train_a2c: NULL arena");
+  // Size the batched graph (if the model supports it) before checking that it
+  // exists, so a model built with batch_size = 0 can still be trained in batches.
+  apply_config_batch_size(train_arena, model, config);
   RL_LIB_ASSERT(model->fwd.len > 0 && model->train.len > 0,
              "train_a2c: missing graph (use actor_critic_build)");
   RL_LIB_ASSERT(model->value != NULL && model->batch_value != NULL,
              "train_a2c: model has no value head");
-  RL_LIB_ASSERT(train_arena != NULL, "train_a2c: NULL arena");
 
   u32 rollout_size = config->rollout_size > 0 ? config->rollout_size : 32;
   u32 max_steps = config->max_steps > 0 ? config->max_steps : env->max_steps;
@@ -561,12 +578,15 @@ void train_ppo(Env *env, Net *model, const TrainCfg *config,
                Arena *train_arena) {
   RL_LIB_ASSERT(env != NULL && model != NULL && config != NULL,
                 "train_ppo: NULL argument");
+  RL_LIB_ASSERT(train_arena != NULL, "train_ppo: NULL arena");
+  RL_LIB_ASSERT(env->clone != NULL, "train_ppo: env does not implement clone");
+  // Size the batched graph (if the model supports it) before checking that it
+  // exists, so a model built with batch_size = 0 can still be trained in batches.
+  apply_config_batch_size(train_arena, model, config);
   RL_LIB_ASSERT(model->fwd.len > 0 && model->train.len > 0,
                 "train_ppo: missing graph (use actor_critic_build)");
   RL_LIB_ASSERT(model->value != NULL && model->batch_value != NULL,
                 "train_ppo: model has no value head");
-  RL_LIB_ASSERT(train_arena != NULL, "train_ppo: NULL arena");
-  RL_LIB_ASSERT(env->clone != NULL, "train_ppo: env does not implement clone");
 
   const u32 num_envs = config->num_envs > 0 ? config->num_envs : 1;
   const u32 rollout_len = config->rollout_size > 0 ? config->rollout_size : 32;

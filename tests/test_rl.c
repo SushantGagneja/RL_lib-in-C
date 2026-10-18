@@ -489,6 +489,179 @@ static void test_ppo_determinism(void) {
   printf("OK\n");
 }
 
+// ── Parameter registry is not capped at a fixed count ────────────────
+
+static void test_param_registry_growth(void) {
+  printf("  parameter registry grows past 128 entries... ");
+
+  Arena *arena = arena_new(MiB(16));
+  Net *model = net_new(arena);
+  Rng rng;
+  rng_seed(&rng, 1, 1);
+
+  Tensor *in = tensor_create(arena, model, 4, 1, TENSOR_PLAIN);
+  Tensor *cur = in;
+  const u32 layers = 200; // 2 parameters each, far past the old MAX_PARAMS = 128
+  for (u32 i = 0; i < layers; i++) {
+    Dense d = dense_new(arena, model, &rng, 4, 4, true, 1.0f);
+    cur = dense_apply(arena, model, &d, cur);
+  }
+
+  ASSERT_TRUE(model->n_params == layers * 2, "every parameter is registered");
+  ASSERT_TRUE(model->n_params > 128, "registry grew past the old fixed cap");
+  ASSERT_TRUE(model->params_cap >= model->n_params, "capacity covers the count");
+
+  b32 unique = true;
+  for (u32 i = 0; i < model->n_params && unique; i++) {
+    for (u32 j = i + 1; j < model->n_params; j++) {
+      if (model->params[i] == model->params[j]) {
+        unique = false;
+        break;
+      }
+    }
+  }
+  ASSERT_TRUE(unique, "no duplicate or dropped registrations");
+
+  // The optimizer iterates the registry, so it has to cope with the larger one.
+  Adam *adam = adam_new(arena, model, REAL_C(0.01));
+  zero_grad(model);
+  for (u32 i = 0; i < model->n_params; i++) {
+    mat_fill(model->params[i]->grad, REAL_C(1.0));
+  }
+  const real first_before = model->params[0]->val->data[0];
+  const real last_before =
+      model->params[model->n_params - 1]->val->data[0];
+  adam_step(adam, model);
+  ASSERT_TRUE(adam->step == 1, "optimiser stepped once over the larger registry");
+  ASSERT_TRUE(model->params[0]->val->data[0] != first_before,
+              "the first parameter was updated");
+  ASSERT_TRUE(model->params[model->n_params - 1]->val->data[0] != last_before,
+              "the last parameter was updated");
+
+  arena_dispose(arena);
+  printf("OK\n");
+}
+
+// ── The minibatch size is a runtime knob ─────────────────────────────
+
+static void test_batch_size_rebuild(void) {
+  printf("  batch size is rebuildable at runtime... ");
+
+  Arena *arena = arena_new(MiB(16));
+  Rng rng;
+  rng_seed(&rng, 3, 3);
+  Net *model = net_new(arena);
+  const u32 hidden[1] = {8};
+  actor_critic_build(arena, model, &rng, 4, hidden, 1, 3, 16);
+
+  ASSERT_TRUE(net_batch_size(model) == 16, "initial batch dimension is 16");
+  ASSERT_TRUE(net_set_batch_size(arena, model, 16),
+              "a same-size request succeeds as a no-op");
+  ASSERT_TRUE(net_batch_size(model) == 16, "still 16");
+
+  const real before = param_checksum(model);
+  ASSERT_TRUE(net_set_batch_size(arena, model, 5), "resize to 5 succeeds");
+  ASSERT_TRUE(net_batch_size(model) == 5, "batch dimension is now 5");
+  ASSERT_TRUE(model->train.len > 0, "training schedule was rebuilt");
+  ASSERT_TRUE(param_checksum(model) == before,
+              "the rebuild reuses the weights instead of re-initialising them");
+  ASSERT_TRUE(model->batch_logits->val->rows == 3 &&
+                  model->batch_logits->val->cols == 5,
+              "batch logits have the new shape");
+  ASSERT_TRUE(model->batch_value->val->rows == 1 &&
+                  model->batch_value->val->cols == 5,
+              "batch value has the new shape");
+
+  // The rebuilt batch graph must agree with single-sample inference.
+  const u32 batch = 5;
+  real obs[4 * 5];
+  for (u32 i = 0; i < 4 * batch; i++) {
+    obs[i] = ((real)(i % 7) / (real)7) - REAL_C(0.5);
+  }
+  for (u32 b = 0; b < batch; b++) {
+    for (u32 r = 0; r < 4; r++) {
+      model->batch_input->val->data[r * batch + b] = obs[b * 4 + r];
+    }
+  }
+  schedule_run(&model->train);
+
+  real max_value_diff = (real)0;
+  b32 argmax_agrees = true;
+  for (u32 b = 0; b < batch; b++) {
+    for (u32 r = 0; r < 4; r++) {
+      model->input->val->data[r] = obs[b * 4 + r];
+    }
+    schedule_run(&model->fwd);
+
+    const real diff = real_fabs(model->value->val->data[0] -
+                                model->batch_value->val->data[b]);
+    if (diff > max_value_diff) {
+      max_value_diff = diff;
+    }
+
+    u32 single_arg = 0;
+    u32 batch_arg = 0;
+    for (u32 k = 1; k < 3; k++) {
+      if (model->output->val->data[k] > model->output->val->data[single_arg]) {
+        single_arg = k;
+      }
+      if (model->batch_logits->val->data[k * batch + b] >
+          model->batch_logits->val->data[batch_arg * batch + b]) {
+        batch_arg = k;
+      }
+    }
+    if (single_arg != batch_arg) {
+      argmax_agrees = false;
+    }
+  }
+  printf("(value max diff %.2e) ", (double)max_value_diff);
+  ASSERT_TRUE(max_value_diff < REAL_C(1e-4),
+              "value head agrees between the batch and single-sample graphs");
+  ASSERT_TRUE(argmax_agrees, "argmax action agrees for every batch column");
+
+  // A model without a recorded architecture cannot be resized, and the request
+  // is rejected rather than silently ignored.
+  Net *manual = net_new(arena);
+  (void)tensor_create(arena, manual, 2, 2, TENSOR_PLAIN);
+  ASSERT_TRUE(!net_set_batch_size(arena, manual, 4),
+              "a hand-built graph refuses a resize");
+  ASSERT_TRUE(net_batch_size(manual) == 0, "and has no batch dimension");
+
+  // The trainers apply TrainCfg.batch_size, so a size the model was not built
+  // with just works.
+  Arena *train_arena = arena_new(MiB(64));
+  Net *trained = net_new(arena);
+  const u32 hidden2[1] = {8};
+  actor_critic_build(arena, trained, &rng, 4, hidden2, 1, 2, 16);
+  Env *env = env_cartpole_create(arena);
+  const TrainCfg cfg = {
+      .epochs = 3,
+      .rollout_size = 16,
+      .max_steps = 500,
+      .learning_rate = 3e-4f,
+      .gamma = 0.99f,
+      .lambda = 0.95f,
+      .vf_coef = 0.5f,
+      .entropy_coef = 0.01f,
+      .seed = 4,
+      .verbose = 0,
+      .optim = OPT_ADAM,
+      .max_grad_norm = 0.5f,
+      .batch_size = 8,
+      .num_envs = 2,
+      .ppo_epochs = 2,
+      .ppo_clip = 0.2f,
+  };
+  train_ppo(env, trained, &cfg, train_arena);
+  ASSERT_TRUE(net_batch_size(trained) == 8,
+              "the trainer rebuilt the graph for TrainCfg.batch_size");
+  ASSERT_TRUE(trained->train.len > 0, "and trained through the rebuilt graph");
+
+  arena_dispose(train_arena);
+  arena_dispose(arena);
+  printf("OK\n");
+}
+
 int main(void) {
   printf("\n=== RL / optim / builder tests ===\n\n");
 
@@ -502,6 +675,8 @@ int main(void) {
   test_ppo_learning_smoke();
   test_determinism();
   test_ppo_determinism();
+  test_param_registry_growth();
+  test_batch_size_rebuild();
 
   printf("\n---\nTests: %u passed, %u failed\n\n", tests_passed, tests_failed);
   return tests_failed > 0 ? 1 : 0;

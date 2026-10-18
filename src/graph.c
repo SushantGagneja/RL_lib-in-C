@@ -94,6 +94,23 @@ static ShapeRule *shape_rule(OpKind op) {
 // Node construction
 // ---------------------------------------------------------------------------
 
+// Adds a parameter to the model's registry, growing the table through the arena
+// when it is full. Growth doubles the capacity, so registering N parameters
+// costs O(N) total copying, and the old table is simply abandoned to the arena
+// (no individual free, no cap).
+static void register_param(Arena *arena, Net *model, Tensor *t) {
+  if (model->n_params == model->params_cap) {
+    const u32 cap = (model->params_cap > 0) ? model->params_cap * 2u : 16u;
+    Tensor **grown = ARENA_ARR(arena, Tensor *, cap);
+    for (u32 i = 0; i < model->n_params; i++) {
+      grown[i] = model->params[i];
+    }
+    model->params = grown;
+    model->params_cap = cap;
+  }
+  model->params[model->n_params++] = t;
+}
+
 Tensor *tensor_create(Arena *arena, Net *model, u32 rows, u32 cols,
                       u32 flags) {
   Tensor *out = ARENA_OBJ(arena, Tensor);
@@ -109,8 +126,7 @@ Tensor *tensor_create(Arena *arena, Net *model, u32 rows, u32 cols,
   out->grad = (flags & TENSOR_GRAD) ? mat_new(arena, rows, cols) : NULL;
 
   if (flags & TENSOR_PARAM) {
-    RL_LIB_ASSERT(model->n_params < MAX_PARAMS, "Exceeded MAX_PARAMS");
-    model->params[model->n_params++] = out;
+    register_param(arena, model, out);
   }
 
   return out;

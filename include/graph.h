@@ -52,13 +52,23 @@ typedef struct {
   u32 len;
 } Schedule;
 
-#define MAX_PARAMS 128
+// Private architecture record owned by the builders in layers.c. `Net` only
+// holds an opaque pointer to it, which keeps graph.h free of layer types while
+// still letting a builder rebuild its batched subgraph for a new minibatch size
+// (see net_set_batch_size).
+typedef struct NetArchSpec NetArchSpec;
 
 typedef struct {
   u32 n_tensors;
 
-  Tensor *params[MAX_PARAMS];
+  // Parameters are registered as they are created. The table starts small and
+  // doubles through the arena, so a model is not capped at an arbitrary count.
+  Tensor **params;
   u32 n_params;
+  u32 params_cap;
+
+  // Set by actor_build / actor_critic_build; NULL for hand-built graphs.
+  NetArchSpec *arch;
 
   Tensor *input;
   Tensor *output;
