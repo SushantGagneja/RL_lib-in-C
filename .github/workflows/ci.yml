@@ -36,3 +36,14 @@ jobs:
       - uses: actions/checkout@v4
       - name: Sanitizer build and tests
         run: make asan
+
+  # The SIMD kernels are cross-checked against the scalar reference inside
+  # test_mat, but also build the whole library with the scalar backend forced to
+  # make sure the fallback path compiles and the dispatcher is still correct.
+  scalar-kernels:
+    name: scalar kernels (ubuntu-latest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Scalar-backend build and math tests
+        run: make ERR=1 EXTRA_CFLAGS=-DRL_SIMD_BACKEND=0 test_mat && ./test_mat

@@ -4,6 +4,7 @@
 #include "envs/cartpole.h"
 #include "envs/snake.h"
 #include "random.h"
+#include "vecenv.h"
 #include <math.h>
 #include <stdio.h>
 
@@ -224,6 +225,104 @@ static void test_snake_eat_grows(Arena *arena) {
   printf("OK\n");
 }
 
+// ── Vectorized environment ───────────────────────────────────────────
+
+static void test_vecenv_basics(Arena *arena) {
+  printf("  vecenv shape, determinism & independent clones... ");
+  Env *proto = env_cartpole_create(arena);
+  VecEnv *a = vecenv_new(arena, proto, 4);
+  VecEnv *b = vecenv_new(arena, proto, 4);
+
+  ASSERT_TRUE(a->num_envs == 4 && a->obs_dim == 4 && a->act_dim == 2,
+              "vecenv shape matches the prototype");
+  ASSERT_TRUE(a->envs[0] != a->envs[1] &&
+                  a->envs[0]->state != a->envs[1]->state,
+              "each clone allocates its own Env and state");
+
+  vecenv_reset(a, 1234);
+  vecenv_reset(b, 1234);
+
+  b32 same = true;
+  for (u64 i = 0; i < (u64)4 * 4; i++) {
+    if (a->obs[i] != b->obs[i]) same = false;
+  }
+  ASSERT_TRUE(same, "same reset seed => identical initial observations");
+
+  // Identical seed + identical per-step actions => identical trajectories.
+  u32 seq[50][4];
+  Rng r;
+  rng_seed(&r, 55, 1);
+  for (u32 t = 0; t < 50; t++) {
+    for (u32 i = 0; i < 4; i++) seq[t][i] = rng_below(&r, 2);
+  }
+  b32 traj_same = true;
+  for (u32 t = 0; t < 50; t++) {
+    vecenv_step(a, seq[t]);
+    vecenv_step(b, seq[t]);
+    for (u64 i = 0; i < (u64)4 * 4; i++) {
+      if (a->obs[i] != b->obs[i]) traj_same = false;
+    }
+    for (u32 i = 0; i < 4; i++) {
+      if (a->rewards[i] != b->rewards[i]) traj_same = false;
+    }
+  }
+  ASSERT_TRUE(traj_same, "same seed + actions => identical trajectories");
+
+  // Stepping one sub-environment by hand must not perturb a sibling.
+  real e1_before[4];
+  real e1_after[4];
+  for (u32 k = 0; k < 4; k++) e1_before[k] = a->obs[4u + k];
+  b32 d = false;
+  b32 tr = false;
+  a->envs[0]->step(a->envs[0], 1, &d, &tr);
+  a->envs[1]->observe(a->envs[1], e1_after);
+  b32 indep = true;
+  for (u32 k = 0; k < 4; k++) {
+    if (e1_before[k] != e1_after[k]) indep = false;
+  }
+  ASSERT_TRUE(indep, "cloned sub-environments have independent state");
+  printf("OK\n");
+}
+
+static void test_vecenv_autoreset(Arena *arena) {
+  printf("  vecenv auto-reset preserves the terminal observation... ");
+  Env *proto = env_cartpole_create(arena);
+  VecEnv *v = vecenv_new(arena, proto, 1);
+  // A second, stand-alone env replays the same actions to know what the
+  // terminal observation must have been.
+  Env *mirror = env_cartpole_create(arena);
+
+  vecenv_reset(v, 7);
+  mirror->reset(mirror, 7);
+
+  const u32 act = 1; // always push right: the pole always falls
+  b32 completed = false;
+  for (u32 t = 0; t < 600; t++) {
+    b32 md = false;
+    b32 mt = false;
+    mirror->step(mirror, act, &md, &mt);
+    real mirror_obs[4];
+    mirror->observe(mirror, mirror_obs);
+
+    u32 actions[1] = {act};
+    vecenv_step(v, actions);
+
+    if (v->dones[0]) {
+      b32 final_ok = true;
+      for (u32 k = 0; k < 4; k++) {
+        if (v->final_obs[k] != mirror_obs[k]) final_ok = false;
+      }
+      ASSERT_TRUE(final_ok, "final_obs == the terminal observation");
+      ASSERT_TRUE(v->terminals[0] != 0, "a fall is a terminal, not a truncation");
+      ASSERT_TRUE(v->truncateds[0] == 0, "not truncated");
+      completed = true;
+      break;
+    }
+  }
+  ASSERT_TRUE(completed, "an episode completed within the horizon");
+  printf("OK\n");
+}
+
 int main(void) {
   Arena *arena = arena_new(MiB(16));
   printf("\n=== Environment Interface Unit Tests ===\n\n");
@@ -237,6 +336,9 @@ int main(void) {
   test_snake_self_collision(arena);
   test_snake_tail_vacate(arena);
   test_snake_eat_grows(arena);
+
+  test_vecenv_basics(arena);
+  test_vecenv_autoreset(arena);
 
   printf("\n---\nPassed: %u  Failed: %u\n\n", tests_passed, tests_failed);
   arena_dispose(arena);

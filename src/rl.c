@@ -1,4 +1,5 @@
 #include "rl.h"
+#include "vecenv.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -525,6 +526,284 @@ void train_a2c(Env *env, Net *model, const TrainCfg *config,
         epoch + 1 == config->epochs) {
       printf("Epoch %4u/%u | Mean Return: %7.2f | Samples: %5u\n", epoch + 1,
              config->epochs, total_reward / (real)rollout_size, sample_count);
+    }
+  }
+}
+
+// Runs one forward pass on a single observation and returns the critic value.
+// Clobbers the forward graph's activations, so call it between rollouts and
+// before the training loop starts.
+static real critic_value(Net *model, const real *obs, u32 obs_dim) {
+  memcpy(model->input->val->data, obs, sizeof(real) * obs_dim);
+  schedule_run(&model->fwd);
+  return model->value->val->data[0];
+}
+
+// Samples one action from already-computed policy probabilities and returns it.
+// The chosen action's log-probability is written to *logp_out, floored at 1e-8
+// so the PPO ratio stays finite.
+static u32 sample_action_logp(Rng *rng, const Mat *probs, real *logp_out) {
+  const u32 action = sample_action(rng, probs);
+  real p = probs->data[action];
+  if (p < 1e-8f) {
+    p = 1e-8f;
+  }
+  *logp_out = real_log(p);
+  return action;
+}
+
+// PPO with the clipped surrogate objective. The rollout is gathered from
+// `config->num_envs` parallel environments, then replayed for
+// `config->ppo_epochs` passes of shuffled minibatches. Unlike A2C (one update
+// per rollout), PPO takes one optimiser step per minibatch, which is what lets
+// it reuse the rollout data on-policy.
+void train_ppo(Env *env, Net *model, const TrainCfg *config,
+               Arena *train_arena) {
+  RL_LIB_ASSERT(env != NULL && model != NULL && config != NULL,
+                "train_ppo: NULL argument");
+  RL_LIB_ASSERT(model->fwd.len > 0 && model->train.len > 0,
+                "train_ppo: missing graph (use actor_critic_build)");
+  RL_LIB_ASSERT(model->value != NULL && model->batch_value != NULL,
+                "train_ppo: model has no value head");
+  RL_LIB_ASSERT(train_arena != NULL, "train_ppo: NULL arena");
+  RL_LIB_ASSERT(env->clone != NULL, "train_ppo: env does not implement clone");
+
+  const u32 num_envs = config->num_envs > 0 ? config->num_envs : 1;
+  const u32 rollout_len = config->rollout_size > 0 ? config->rollout_size : 32;
+  const real gamma = config->gamma > 0.0f ? config->gamma : 0.99f;
+  const real lambda = config->lambda > 0.0f ? config->lambda : 0.95f;
+  const real vf_coef = config->vf_coef > 0.0f ? config->vf_coef : 0.5f;
+  const real entropy_coef = config->entropy_coef;
+  const real lr = config->learning_rate > 0.0f ? config->learning_rate : 3e-4f;
+  const real clip_eps = config->ppo_clip > 0.0f ? config->ppo_clip : 0.2f;
+  const u32 ppo_epochs = config->ppo_epochs > 0 ? config->ppo_epochs : 10;
+
+  const u32 obs_dim = env->obs_dim;
+  const u32 batch_size = model->batch_input->val->cols;
+  RL_LIB_ASSERT(config->batch_size == 0 || config->batch_size == batch_size,
+                "TrainCfg.batch_size does not match the graph's batch dimension");
+
+  const u32 total = num_envs * rollout_len;
+  RL_LIB_ASSERT(total >= batch_size,
+                "train_ppo: rollout smaller than one minibatch");
+
+  const u64 seed = config->seed != 0 ? config->seed : 42;
+  VecEnv *vec = vecenv_new(train_arena, env, num_envs);
+  vecenv_reset(vec, seed);
+
+  Rng rng;
+  rng_seed(&rng, seed, 1);
+  Rng shuf_rng;
+  rng_seed(&shuf_rng, seed ^ 0x9e3779b9ULL, 3);
+
+  Adam *adam =
+      (config->optim == OPT_ADAM) ? adam_new(train_arena, model, lr) : NULL;
+
+  printf("Starting PPO Training:\n");
+  printf("  Obs Dim: %u | Act Dim: %u | Updates: %u | Envs: %u | Rollout: %u | "
+         "Batch: %u | Clip: %.2f | PPO Epochs: %u | LR: %.4f\n\n",
+         obs_dim, env->act_dim, config->epochs, num_envs, rollout_len,
+         batch_size, clip_eps, ppo_epochs, lr);
+
+  // Rollout buffers, laid out env-major: index i * rollout_len + t.
+  real *obs_buf = ARENA_ARR(train_arena, real, (u64)total * obs_dim);
+  u32 *acts = ARENA_ARR(train_arena, u32, total);
+  real *logp_old = ARENA_ARR(train_arena, real, total);
+  real *rew_buf = ARENA_ARR(train_arena, real, total);
+  real *val_buf = ARENA_ARR(train_arena, real, total);
+  real *adv_buf = ARENA_ARR(train_arena, real, total);
+  real *ret_buf = ARENA_ARR(train_arena, real, total);
+  b8 *end_flag = ARENA_ARR(train_arena, b8, total);
+  b8 *term_flag = ARENA_ARR(train_arena, b8, total);
+  real *boot_val = ARENA_ARR(train_arena, real, total);
+  real *tail_val = ARENA_ARR(train_arena, real, num_envs);
+  real *ep_ret = ARENA_ARR(train_arena, real, num_envs);
+
+  u32 *step_actions = ARENA_ARR(train_arena, u32, num_envs);
+  u32 *order = ARENA_ARR(train_arena, u32, total);
+  u32 *batch_acts = ARENA_ARR(train_arena, u32, batch_size);
+  real *batch_advs = ARENA_ARR(train_arena, real, batch_size);
+  real *batch_oldlp = ARENA_ARR(train_arena, real, batch_size);
+  Mat *target_val_mat = mat_new(train_arena, 1, batch_size);
+  Mat *seed_pi = mat_new(train_arena, 1, 1);
+  Mat *seed_vf = mat_new(train_arena, 1, 1);
+  Mat *seed_ent = mat_new(train_arena, 1, 1);
+
+  for (u32 i = 0; i < num_envs; i++) {
+    ep_ret[i] = 0.0f;
+  }
+
+  for (u32 update = 0; update < config->epochs; update++) {
+    real episode_return_sum = 0.0f;
+    u64 episode_count = 0;
+
+    // 1. Collect `rollout_len` steps from every sub-environment.
+    for (u32 t = 0; t < rollout_len; t++) {
+      for (u32 i = 0; i < num_envs; i++) {
+        const real *obs = vec->obs + (u64)i * obs_dim;
+        memcpy(model->input->val->data, obs, sizeof(real) * obs_dim);
+        schedule_run(&model->fwd);
+
+        real logp = 0.0f;
+        const u32 action = sample_action_logp(&rng, model->output->val, &logp);
+
+        const u64 idx = (u64)i * rollout_len + t;
+        memcpy(obs_buf + idx * obs_dim, obs, sizeof(real) * obs_dim);
+        acts[idx] = action;
+        logp_old[idx] = logp;
+        val_buf[idx] = model->value->val->data[0];
+        step_actions[i] = action;
+      }
+
+      vecenv_step(vec, step_actions);
+
+      for (u32 i = 0; i < num_envs; i++) {
+        const u64 idx = (u64)i * rollout_len + t;
+        rew_buf[idx] = vec->rewards[i];
+        end_flag[idx] = vec->dones[i];
+        term_flag[idx] = vec->terminals[i];
+        boot_val[idx] = 0.0f;
+
+        ep_ret[i] += vec->rewards[i];
+        if (vec->dones[i]) {
+          episode_return_sum += ep_ret[i];
+          episode_count++;
+          ep_ret[i] = 0.0f;
+
+          // Time-limit truncation: bootstrap from the value of the final state.
+          if (vec->truncateds[i]) {
+            boot_val[idx] =
+                critic_value(model, vec->final_obs + (u64)i * obs_dim, obs_dim);
+          }
+        }
+      }
+    }
+
+    // Value of each env's current (post-rollout) state, for the last-step
+    // bootstrap of episodes that did not end inside the rollout.
+    for (u32 i = 0; i < num_envs; i++) {
+      tail_val[i] = critic_value(model, vec->obs + (u64)i * obs_dim, obs_dim);
+    }
+
+    // 2. GAE-Lambda per sub-environment (buffers are env-major).
+    for (u32 i = 0; i < num_envs; i++) {
+      real adv_next = 0.0f;
+      for (u32 step = 0; step < rollout_len; step++) {
+        const u32 t = rollout_len - 1 - step;
+        const u64 idx = (u64)i * rollout_len + t;
+
+        real v_next;
+        if (term_flag[idx]) {
+          v_next = 0.0f;
+        } else if (end_flag[idx]) {
+          v_next = boot_val[idx]; // truncated: value of the final observation
+        } else if (t + 1 < rollout_len) {
+          v_next = val_buf[idx + 1];
+        } else {
+          v_next = tail_val[i];
+        }
+
+        const real non_terminal = term_flag[idx] ? 0.0f : 1.0f;
+        const real delta =
+            rew_buf[idx] + gamma * v_next * non_terminal - val_buf[idx];
+        // The episode continues into step t+1 only if it did not end at t.
+        const real cont = end_flag[idx] ? 0.0f : 1.0f;
+        const real adv = delta + gamma * lambda * cont * adv_next;
+        adv_buf[idx] = adv;
+        ret_buf[idx] = adv + val_buf[idx];
+        adv_next = adv;
+      }
+    }
+
+    // 3. Normalize advantages over the whole rollout.
+    real adv_sum = 0.0f;
+    for (u32 i = 0; i < total; i++) {
+      adv_sum += adv_buf[i];
+    }
+    const real adv_mean = adv_sum / (real)total;
+    real adv_sq = 0.0f;
+    for (u32 i = 0; i < total; i++) {
+      const real d = adv_buf[i] - adv_mean;
+      adv_sq += d * d;
+    }
+    const real adv_std = real_sqrt(adv_sq / (real)total);
+    for (u32 i = 0; i < total; i++) {
+      adv_buf[i] = (adv_buf[i] - adv_mean) / (adv_std + 1e-8f);
+    }
+
+    // 4. PPO update: `ppo_epochs` passes of shuffled minibatches, one optimiser
+    // step per minibatch.
+    const u32 num_batches = total / batch_size;
+    zero_grad(model);
+
+    for (u32 pe = 0; pe < ppo_epochs; pe++) {
+      for (u32 i = 0; i < total; i++) {
+        order[i] = i;
+      }
+      for (u32 i = total; i > 1; i--) {
+        const u32 j = rng_below(&shuf_rng, i);
+        const u32 tmp = order[i - 1];
+        order[i - 1] = order[j];
+        order[j] = tmp;
+      }
+
+      for (u32 k = 0; k < num_batches; k++) {
+        for (u32 b = 0; b < batch_size; b++) {
+          const u32 idx = order[k * batch_size + b];
+          const real *obs = obs_buf + (u64)idx * obs_dim;
+          for (u32 r = 0; r < obs_dim; r++) {
+            model->batch_input->val->data[r * batch_size + b] = obs[r];
+          }
+          batch_acts[b] = acts[idx];
+          batch_advs[b] = adv_buf[idx];
+          batch_oldlp[b] = logp_old[idx];
+          target_val_mat->data[b] = ret_buf[idx];
+        }
+
+        schedule_run(&model->train);
+        schedule_zero_act(&model->train);
+
+        // The clipped surrogate is already a mean over the minibatch, so its
+        // gradient seed is 1; the value and entropy terms are weighted.
+        seed_pi->data[0] = 1.0f;
+        RL_LIB_CHECK(mat_ppo_policy_add_grad(
+            model->batch_logits->grad, model->batch_logits->val, batch_acts,
+            batch_advs, batch_oldlp, clip_eps, batch_size, seed_pi));
+
+        if (entropy_coef != 0.0f) {
+          seed_ent->data[0] = -entropy_coef;
+          RL_LIB_CHECK(mat_entropy_add_grad(model->batch_logits->grad,
+                                            model->batch_logits->val,
+                                            batch_size, seed_ent));
+        }
+
+        seed_vf->data[0] = vf_coef;
+        RL_LIB_CHECK(mat_mse_add_grad(model->batch_value->grad,
+                                      model->batch_value->val, target_val_mat,
+                                      seed_vf));
+
+        schedule_grad_accum(&model->train);
+
+        if (config->max_grad_norm > 0.0f) {
+          clip_grad_norm(model, config->max_grad_norm);
+        }
+        if (config->optim == OPT_ADAM) {
+          adam_step(adam, model);
+        } else {
+          sgd_step(model, lr, 1.0f);
+        }
+        zero_grad(model);
+      }
+    }
+
+    if (config->verbose || (update + 1) % 50 == 0 || update == 0 ||
+        update + 1 == config->epochs) {
+      const real mean_return =
+          episode_count > 0 ? episode_return_sum / (real)episode_count : 0.0f;
+      printf("Update %4u/%u | Mean Episode Return: %7.2f | Episodes: %3llu | "
+             "Steps: %u\n",
+             update + 1, config->epochs, mean_return,
+             (unsigned long long)episode_count, total);
     }
   }
 }

@@ -71,6 +71,13 @@ static void cartpole_destroy(Env *e) {
   // Allocated on arena; no-op
 }
 
+static Env *cartpole_clone(Arena *arena, const Env *src) {
+  RL_LIB_ASSERT(src != NULL && src->state != NULL, "cartpole_clone: NULL source");
+  Env *env = env_cartpole_create(arena);
+  *(CartPoleState *)env->state = *(const CartPoleState *)src->state;
+  return env;
+}
+
 Env *env_cartpole_create(Arena *arena) {
   Env *env = ARENA_OBJ(arena, Env);
   CartPoleState *s = ARENA_OBJ(arena, CartPoleState);
@@ -82,6 +89,7 @@ Env *env_cartpole_create(Arena *arena) {
   env->reset = cartpole_reset;
   env->step = cartpole_step;
   env->observe = cartpole_observe;
+  env->clone = cartpole_clone;
   env->destroy = cartpole_destroy;
 
   return env;

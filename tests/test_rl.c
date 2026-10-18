@@ -400,6 +400,95 @@ static void test_determinism(void) {
   printf("OK\n");
 }
 
+// ── PPO learning smoke test ──────────────────────────────────────────
+
+static void test_ppo_learning_smoke(void) {
+  printf("  CartPole PPO learns (50 updates)... ");
+  Arena *arena = arena_new(GiB(1));
+  Net *model = net_new(arena);
+  Env *env = env_cartpole_create(arena);
+  Rng rng;
+  rng_seed(&rng, 42, 1);
+
+  const u32 hidden[] = {64, 64};
+  actor_critic_build(arena, model, &rng, env->obs_dim, hidden, 2, env->act_dim,
+                     64);
+
+  TrainCfg cfg = {
+      .epochs = 50,
+      .rollout_size = 128,
+      .max_steps = env->max_steps,
+      .learning_rate = 3e-4f,
+      .gamma = 0.99f,
+      .lambda = 0.95f,
+      .vf_coef = 0.5f,
+      .entropy_coef = 0.01f,
+      .seed = 42,
+      .optim = OPT_ADAM,
+      .max_grad_norm = 0.5f,
+      .batch_size = 64,
+      .num_envs = 8,
+      .ppo_epochs = 10,
+      .ppo_clip = 0.2f,
+  };
+  train_ppo(env, model, &cfg, arena);
+
+  Rng eval_rng;
+  rng_seed(&eval_rng, 999, 1);
+  EvalResult res = evaluate(env, model, &eval_rng, 30, true);
+  printf("(greedy return %.1f) ", res.avg_return);
+
+  // Random scores ~22; require a wide margin above that.
+  ASSERT_TRUE(res.avg_return > 150.0f, "PPO beats random by a wide margin");
+
+  arena_dispose(arena);
+  printf("OK\n");
+}
+
+// ── PPO same-seed determinism ────────────────────────────────────────
+
+static void test_ppo_determinism(void) {
+  printf("  PPO same seed => identical weights... ");
+  real checksum[2];
+
+  for (u32 run = 0; run < 2; run++) {
+    Arena *arena = arena_new(GiB(1));
+    Net *model = net_new(arena);
+    Env *env = env_cartpole_create(arena);
+    Rng rng;
+    rng_seed(&rng, 1234, 1);
+
+    actor_critic_build(arena, model, &rng, env->obs_dim, (u32[]){32, 32}, 2,
+                       env->act_dim, 32);
+
+    TrainCfg cfg = {
+        .epochs = 8,
+        .rollout_size = 64,
+        .max_steps = env->max_steps,
+        .learning_rate = 3e-4f,
+        .gamma = 0.99f,
+        .lambda = 0.95f,
+        .vf_coef = 0.5f,
+        .entropy_coef = 0.01f,
+        .seed = 1234,
+        .optim = OPT_ADAM,
+        .max_grad_norm = 0.5f,
+        .batch_size = 32,
+        .num_envs = 4,
+        .ppo_epochs = 4,
+        .ppo_clip = 0.2f,
+    };
+    train_ppo(env, model, &cfg, arena);
+
+    checksum[run] = param_checksum(model);
+    arena_dispose(arena);
+  }
+
+  printf("(%.6f vs %.6f) ", checksum[0], checksum[1]);
+  ASSERT_TRUE(checksum[0] == checksum[1], "PPO weights identical across runs");
+  printf("OK\n");
+}
+
 int main(void) {
   printf("\n=== RL / optim / builder tests ===\n\n");
 
@@ -410,7 +499,9 @@ int main(void) {
   test_actor_critic_value_learns();
   test_batch_equivalence();
   test_cartpole_learning_smoke();
+  test_ppo_learning_smoke();
   test_determinism();
+  test_ppo_determinism();
 
   printf("\n---\nTests: %u passed, %u failed\n\n", tests_passed, tests_failed);
   return tests_failed > 0 ? 1 : 0;

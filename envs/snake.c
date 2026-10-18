@@ -177,6 +177,15 @@ static void snake_destroy(Env *e) {
   (void)e;
 }
 
+static Env *snake_clone(Arena *arena, const Env *src) {
+  RL_LIB_ASSERT(src != NULL && src->state != NULL, "snake_clone: NULL source");
+  const SnakeState *s = (const SnakeState *)src->state;
+  Env *env = env_snake_create(arena, s->grid_size);
+  RL_LIB_ASSERT(env != NULL, "snake_clone: invalid grid size in source");
+  *(SnakeState *)env->state = *s;
+  return env;
+}
+
 void snake_test_set_body(Env *e, const i32 *xs, const i32 *ys, u32 len) {
   SnakeState *s = (SnakeState *)e->state;
   if (len > MAX_SNAKE_LEN) len = MAX_SNAKE_LEN;
@@ -218,6 +227,7 @@ Env *env_snake_create(Arena *arena, u32 grid_size) {
   env->reset = snake_reset;
   env->step = snake_step;
   env->observe = snake_observe;
+  env->clone = snake_clone;
   env->destroy = snake_destroy;
 
   return env;

@@ -5,28 +5,32 @@ WARN = -Wall -Wextra -Wshadow -Wconversion -Wmissing-prototypes
 ifdef ERR
 WARN += -Werror
 endif
-CFLAGS = $(WARN) -Iinclude -I.
+# Extra flags for ad-hoc configurations, e.g.
+#   make EXTRA_CFLAGS=-DRL_SIMD_BACKEND=0 test
+EXTRA_CFLAGS ?=
+CFLAGS = $(WARN) -Iinclude -I. $(EXTRA_CFLAGS)
 
-LIB_SRCS = src/memory.c src/random.c src/linalg.c src/graph.c src/layers.c src/optim.c src/rl.c envs/snake.c envs/cartpole.c
+LIB_SRCS = src/memory.c src/random.c src/simd.c src/linalg.c src/graph.c src/layers.c src/optim.c src/rl.c src/vecenv.c envs/snake.c envs/cartpole.c
 LIB_OBJS = $(LIB_SRCS:.c=.o)
 
 TARGET_SNAKE = train_snake
 TARGET_CARTPOLE = train_cartpole
 TARGET_A2C = train_a2c
+TARGET_PPO = train_ppo
 
 # ── Build modes ─────────────────────────────────────────────────────
 
 all: release
 
 release: CFLAGS += -O3
-release: clean $(TARGET_SNAKE) $(TARGET_CARTPOLE) $(TARGET_A2C)
+release: clean $(TARGET_SNAKE) $(TARGET_CARTPOLE) $(TARGET_A2C) $(TARGET_PPO)
 
 debug: CFLAGS += -g -fsanitize=undefined
-debug: clean $(TARGET_SNAKE) $(TARGET_CARTPOLE) $(TARGET_A2C)
+debug: clean $(TARGET_SNAKE) $(TARGET_CARTPOLE) $(TARGET_A2C) $(TARGET_PPO)
 
 # AddressSanitizer + UndefinedBehaviorSanitizer build of everything.
 asan: CFLAGS += -g -O1 -fsanitize=address,undefined -fno-omit-frame-pointer
-asan: clean $(TARGET_SNAKE) $(TARGET_CARTPOLE) $(TARGET_A2C) test_mat test_gradcheck test_envs test_rl
+asan: clean $(TARGET_SNAKE) $(TARGET_CARTPOLE) $(TARGET_A2C) $(TARGET_PPO) test_mat test_gradcheck test_envs test_rl
 	@echo ""
 	@echo "=== ASAN/UBSAN: running all tests ==="
 	./test_mat
@@ -41,6 +45,9 @@ $(TARGET_CARTPOLE): $(LIB_OBJS) examples/train_cartpole.o
 	$(CC) $(CFLAGS) -o $@ $^ -lm
 
 $(TARGET_A2C): $(LIB_OBJS) examples/train_a2c.o
+	$(CC) $(CFLAGS) -o $@ $^ -lm
+
+$(TARGET_PPO): $(LIB_OBJS) examples/train_ppo.o
 	$(CC) $(CFLAGS) -o $@ $^ -lm
 
 %.o: %.c
@@ -74,7 +81,7 @@ $(TEST_RL_BIN): $(LIB_OBJS) tests/test_rl.c
 # Rebuilds the library in f64 (RL_LIB_USE_DOUBLE) into its own object tree so the
 # default f32 objects are not clobbered. Enables h=1e-5 and a 1e-6 tolerance.
 DOUBLE_DIR = build/double
-DOUBLE_CFLAGS = $(WARN) -Iinclude -I. -g -O2 -DRL_LIB_USE_DOUBLE -fsanitize=undefined
+DOUBLE_CFLAGS = $(WARN) -Iinclude -I. -g -O2 -DRL_LIB_USE_DOUBLE -fsanitize=undefined $(EXTRA_CFLAGS)
 DOUBLE_OBJS = $(patsubst %.c,$(DOUBLE_DIR)/%.o,$(LIB_SRCS)) \
               $(DOUBLE_DIR)/tests/test_gradcheck.o
 TEST_GRAD_DOUBLE_BIN = test_gradcheck_double
@@ -112,6 +119,9 @@ cartpole: release
 a2c: release
 	./$(TARGET_A2C)
 
+ppo: release
+	./$(TARGET_PPO)
+
 # ── Benchmark ───────────────────────────────────────────────────────
 
 BENCH_BIN = rl_lib_bench
@@ -135,9 +145,9 @@ bench-throughput: $(BENCH_BIN)
 # ── Cleanup ─────────────────────────────────────────────────────────
 
 clean:
-	rm -f $(LIB_OBJS) examples/train_snake.o examples/train_cartpole.o examples/train_a2c.o examples/bench.o
-	rm -f $(TARGET_SNAKE) $(TARGET_CARTPOLE) $(TARGET_A2C) $(TEST_BINS) $(BENCH_BIN)
+	rm -f $(LIB_OBJS) examples/train_snake.o examples/train_cartpole.o examples/train_a2c.o examples/train_ppo.o examples/bench.o
+	rm -f $(TARGET_SNAKE) $(TARGET_CARTPOLE) $(TARGET_A2C) $(TARGET_PPO) $(TEST_BINS) $(BENCH_BIN)
 	rm -f $(TEST_GRAD_DOUBLE_BIN)
 	rm -rf build
 
-.PHONY: all release debug asan test gradcheck-double clean snake cartpole a2c bench bench-cartpole bench-snake bench-throughput
+.PHONY: all release debug asan test gradcheck-double clean snake cartpole a2c ppo bench bench-cartpole bench-snake bench-throughput

@@ -4,6 +4,7 @@
 #include "base.h"
 #include "linalg.h"
 #include "random.h"
+#include "simd.h"
 
 #include <math.h>
 
@@ -170,8 +171,58 @@ static void test_matmul_tt(Arena *arena) {
   printf("%s\n", ok ? "OK" : "FAIL");
 }
 
-// ── Softmax tests ────────────────────────────────────────────────────
+// The vectorised path must agree with the portable scalar reference across all
+// transpose combinations and shapes that exercise the vector tails.
+static void test_simd_matches_scalar(Arena *arena) {
+  printf("  SIMD path == scalar reference... ");
+  const u32 M = 37, K = 41, N = 53;
+  Mat *a = mat_new(arena, M, K);
+  Mat *b = mat_new(arena, K, N);
+  Mat *at = mat_new(arena, K, M);
+  Mat *bt = mat_new(arena, N, K);
+  Mat *ref = mat_new(arena, M, N);
+  Mat *got = mat_new(arena, M, N);
 
+  rng_seed_g(31337, 9);
+  mat_rand(a, -1.0f, 1.0f);
+  mat_rand(b, -1.0f, 1.0f);
+  mat_rand(at, -1.0f, 1.0f);
+  mat_rand(bt, -1.0f, 1.0f);
+
+  b32 ok = true;
+  real worst = 0.0f;
+  for (u32 combo = 0; combo < 4; combo++) {
+    b8 ta = (b8)(combo & 1u);
+    b8 tb = (b8)((combo >> 1) & 1u);
+    const Mat *lhs = ta ? at : a;
+    const Mat *rhs = tb ? bt : b;
+    RL_LIB_CHECK(mat_mm_scalar(ref, lhs, rhs, 1, ta, tb));
+    RL_LIB_CHECK(mat_mm(got, lhs, rhs, 1, ta, tb));
+    const u64 n = (u64)M * N;
+    for (u64 i = 0; i < n; i++) {
+      real d = real_fabs(got->data[i] - ref->data[i]);
+      if (d > worst) worst = d;
+      if (d > 1e-4f) ok = false;
+    }
+  }
+
+  // Shapes shorter than the vector width exercise the scalar tail loops.
+  Mat *s1 = mat_new(arena, 1, 3);
+  Mat *s2 = mat_new(arena, 3, 1);
+  Mat *sr = mat_new(arena, 1, 1);
+  Mat *sg = mat_new(arena, 1, 1);
+  mat_rand(s1, -1.0f, 1.0f);
+  mat_rand(s2, -1.0f, 1.0f);
+  RL_LIB_CHECK(mat_mm_scalar(sr, s1, s2, 1, 0, 0));
+  RL_LIB_CHECK(mat_mm(sg, s1, s2, 1, 0, 0));
+  if (real_fabs(sg->data[0] - sr->data[0]) > 1e-5f) ok = false;
+
+  printf("(backend %s, max diff %.2e) %s\n", simd_backend_name(), (double)worst,
+         ok ? "OK" : "FAIL");
+  ASSERT_TRUE(ok, "SIMD matmul matches the scalar reference");
+}
+
+// ── Softmax tests ────────────────────────────────────────────────────
 static void test_softmax_sums_to_one(Arena *arena) {
   printf("  mat_softmax sums to 1... ");
   Mat *in = mat_new(arena, 5, 1);
@@ -364,6 +415,7 @@ int main(void) {
   test_matmul_nt(arena);
   test_matmul_tn(arena);
   test_matmul_tt(arena);
+  test_simd_matches_scalar(arena);
 
   printf("\n[mat_softmax & batching]\n");
   test_softmax_sums_to_one(arena);

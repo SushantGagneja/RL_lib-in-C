@@ -555,8 +555,101 @@ static void test_gradcheck_fused_policy(void) {
   arena_dispose(arena);
 }
 
-// ── Test: input gradient and mat_mul with both sides requiring grad ──────
+// ── Test: PPO clipped surrogate policy loss ──────────────────────────
 
+static void test_gradcheck_ppo_policy(void) {
+  printf("\n[gradcheck: PPO clipped policy loss (B=4, act_dim=3)]\n");
+  Arena *arena = arena_new(MiB(16));
+
+  Mat *logits = mat_new(arena, 3, 4);
+  Mat *logits_grad = mat_new(arena, 3, 4);
+  Mat *loss_out = mat_new(arena, 1, 1);
+  Mat *seed_grad = mat_new(arena, 1, 1);
+  RL_LIB_ASSERT(logits && logits_grad && loss_out && seed_grad,
+                "arena out of memory in ppo policy test");
+  seed_grad->data[0] = 1.0f;
+
+  u32 actions[4] = {2, 0, 1, 1};
+  real advantages[4] = {1.1f, -0.6f, 0.9f, -1.4f};
+  const real clip = 0.2f;
+
+  rng_seed_g(13579, 11);
+  mat_rand(logits, -1.5f, 1.5f);
+
+  // Place each ratio clearly inside or outside the clip range by construction:
+  // ratio = exp(new_logp - old_logp). Offsets of +/-0.5 give ratios of ~1.65
+  // and ~0.61, far from the 0.8/1.2 boundaries, so finite differences never
+  // straddle the kink. The advantage signs then make two columns clip-binding
+  // (zero gradient) and two active (non-zero gradient).
+  const real offsets[4] = {-0.5f, 0.5f, 0.5f, -0.5f};
+  real old_logp[4];
+  for (u32 b = 0; b < 4; b++) {
+    real hi = logits->data[b];
+    for (u32 a = 1; a < 3; a++) {
+      const real z = logits->data[(u64)a * 4 + b];
+      if (z > hi) hi = z;
+    }
+    real sum = 0.0f;
+    for (u32 a = 0; a < 3; a++) {
+      sum += real_exp(logits->data[(u64)a * 4 + b] - hi);
+    }
+    const real lse = hi + real_log(sum);
+    const real new_logp = logits->data[(u64)actions[b] * 4 + b] - lse;
+    old_logp[b] = new_logp - offsets[b];
+  }
+
+  mat_zero(logits_grad);
+  RL_LIB_CHECK(mat_ppo_policy_loss(loss_out, logits, actions, advantages,
+                                   old_logp, clip, 4));
+  RL_LIB_CHECK(mat_ppo_policy_add_grad(logits_grad, logits, actions, advantages,
+                                       old_logp, clip, 4, seed_grad));
+
+  const real h = GRAD_H;
+  const real tol = GRAD_TOL;
+  u32 failures = 0;
+  u32 nonzero = 0;
+
+  for (u32 i = 0; i < 12; i++) {
+    const real orig = logits->data[i];
+
+    logits->data[i] = orig + h;
+    Mat *up = mat_new(arena, 1, 1);
+    RL_LIB_CHECK(mat_ppo_policy_loss(up, logits, actions, advantages, old_logp,
+                                     clip, 4));
+
+    logits->data[i] = orig - h;
+    Mat *dn = mat_new(arena, 1, 1);
+    RL_LIB_CHECK(mat_ppo_policy_loss(dn, logits, actions, advantages, old_logp,
+                                     clip, 4));
+
+    logits->data[i] = orig;
+
+    const real numeric = (up->data[0] - dn->data[0]) / (2.0f * h);
+    const real analytic = logits_grad->data[i];
+    const real denom = real_fmax(
+        (real)1.0, real_fmax(real_fabs(numeric), real_fabs(analytic)));
+    const real rel = real_fabs(numeric - analytic) / denom;
+
+    if (real_fabs(analytic) > 1e-4f) nonzero++;
+    total_params_checked++;
+    if (rel < tol) {
+      params_ok++;
+    } else {
+      failures++;
+    }
+  }
+
+  printf("  logits (3x4, 12 elements, %u non-zero)... %s (%u failures)\n",
+         nonzero, failures == 0 ? "OK" : "FAIL", failures);
+  if (failures == 0 && nonzero > 0)
+    tests_passed++;
+  else
+    tests_failed++;
+
+  arena_dispose(arena);
+}
+
+// ── Test: input gradient and mat_mul with both sides requiring grad ──────
 static void test_gradcheck_input_and_mul(void) {
   printf("\n[gradcheck: input gradient & mat_mul both sides]\n");
 
@@ -617,6 +710,7 @@ int main(void) {
   test_gradcheck_tanh_mul();
   test_gradcheck_mse();
   test_gradcheck_fused_policy();
+  test_gradcheck_ppo_policy();
   test_gradcheck_reinforce();
   test_gradcheck_input_and_mul();
 

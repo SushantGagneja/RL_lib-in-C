@@ -17,6 +17,7 @@
 /train_snake
 /train_cartpole
 /train_a2c
+/train_ppo
 /test_mat
 /test_gradcheck
 /test_gradcheck_double

@@ -19,7 +19,7 @@ version yet; entries below are grouped by the review that prompted them.
     post-order walk.
   - `linalg.c` / `linalg.h` — row-pointer kernels with hoisted scalars; NN/NT/
     TN/TT matrix multiply, activations, losses, and their gradients re-derived
-    (numerically identical: the f64 gradient check still passes 236/236).
+    (numerically identical: the f64 gradient check still passes, 248/248).
   - `memory.c` / `memory.h` — bump allocator reimplemented (`base`/`cap`/
     `offset`).
   - `random.c` / `random.h` — PCG32 replaced by **xoshiro256\*\*** seeded with
@@ -64,17 +64,33 @@ version yet; entries below are grouped by the review that prompted them.
   clean.
 
 ### Added
+- **SIMD MatMul** (`simd.c` / `simd.h` plus `linalg.c`): register-blocked NEON
+  and AVX2+FMA kernels for the NN/NT/TN cases, a portable `mat_mm_scalar`
+  reference, a compile-time backend selector (`-DRL_SIMD_BACKEND=0` forces
+  scalar), and a runtime AVX2/FMA probe on x86-64. `test_mat` cross-checks the
+  vector path against the scalar reference, and a CI job builds the scalar
+  backend end to end.
+- **Vectorized environments** (`vecenv.c` / `vecenv.h`): `VecEnv` steps N
+  cloned envs in lockstep, auto-resets finished ones in place, and preserves
+  each terminal observation (`final_obs`) for correct value bootstrapping.
+  `Env` gained a `clone(arena, src)` function pointer.
+- **PPO** (`train_ppo`, `mat_ppo_policy_loss` / `mat_ppo_policy_add_grad`): the
+  clipped surrogate objective with multi-epoch shuffled minibatches, per-env
+  GAE-λ, and truncation-aware bootstrapping. Covered by a new f64/f32 gradient
+  check, CartPole learning and same-seed determinism tests, and
+  `examples/train_ppo.c`.
+- `make ppo`, `EXTRA_CFLAGS` Makefile support, and a scalar-backend CI job.
 - `make gradcheck-double`: builds the library in f64 (`-DRL_LIB_USE_DOUBLE`, the
   new `real` scalar typedef) so the gradient check runs with `h = 1e-5` and a
   `1e-6` tolerance. Input/activation gradients and an elementwise `mul` with
   both operands requiring grad are checked too.
 - `tests/test_rl.c`: GAE against a hand-computed trajectory, a single Adam step,
   gradient-norm clipping, actor-critic construction and value-head learning,
-  batched-vs-per-sample gradient equivalence, a CartPole learning smoke test,
-  and same-seed determinism.
+  batched-vs-per-sample gradient equivalence, CartPole learning smoke tests for
+  REINFORCE and PPO, and same-seed determinism for both.
 - `make asan` (ASAN + UBSAN) and a GitHub Actions workflow running `make test`
   with warnings as errors on gcc/clang/macOS, plus the sanitizer target.
-- `examples/train_a2c.c`.
+- `examples/train_a2c.c` and `examples/train_ppo.c`.
 
 ### Changed
 - Removed the short-name macros from the linear-algebra header; everything uses
@@ -82,12 +98,13 @@ version yet; entries below are grouped by the review that prompted them.
 - Extracted a `Dense` struct (`dense_new` / `dense_apply`) and deleted the three
   duplicated layer/init code paths and the weight-sharing hack.
 - The matrix-multiply kernels are `static` (`mm_nn` / `mm_nt` / `mm_tn` /
-  `mm_tt`).
+  `mm_tt`); `mat_mm` dispatches to the SIMD kernels when a backend is available.
+- The benchmark reports the active SIMD backend, two MatMul shapes (large and
+  RL-sized), and `VecEnv` throughput.
 
 ### Known limitations
 See the "Known limitations" section of the README.
 
 ### License
-Add a `LICENSE` before distributing. The engine is an original implementation
-and there is no bundled third-party code (the PRNG is public-domain
-xoshiro256\*\*).
+MIT — see [`LICENSE`](LICENSE). The engine is an original implementation and
+there is no bundled third-party code (the PRNG is public-domain xoshiro256\*\*).

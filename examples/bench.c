@@ -19,6 +19,8 @@
 #include "envs/snake.h"
 #include "layers.h"
 #include "rl.h"
+#include "simd.h"
+#include "vecenv.h"
 #include <math.h>
 #include <stdarg.h>
 #include <stdbool.h>
@@ -327,45 +329,85 @@ static void matmul_naive(Mat *out, const Mat *a, const Mat *b) {
   }
 }
 
-static void bench_matmul_throughput(void) {
-  const u32 N = 256;
+// Time `reps` multiplies of an M x K by K x N and return GFLOPS.
+static double time_matmul(u32 M, u32 K, u32 N, u32 reps, b32 want_naive) {
   Arena *arena = arena_new(MiB(64));
-  Mat *a = mat_new(arena, N, N);
-  Mat *b = mat_new(arena, N, N);
-  Mat *c = mat_new(arena, N, N);
+  Mat *a = mat_new(arena, M, K);
+  Mat *b = mat_new(arena, K, N);
+  Mat *c = mat_new(arena, M, N);
   rng_seed_g(2024, 1);
   mat_rand(a, -1.0f, 1.0f);
   mat_rand(b, -1.0f, 1.0f);
 
-  const double flops_per_call = 2.0 * (double)N * N * N;
   volatile real sink = 0.0f;
-
-  const u32 reps_lib = 200;
-  double t0 = now_seconds();
-  for (u32 i = 0; i < reps_lib; i++) {
-    mat_mm(c, a, b, 1, 0, 0);
+  const double t0 = now_seconds();
+  for (u32 i = 0; i < reps; i++) {
+    if (want_naive) {
+      matmul_naive(c, a, b);
+    } else {
+      mat_mm(c, a, b, 1, 0, 0);
+    }
     sink += c->data[0];
   }
-  double dt_lib = now_seconds() - t0;
-  double gflops_lib = flops_per_call * reps_lib / dt_lib / 1e9;
-
-  const u32 reps_naive = 2;
-  t0 = now_seconds();
-  for (u32 i = 0; i < reps_naive; i++) {
-    matmul_naive(c, a, b);
-    sink += c->data[N - 1];
-  }
-  double dt_naive = now_seconds() - t0;
-  double gflops_naive = flops_per_call * reps_naive / dt_naive / 1e9;
-
-  emit("\nMatMul %ux%u (single core, -O3):\n\n", N, N);
-  emit("| Implementation | GFLOPS |\n|---|---|\n");
-  emit("| `mat_mm` (NN kernel) | %.3f |\n", gflops_lib);
-  emit("| Naive triple loop | %.3f |\n", gflops_naive);
-  printf("  [throughput] matmul %ux%u kernel %.3f GFLOPS | naive %.3f GFLOPS\n",
-         N, N, gflops_lib, gflops_naive);
+  const double dt = now_seconds() - t0;
   (void)sink;
 
+  const double flops = 2.0 * (double)M * (double)K * (double)N * (double)reps;
+  arena_dispose(arena);
+  return flops / dt / 1e9;
+}
+
+static void bench_matmul_throughput(void) {
+  // A large square case (compute/L2 bound) and a representative RL layer
+  // (64 features x 64-sample batch), where the register blocking matters most.
+  const u32 shapes[2][3] = {{256, 256, 256}, {64, 64, 64}};
+  const u32 reps_lib[2] = {200, 20000};
+  const u32 reps_naive[2] = {2, 200};
+
+  emit("\nMatMul (single core, -O3, `%s` backend):\n\n", simd_backend_name());
+  emit("| Shape (M x K x N) | `mat_mm` GFLOPS | Naive GFLOPS |\n|---|---|---|\n");
+
+  for (u32 s = 0; s < 2; s++) {
+    const u32 M = shapes[s][0];
+    const u32 K = shapes[s][1];
+    const u32 N = shapes[s][2];
+    const double g_lib = time_matmul(M, K, N, reps_lib[s], false);
+    const double g_naive = time_matmul(M, K, N, reps_naive[s], true);
+    emit("| %ux%ux%u | %.3f | %.3f |\n", M, K, N, g_lib, g_naive);
+    printf("  [throughput] matmul %ux%ux%u %.3f GFLOPS | naive %.3f GFLOPS\n", M,
+           K, N, g_lib, g_naive);
+  }
+}
+
+// Throughput of stepping several environments through the vectorized wrapper.
+static void bench_vecenv_throughput(void) {
+  const u32 num_envs = 8;
+  Arena *arena = arena_new(GiB(1));
+  Env *proto = env_cartpole_create(arena);
+  VecEnv *vec = vecenv_new(arena, proto, num_envs);
+  vecenv_reset(vec, 1);
+
+  Rng r;
+  rng_seed(&r, 54321, 7);
+  u32 *acts = malloc(sizeof(u32) * num_envs);
+
+  const u64 target = 200000; // env-steps
+  u64 steps = 0;
+  double t0 = now_seconds();
+  while (steps < target) {
+    vecenv_sample_uniform(vec, &r, acts);
+    vecenv_step(vec, acts);
+    steps += num_envs;
+  }
+  double dt = now_seconds() - t0;
+  double rate = (double)steps / dt;
+
+  emit("\n`VecEnv` throughput (%u synchronized CartPole envs):\n\n", num_envs);
+  emit("| Implementation | Env steps/sec |\n|---|---|\n");
+  emit("| `vecenv_step` (x%u) | %.0f |\n", num_envs, rate);
+  printf("  [throughput] vecenv x%u %8.0f env-steps/sec\n", num_envs, rate);
+
+  free(acts);
   arena_dispose(arena);
 }
 
@@ -482,6 +524,7 @@ int main(int argc, char **argv) {
 
   if (do_throughput) {
     bench_env_throughput();
+    bench_vecenv_throughput();
     bench_matmul_throughput();
   }
 

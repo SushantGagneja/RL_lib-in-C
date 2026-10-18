@@ -20,6 +20,9 @@ struct Env {
   void (*reset)(Env *e, u64 seed);
   real (*step)(Env *e, u32 action, b32 *done, b32 *truncated);
   void (*observe)(Env *e, real *obs_out);
+  // Allocates a fresh Env with an independent copy of this one's state. Used by
+  // the vectorized environment wrapper to build N identical-but-separate envs.
+  Env *(*clone)(Arena *arena, const Env *src);
   void (*destroy)(Env *e);
 };
 

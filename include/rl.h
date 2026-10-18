@@ -26,6 +26,11 @@ typedef struct {
   OptimKind optim;
   real max_grad_norm;
   u32 batch_size;
+
+  // PPO-only knobs.
+  u32 num_envs;     // parallel envs stepped per update (0 => 1)
+  u32 ppo_epochs;   // inner optimisation passes over a rollout (0 => 10)
+  real ppo_clip;    // PPO clip epsilon (<= 0 => 0.2)
 } TrainCfg;
 
 // Evaluation metrics
@@ -68,6 +73,14 @@ void train_reinforce(Env *env, Net *model, const TrainCfg *config,
 // Trains an Actor-Critic model on any Env using Advantage Actor-Critic (A2C) with GAE
 void train_a2c(Env *env, Net *model, const TrainCfg *config,
                   Arena *train_arena);
+
+// Trains an Actor-Critic model using PPO with the clipped surrogate objective.
+// The rollout is collected from `config->num_envs` parallel environments (a
+// vectorized env), then replayed for `config->ppo_epochs` passes of shuffled
+// minibatches, one optimiser step per minibatch. Requires a model built with
+// actor_critic_build(). TrainCfg.ppo_clip selects the clip range.
+void train_ppo(Env *env, Net *model, const TrainCfg *config,
+               Arena *train_arena);
 
 // Evaluates an actor model on an Env across a number of episodes. `greedy`
 // selects argmax actions; otherwise actions are sampled.
