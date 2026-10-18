@@ -35,7 +35,7 @@
 
 # Library artifacts from `make lib` / `make install`
 /librl_lib.a
-/librl_lib.*.dylib
+/librl_lib*.dylib
 /librl_lib.so*
 /rl_lib.pc
 
