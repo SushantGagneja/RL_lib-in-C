@@ -95,6 +95,12 @@ asan: clean $(TARGET_SNAKE) $(TARGET_CARTPOLE) $(TARGET_A2C) $(TARGET_PPO) $(TAR
 # ThreadSanitizer. Only the suites that exercise the threaded VecEnv pool are
 # run: test_gradcheck and the training examples are single-threaded by
 # construction, and TSan's slowdown would buy nothing there.
+# TSan is the only sanitizer the suites' UBSan cannot be combined with: the
+# library objects are shared by everything in this tree, so the examples that
+# this target builds would otherwise link UBSan-instrumented objects without the
+# UBSan runtime (undefined reference to __ubsan_handle_*). Emptying UBSAN_FLAGS
+# gives the whole target a consistent TSan-only configuration.
+tsan: UBSAN_FLAGS =
 tsan: CFLAGS += -g -O1 -fsanitize=thread -fno-omit-frame-pointer
 tsan: clean test_envs test_rl $(TARGET_PPO_CONT)
 	@echo ""
@@ -181,23 +187,30 @@ TEST_RL_BIN = test_rl
 TEST_CKPT_BIN = test_checkpoint
 TEST_BINS = $(TEST_MAT_BIN) $(TEST_GRAD_BIN) $(TEST_ENVS_BIN) $(TEST_RL_BIN) $(TEST_CKPT_BIN)
 
-$(TEST_MAT_BIN): CFLAGS += -g -fsanitize=undefined
+# The suites are also run under UndefinedBehaviorSanitizer. This is a variable
+# because target-specific CFLAGS reach the shared library objects as well, so a
+# build mode that cannot link the UBSan runtime (the TSan target, which links
+# $(TARGET_PPO_CONT) against the same objects) has to stand it down - otherwise
+# the objects are instrumented but the link line has no -fsanitize=undefined.
+UBSAN_FLAGS ?= -g -fsanitize=undefined
+
+$(TEST_MAT_BIN): CFLAGS += $(UBSAN_FLAGS)
 $(TEST_MAT_BIN): $(LIB_OBJS) tests/test_mat.c
 	$(CC) $(CFLAGS) -o $@ $(LIB_OBJS) tests/test_mat.c -lm
 
-$(TEST_GRAD_BIN): CFLAGS += -g -fsanitize=undefined
+$(TEST_GRAD_BIN): CFLAGS += $(UBSAN_FLAGS)
 $(TEST_GRAD_BIN): $(LIB_OBJS) tests/test_gradcheck.c
 	$(CC) $(CFLAGS) -o $@ $(LIB_OBJS) tests/test_gradcheck.c -lm
 
-$(TEST_ENVS_BIN): CFLAGS += -g -fsanitize=undefined
+$(TEST_ENVS_BIN): CFLAGS += $(UBSAN_FLAGS)
 $(TEST_ENVS_BIN): $(LIB_OBJS) tests/test_envs.c
 	$(CC) $(CFLAGS) -o $@ $(LIB_OBJS) tests/test_envs.c -lm
 
-$(TEST_RL_BIN): CFLAGS += -g -fsanitize=undefined
+$(TEST_RL_BIN): CFLAGS += $(UBSAN_FLAGS)
 $(TEST_RL_BIN): $(LIB_OBJS) tests/test_rl.c
 	$(CC) $(CFLAGS) -o $@ $(LIB_OBJS) tests/test_rl.c -lm
 
-$(TEST_CKPT_BIN): CFLAGS += -g -fsanitize=undefined
+$(TEST_CKPT_BIN): CFLAGS += $(UBSAN_FLAGS)
 $(TEST_CKPT_BIN): $(LIB_OBJS) tests/test_checkpoint.c
 	$(CC) $(CFLAGS) -o $@ $(LIB_OBJS) tests/test_checkpoint.c -lm
 

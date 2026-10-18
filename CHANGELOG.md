@@ -76,6 +76,15 @@ independently reimplemented, and carried through the Phase 0–7 roadmap.
   seed, a BFS Snake baseline, and machine-generated `bench_results.md`.
 - **Warnings.** `-Wall -Wextra -Wshadow -Wconversion -Wmissing-prototypes` are
   clean.
+- **`make tsan` could not build on Linux.** The suites are compiled with
+  `-fsanitize=undefined`, and because target-specific `CFLAGS` reach the shared
+  library objects, `$(TARGET_PPO_CONT)` — which the same target builds — was
+  linked against UBSan-instrumented objects without the UBSan runtime
+  (`undefined reference to __ubsan_handle_*`), so the job died before running a
+  single test. The flag is now the `UBSAN_FLAGS` variable, which the TSan target
+  stands down, giving that target one consistent TSan-only configuration. It
+  went unnoticed locally because Apple's `libclang_rt.tsan_osx_dynamic.dylib`
+  also exports the `__ubsan_*` handlers (56 of them) and GCC's runtime does not.
 
 ### Added
 - **Checkpointing** (`checkpoint.c` / `checkpoint.h`): `net_save`, `net_load`,
