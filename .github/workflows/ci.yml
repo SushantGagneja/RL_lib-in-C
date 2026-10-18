@@ -7,7 +7,8 @@ on:
 
 jobs:
   # Build and run the full test suite (`make test` also builds and runs the
-  # f64 gradient check) with the strict warning set promoted to errors.
+  # f64 gradient check) with the strict warning set promoted to errors, then
+  # compile every example the same way.
   test:
     name: ${{ matrix.os }} / ${{ matrix.cc }}
     runs-on: ${{ matrix.os }}
@@ -27,6 +28,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build and test (warnings as errors)
         run: make ERR=1 test
+      - name: Build the examples (warnings as errors)
+        run: make clean && make ERR=1 examples
 
   # AddressSanitizer + UndefinedBehaviorSanitizer run over every test binary.
   sanitizers:

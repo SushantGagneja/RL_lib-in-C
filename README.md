@@ -140,20 +140,40 @@ evaluation flatters a policy trained with only 50 updates. The physics run in
 `12 * 2π / 360 = 0.20944` in f64, so read this as "CartPole-like", not exact
 `CartPole-v1`.
 
-### Snake 6×6 (REINFORCE + Adam, 200 epochs)
+### Snake 6×6 (REINFORCE + Adam 200 epochs; PPO 1500 updates)
 
 | Policy | Return (mean ± sample std) | Best seed | Worst seed |
 |---|---|---|---|
 | Random | -5.32 ± 0.70 | -4.20 | -6.00 |
 | Greedy (BFS to food, avoids body/walls) | 298.66 ± 3.83 | 305.40 | 296.30 |
-| Trained (greedy eval) | 39.68 ± 7.33 | 50.70 | 30.90 |
-| Trained (stochastic eval) | 41.96 ± 7.24 | 54.60 | 36.80 |
+| REINFORCE + Adam, greedy eval | 39.68 ± 7.33 | 50.70 | 30.90 |
+| REINFORCE + Adam, stochastic eval | 41.96 ± 7.24 | 54.60 | 36.80 |
+| PPO + `VecEnv`, greedy eval | 87.90 ± 19.18 | 110.60 | 60.50 |
+| PPO + `VecEnv`, stochastic eval | 108.16 ± 13.62 | 122.50 | 85.70 |
 
 **The trained policy loses badly to the baseline.** A BFS planner that knows
 the rules scores ~299; REINFORCE + Adam from scratch reaches only ~40 after 200
 epochs, and improving slowly. The earlier "beats greedy by 63%" claim used a
 greedy agent that ignored walls and its own body — a strawman. With a real
 baseline, the honest conclusion is that this Snake setup is not solved.
+
+PPO over 8 vectorized environments (the last two rows; `make ppo-snake`, 1500
+updates × 5 seeds, evaluated on the benchmark harness's seed list) reaches 2.2×
+the REINFORCE baseline in both evaluation modes and *still* falls 3.4× short of
+the planner: roughly 4-5 foods per episode against the planner's ~15.
+
+The gap is not a budget problem. Seed 42 run to 6000 updates (4× the rows
+above) climbed to ~170 mean training return by update 5650, then its last ~300
+updates collapsed to 55 and its final weights evaluated at 54.1/71.9 — *below*
+its own 1500-update result. That is a late-run policy collapse (nothing in this
+configuration pins the policy open: `entropy_coef = 0.01`, no early stopping,
+no KL cap), and the practical answer is best-checkpoint selection with
+`checkpoint_save`/`checkpoint_load`, not more compute. The example's optional
+potential-based shaping wrapper (Manhattan distance to the food,
+`r' = r + c(γΦ' − Φ)`, Ng et al. 1999) kept its equivalent 6000-update run
+alive to the end (~157) — but at 1500 updates shaping changed nothing measurable
+(107.4 vs 100.7 greedy on identical seeds), so it buys late-run stability here,
+not parity. The default is therefore the raw sparse reward.
 
 ### Throughput (single core, one machine)
 
@@ -215,8 +235,9 @@ still sets the ceiling.
 
 PPO reaches the 500-step cap on CartPole well inside 300 updates — it is much
 more sample-efficient than the REINFORCE baseline above, which is the expected
-result of on-policy data reuse. The Snake result is unchanged: PPO is not
-wired into the Snake benchmark.
+result of on-policy data reuse. On Snake the same trainer is wired up too (see
+the Snake section): PPO there reaches ~2.2× its REINFORCE baseline and no
+parity, and the section documents why.
 
 ### Pendulum-v1 (continuous PPO, 8 envs × 128 steps, 1200 updates)
 
@@ -276,6 +297,7 @@ make cartpole           # train CartPole
 make a2c                # train CartPole with A2C
 make ppo                # train CartPole with PPO
 make ppo-continuous     # train Pendulum-v1 with continuous-action PPO
+make ppo-snake          # train 6x6 Snake with PPO (sparse; optional shaping)
 make hello              # the minimal end-to-end example
 
 make bench              # multi-seed benchmarks -> bench_results.md
@@ -374,6 +396,7 @@ Tests: 61 passed, 0 failed
 │   ├── train_a2c.c
 │   ├── train_ppo.c
 │   ├── train_ppo_continuous.c   # Pendulum-v1 with a squashed Gaussian policy
+│   ├── train_ppo_snake.c    # 6x6 Snake with PPO over VecEnv
 │   ├── hello_rl.c           # Smallest end-to-end program (also used by CI)
 │   └── bench.c              # Multi-seed harness + throughput micro-benchmarks
 ├── tests/
@@ -429,7 +452,11 @@ Tests: 61 passed, 0 failed
 - **Precision is f32 by default.** The `real` typedef switches the whole
   library to f64 with `-DRL_LIB_USE_DOUBLE`; the gradient check uses this, and
   `make test-double` now runs every suite in f64 as well.
-- **Snake is not solved.** REINFORCE + Adam plateaus well below a BFS planner.
+- **Snake is not solved.** REINFORCE + Adam plateaus at ~40 and PPO over 8
+  vectorized environments at ~90-110 (greedy, five seeds), both against a BFS
+  planner's ~299 — and the PPO configuration can collapse late in a long run, so
+  more updates are not the missing ingredient. The numbers and the failure mode
+  are in the Snake section.
 - **Continuous PPO is stable, not solved.** Pendulum converges to -130..-240
   (a random policy is about -1200), and the configuration is sensitive to the
   learning rate — see the Pendulum section. The squashed-Gaussian policy also
@@ -505,7 +532,13 @@ Tests: 61 passed, 0 failed
         `test_rl`, a checkpoint round trip, and `make ppo-continuous`
         (Pendulum -180..-207 across three seeds over 1200 updates).
 
+- [x] **Phase 7: Parity attempt & adoption**
+  - [x] Snake with PPO over `VecEnv`: 2.2× the REINFORCE baseline (87.9 ± 19.2
+        greedy over five seeds vs 39.7) and 3.4× short of the BFS planner, with
+        long runs collapsing instead of closing the gap. Numbers, budget check
+        and shaping control in the Snake section;
+        `examples/train_ppo_snake.c`, `make ppo-snake`.
+
 ### Remaining
 
-- [ ] Snake parity attempt with PPO + `VecEnv`.
 - [ ] Windows/MSVC build via CMake.

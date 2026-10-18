@@ -47,3 +47,6 @@
 
 #  MNIST data files
 /*.mat
+
+# Local compiled binaries (Snake PPO example)
+/train_ppo_snake

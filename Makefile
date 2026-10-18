@@ -22,6 +22,7 @@ TARGET_CARTPOLE = train_cartpole
 TARGET_A2C = train_a2c
 TARGET_PPO = train_ppo
 TARGET_PPO_CONT = train_ppo_continuous
+TARGET_PPO_SNAKE = train_ppo_snake
 TARGET_HELLO = hello_rl
 
 # ── Version and install layout ──────────────────────────────────────
@@ -62,14 +63,20 @@ SHARED_CFLAGS = $(WARN) -Iinclude -I. -O2 -fPIC $(EXTRA_CFLAGS)
 all: release
 
 release: CFLAGS += -O3
-release: clean $(TARGET_SNAKE) $(TARGET_CARTPOLE) $(TARGET_A2C) $(TARGET_PPO) $(TARGET_PPO_CONT) $(TARGET_HELLO)
+release: clean $(TARGET_SNAKE) $(TARGET_CARTPOLE) $(TARGET_A2C) $(TARGET_PPO) $(TARGET_PPO_CONT) $(TARGET_PPO_SNAKE) $(TARGET_HELLO)
 
 debug: CFLAGS += -g -fsanitize=undefined
-debug: clean $(TARGET_SNAKE) $(TARGET_CARTPOLE) $(TARGET_A2C) $(TARGET_PPO) $(TARGET_PPO_CONT) $(TARGET_HELLO)
+debug: clean $(TARGET_SNAKE) $(TARGET_CARTPOLE) $(TARGET_A2C) $(TARGET_PPO) $(TARGET_PPO_CONT) $(TARGET_PPO_SNAKE) $(TARGET_HELLO)
+
+# Compile every example and the benchmark with the current flags. CI runs this
+# with ERR=1 so example code is held to the same warning standard as the
+# library; the test binaries cannot do it, because they build the library
+# objects with -fsanitize=undefined.
+examples: $(TARGET_SNAKE) $(TARGET_CARTPOLE) $(TARGET_A2C) $(TARGET_PPO) $(TARGET_PPO_CONT) $(TARGET_PPO_SNAKE) $(TARGET_HELLO)
 
 # AddressSanitizer + UndefinedBehaviorSanitizer build of everything.
 asan: CFLAGS += -g -O1 -fsanitize=address,undefined -fno-omit-frame-pointer
-asan: clean $(TARGET_SNAKE) $(TARGET_CARTPOLE) $(TARGET_A2C) $(TARGET_PPO) $(TARGET_PPO_CONT) test_mat test_gradcheck test_envs test_rl test_checkpoint
+asan: clean $(TARGET_SNAKE) $(TARGET_CARTPOLE) $(TARGET_A2C) $(TARGET_PPO) $(TARGET_PPO_CONT) $(TARGET_PPO_SNAKE) test_mat test_gradcheck test_envs test_rl test_checkpoint
 	@echo ""
 	@echo "=== ASAN/UBSAN: running all tests ==="
 	./test_mat
@@ -101,6 +108,9 @@ $(TARGET_PPO): $(LIB_OBJS) examples/train_ppo.o
 	$(CC) $(CFLAGS) -o $@ $^ -lm
 
 $(TARGET_PPO_CONT): $(LIB_OBJS) examples/train_ppo_continuous.o
+	$(CC) $(CFLAGS) -o $@ $^ -lm
+
+$(TARGET_PPO_SNAKE): $(LIB_OBJS) examples/train_ppo_snake.o
 	$(CC) $(CFLAGS) -o $@ $^ -lm
 
 $(TARGET_HELLO): $(LIB_OBJS) examples/hello_rl.o
@@ -247,6 +257,9 @@ ppo: release
 ppo-continuous: release
 	./$(TARGET_PPO_CONT)
 
+ppo-snake: release
+	./$(TARGET_PPO_SNAKE)
+
 hello: $(TARGET_HELLO)
 	./$(TARGET_HELLO)
 
@@ -292,10 +305,10 @@ bench-double: $(BENCH_DOUBLE_BIN)
 # ── Cleanup ─────────────────────────────────────────────────────────
 
 clean:
-	rm -f $(LIB_OBJS) examples/train_snake.o examples/train_cartpole.o examples/train_a2c.o examples/train_ppo.o examples/train_ppo_continuous.o examples/hello_rl.o examples/bench.o
-	rm -f $(TARGET_SNAKE) $(TARGET_CARTPOLE) $(TARGET_A2C) $(TARGET_PPO) $(TARGET_PPO_CONT) $(TARGET_HELLO) $(TEST_BINS) $(BENCH_BIN)
+	rm -f $(LIB_OBJS) examples/train_snake.o examples/train_cartpole.o examples/train_a2c.o examples/train_ppo.o examples/train_ppo_continuous.o examples/train_ppo_snake.o examples/hello_rl.o examples/bench.o
+	rm -f $(TARGET_SNAKE) $(TARGET_CARTPOLE) $(TARGET_A2C) $(TARGET_PPO) $(TARGET_PPO_CONT) $(TARGET_PPO_SNAKE) $(TARGET_HELLO) $(TEST_BINS) $(BENCH_BIN)
 	rm -f $(TEST_GRAD_DOUBLE_BIN) $(LIB_STATIC) $(SHARED_REAL) $(SHARED_LINK) $(SHARED_EXTRA_LINKS) rl_lib.pc
 	rm -rf build
 
-.PHONY: all release debug asan test test-double gradcheck-double clean lib install uninstall \
+.PHONY: all release debug examples asan test test-double gradcheck-double clean lib install uninstall \
         snake cartpole a2c ppo ppo-continuous hello bench bench-cartpole bench-snake bench-throughput

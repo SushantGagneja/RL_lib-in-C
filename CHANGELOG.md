@@ -177,6 +177,17 @@ independently reimplemented, and carried through the Phase 0–5 roadmap.
   with warnings as errors on gcc/clang/macOS, the sanitizer targets, a
   scalar-backend build, the f64 suites, and an install-and-consume smoke test.
 - `examples/train_a2c.c` and `examples/train_ppo.c`.
+- `examples/train_ppo_snake.c` (`make ppo-snake`): 6x6 Snake with PPO over 8
+  vectorized environments, plus an optional potential-based shaping wrapper
+  (`r' = r + c(γΦ' − Φ)`, `Φ = -manhattan(head, food)`) that doubles as a worked
+  example of composing environments — it clones its inner env and forwards
+  `observe()`. Evaluation runs on the benchmark harness's seed list, so the
+  README table is directly comparable with the other Snake baselines: 87.9 ± 19.2
+  greedy over five seeds, against 39.7 for REINFORCE and 298.7 for the BFS
+  planner. The example's budget check and shaping control are recorded honestly
+  in the README rather than smoothed over: 4× the updates still misses parity and
+  collapses in the last few hundred updates, and shaping affects that late-run
+  stability but not the 1500-update score.
 
 ### Changed
 - **`MAX_PARAMS` is gone.** The parameter registry (`Net.params`) now doubles
