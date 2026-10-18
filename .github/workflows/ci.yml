@@ -91,9 +91,9 @@ jobs:
 
   # Windows has no make toolchain in the default image, so this is the CMake
   # path: MSVC builds the library, the examples and the suites, and ctest runs
-  # them. It is also the only job that exercises the Windows-only branches -
-  # Win32 threads in the VecEnv pool, _aligned_malloc, the
-  # QueryPerformanceCounter bench clock - and the only MSVC build.
+  # them - in f32 and in f64. It is also the only job that exercises the
+  # Windows-only branches - Win32 threads in the VecEnv pool, _aligned_malloc,
+  # the QueryPerformanceCounter bench clock - and the only MSVC build.
   windows:
     name: Windows (MSVC, cmake)
     runs-on: windows-latest
@@ -105,12 +105,21 @@ jobs:
         run: cmake --build build --config Release --parallel
       - name: Run the test suites
         run: ctest --test-dir build -C Release --output-on-failure
+      - name: Configure, build and test in f64
+        run: |
+          cmake -S . -B build-double -DCMAKE_BUILD_TYPE=Release -DRL_LIB_USE_DOUBLE=ON
+          cmake --build build-double --config Release --parallel
+          ctest --test-dir build-double -C Release --output-on-failure
       - name: Install into a scratch prefix
         run: cmake --install build --config Release --prefix "${{ runner.temp }}/prefix"
       - name: Consume the install from a CMake project
         shell: bash
         run: |
-          C="$RUNNER_TEMP/consumer"
+          # RUNNER_TEMP / GITHUB_WORKSPACE arrive as native Windows paths with
+          # backslashes, which bash cannot execute; normalize them first.
+          T="$(cygpath -u "$RUNNER_TEMP")"
+          W="$(cygpath -u "$GITHUB_WORKSPACE")"
+          C="$T/consumer"
           mkdir -p "$C"
           printf '%s\n' \
             'cmake_minimum_required(VERSION 3.20)' \
@@ -119,8 +128,8 @@ jobs:
             'add_executable(hello "${HELLO_SRC}")' \
             'target_link_libraries(hello PRIVATE RL_lib-in-C::rl_lib)' > "$C/CMakeLists.txt"
           cmake -S "$C" -B "$C/build" \
-            -DHELLO_SRC="$GITHUB_WORKSPACE/examples/hello_rl.c" \
-            -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/prefix"
+            -DHELLO_SRC="$W/examples/hello_rl.c" \
+            -DCMAKE_PREFIX_PATH="$T/prefix"
           cmake --build "$C/build" --config Release
           "$C/build/Release/hello.exe"
 
