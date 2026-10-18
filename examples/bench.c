@@ -411,6 +411,123 @@ static void bench_vecenv_throughput(void) {
   arena_dispose(arena);
 }
 
+// Wall-clock seconds. The scalar benchmarks use CPU time (`clock()`), which is
+// the steadier metric for single-threaded work, but a threaded speedup is
+// invisible in CPU time by construction — the same work just moves to another
+// core — so the worker pool is measured on the wall clock.
+static double now_wall_seconds(void) {
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+}
+
+// ── Threaded VecEnv scaling (synthetic) ──────────────────────────────
+//
+// The worker pool only pays off when a single env step costs more than the
+// barrier round-trip (tens of microseconds). CartPole and Pendulum are far
+// below that, so this measures a deliberately artificial env whose step burns a
+// fixed amount of floating-point work — a known cost per step and nothing more.
+// What is being measured is the pool, not the environment.
+
+#define BURN_SINF 4000
+
+typedef struct {
+  Env base;
+  real x;
+  u32 count;
+} BurnEnv;
+
+// Keeps the optimiser from deleting the loop.
+static volatile real g_burn_sink;
+
+static real burn_work(real x) {
+  for (u32 i = 0; i < BURN_SINF; i++) {
+    x = real_sin(x) * 1.0000001f + 0.0000001f;
+  }
+  return x;
+}
+
+static void burn_reset(Env *env, u64 seed) {
+  BurnEnv *s = (BurnEnv *)env;
+  s->x = 1.0f + (real)(seed % 1000) * 1e-3f;
+  s->count = 0;
+}
+
+static void burn_observe(Env *env, real *out) {
+  BurnEnv *s = (BurnEnv *)env;
+  out[0] = s->x;
+  out[1] = s->x * s->x;
+  out[2] = real_sin(s->x);
+  out[3] = 1.0f;
+}
+
+static real burn_step(Env *env, u32 action, b32 *done, b32 *truncated) {
+  BurnEnv *s = (BurnEnv *)env;
+  s->x = burn_work(s->x + (real)action * 1e-3f);
+  s->count++;
+  *done = false;
+  *truncated = (s->count % 200) == 0;
+  g_burn_sink = s->x;
+  return -s->x;
+}
+
+static Env *burn_clone(Arena *arena, const Env *src) {
+  BurnEnv *dst = ARENA_OBJ(arena, BurnEnv);
+  *dst = *(const BurnEnv *)src;
+  return (Env *)dst;
+}
+
+static Env *burn_create(Arena *arena) {
+  BurnEnv *s = ARENA_OBJ(arena, BurnEnv);
+  s->base.obs_dim = 4;
+  s->base.act_dim = 1;
+  s->base.max_steps = 200;
+  s->base.reset = burn_reset;
+  s->base.step = burn_step;
+  s->base.observe = burn_observe;
+  s->base.clone = burn_clone;
+  burn_reset((Env *)s, 1);
+  return (Env *)s;
+}
+
+static void bench_vecenv_thread_scaling(void) {
+  const u32 num_envs = 8;
+  const u32 steps = 200;
+  u32 acts[8] = {0};
+
+  emit("\n`VecEnv` threaded stepping, synthetic compute-bound env (%u envs, "
+       "%u `sinf` per step, %u lockstep steps, wall clock):\n\n",
+       num_envs, BURN_SINF, steps);
+  emit("| Threads | Env steps/sec | Speedup |\n|---|---|---|\n");
+
+  double base = 0.0;
+  for (u32 threads = 1; threads <= 8; threads *= 2) {
+    Arena *arena = arena_new(GiB(1));
+    Env *proto = burn_create(arena);
+    VecEnv *vec = vecenv_new(arena, proto, num_envs);
+    vecenv_reset(vec, 1);
+    vecenv_set_threads(arena, vec, threads);
+
+    double t0 = now_wall_seconds();
+    for (u32 i = 0; i < steps; i++) {
+      vecenv_step(vec, acts);
+    }
+    double dt = now_wall_seconds() - t0;
+    double rate = (double)num_envs * (double)steps / dt;
+    if (threads == 1) {
+      base = rate;
+    }
+
+    emit("| %u | %.0f | %.2fx |\n", threads, rate, rate / base);
+    printf("  [throughput] vecenv threaded x%u (actual %u) %8.0f env-steps/sec "
+           "(%.2fx)\n",
+           threads, vecenv_threads(vec), rate, rate / base);
+
+    vecenv_shutdown(vec);
+    arena_dispose(arena);
+  }
+}
+
 /* ── Main ─────────────────────────────────────────────────────────── */
 
 int main(int argc, char **argv) {
@@ -525,6 +642,7 @@ int main(int argc, char **argv) {
   if (do_throughput) {
     bench_env_throughput();
     bench_vecenv_throughput();
+    bench_vecenv_thread_scaling();
     bench_matmul_throughput();
   }
 

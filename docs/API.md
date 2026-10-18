@@ -673,8 +673,10 @@ typedef struct {
   b8 *dones;        // terminal OR truncated this step
   b8 *terminals;    // true terminal
   b8 *truncateds;   // time-limit truncation
-  Rng rng;
+  u64 *reset_base;  // num_envs, per-env auto-reset seed base
+  u64 *reset_counts;// num_envs, auto-resets per env
   u64 step_count;
+  VecEnvPool *pool; // NULL while stepping serially
 } VecEnv;
 
 VecEnv *vecenv_new(Arena *arena, const Env *prototype, u32 num_envs);
@@ -684,6 +686,10 @@ void vecenv_step(VecEnv *v, const u32 *actions);
 void vecenv_step_continuous(VecEnv *v, const real *actions);
 void vecenv_sample_uniform(VecEnv *v, Rng *rng, u32 *actions_out);
 void vecenv_action_bounds(const VecEnv *v, const real **min_out, const real **max_out);
+
+void vecenv_set_threads(Arena *arena, VecEnv *v, u32 num_threads);
+u32 vecenv_threads(const VecEnv *v);
+void vecenv_shutdown(VecEnv *v);
 ```
 
 `vecenv_new` clones the prototype `num_envs` times and resets every clone from a
@@ -704,6 +710,35 @@ garbage action. `vecenv_action_bounds` returns the sub-environments' bounds
 (they are clones of one prototype, so the bounds are shared), which is how
 `train_ppo_continuous` sizes a policy without reaching into the env structs.
 
+### Auto-reset seeds
+
+Each sub-environment owns its auto-reset stream: `vecenv_reset(v, seed)` starts
+env `i` from `seed + i`, `vecenv_reset_seeds` from an explicit array, and every
+auto-reset mixes that base with the number of resets *that env* has had. Nothing
+is shared, so an env's trajectory does not depend on the order in which its
+siblings are stepped — which is what makes the threaded path below exact.
+
+### Threaded stepping
+
+`vecenv_set_threads(arena, v, num_threads)` installs a worker pool that runs the
+per-env steps on `num_threads` threads (0 or 1 restores the default serial path,
+which does not allocate anything). The calling thread does a slice too, so
+`num_threads` is the total number of participants. Threads are spawned once and
+reused across steps; `vecenv_threads` reports the current count and
+`vecenv_shutdown` joins them and returns the vecenv to serial (idempotent — call
+it before the arena is disposed). Stepping is bit-identical to the serial path,
+because the sub-environments share no state and each has its own PRNG;
+`tests/test_envs.c` compares every buffer for 260 steps and `tests/test_rl.c`
+compares trained weights.
+
+The synchronisation is a barrier built from a mutex and a condition variable
+(`pthread_barrier_t` is optional in POSIX and absent on macOS). It costs a
+handful of microseconds per step, so threading only pays for environments whose
+single step is more expensive than that — CartPole and Pendulum are far below
+the crossover and get slower (8.0 s → 13.0 s for the 1200-update Pendulum run
+with 8 threads). Builds without POSIX threads (`-DRL_LIB_NO_THREADS`, or
+`_WIN32`) compile the serial path and refuse a count above 1 loudly.
+
 ---
 
 ## `rl.h`
@@ -723,6 +758,7 @@ typedef struct {
   u32 num_envs;    // parallel envs stepped per update (0 => 1)
   u32 ppo_epochs;  // inner optimisation passes per rollout (0 => 10)
   real ppo_clip;   // PPO clip epsilon (<= 0 => 0.2)
+  u32 num_threads; // worker threads for the vecenv (0 or 1 => serial)
 } TrainCfg;
 
 typedef struct { real avg_return, avg_steps; } EvalResult;
@@ -733,7 +769,10 @@ graph is already built for"; a non-zero value is applied to the model through
 `net_set_batch_size`, so it does not have to match the size the model was built
 with. `epochs` is the number of updates for A2C and PPO and the number of passes
 for REINFORCE. `lambda`, `vf_coef` and `entropy_coef` are ignored by REINFORCE;
-`num_envs`, `ppo_epochs` and `ppo_clip` are PPO-only.
+`num_envs`, `ppo_epochs`, `ppo_clip` and `num_threads` are PPO-only (the
+vectorised trainers). `num_threads` is forwarded to `vecenv_set_threads` and
+cannot change the trained weights, only the wall time; see the note on when it
+pays off under [`vecenv.h`](#vecenvh).
 
 ### Rollouts
 

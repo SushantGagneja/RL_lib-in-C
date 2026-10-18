@@ -78,6 +78,16 @@ asan: clean $(TARGET_SNAKE) $(TARGET_CARTPOLE) $(TARGET_A2C) $(TARGET_PPO) $(TAR
 	./test_rl
 	./test_checkpoint
 
+# ThreadSanitizer. Only the suites that exercise the threaded VecEnv pool are
+# run: test_gradcheck and the training examples are single-threaded by
+# construction, and TSan's slowdown would buy nothing there.
+tsan: CFLAGS += -g -O1 -fsanitize=thread -fno-omit-frame-pointer
+tsan: clean test_envs test_rl $(TARGET_PPO_CONT)
+	@echo ""
+	@echo "=== TSAN: threaded VecEnv suites ==="
+	./test_envs
+	./test_rl
+
 $(TARGET_SNAKE): $(LIB_OBJS) examples/train_snake.o
 	$(CC) $(CFLAGS) -o $@ $^ -lm
 

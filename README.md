@@ -177,6 +177,26 @@ at the 64×64×64 shape an RL layer actually uses — the compiler already
 auto-vectorizes the plain scalar loop well, so this is not a 4×-from-SIMD story.
 See the roadmap and the limitations.
 
+#### Threaded `VecEnv`
+
+Those env steps are far too cheap for a worker pool: its barrier costs tens of
+microseconds per step, which is why `vecenv_set_threads` is opt-in and off by
+default. `make bench-throughput` also runs it against a deliberately artificial
+env whose step burns 4000 `sinf` calls — a known cost per step, so what is being
+measured is the pool (8 envs, 200 lockstep steps, wall clock):
+
+| Threads | Env steps/sec | Speedup |
+|---|---|---|
+| 1 | ≈ 21 500 | 1.00× |
+| 2 | ≈ 41 300 | 1.92× |
+| 4 | ≈ 69 000 | 3.2× |
+| 8 | ≈ 58 000 | 2.7× |
+
+This box has 4 performance cores (10 logical), so 4 threads scale near-linearly
+and 8 threads oversubscribe: more barrier parties and efficiency cores. That is
+the shape to expect — the pool removes the serial bottleneck, the hardware
+still sets the ceiling.
+
 ### PPO (CartPole-like, 300 updates, `examples/train_ppo.c`)
 
 | Policy | Greedy return |
@@ -235,6 +255,7 @@ make test               # build + run every test suite (incl. the f64 gradcheck)
 make test-double        # run every suite in double precision as well
 make release            # -O3 training binaries
 make asan               # ASAN + UBSAN build, then run all tests
+make tsan               # ThreadSanitizer over the threaded VecEnv suites
 make ERR=1 test         # the strict warning set as errors (what CI runs)
 
 make lib                # librl_lib.a + the shared library + rl_lib.pc
@@ -353,7 +374,7 @@ Tests: 61 passed, 0 failed
 │   └── test_checkpoint.c    # Round trips and rejection of bad files
 ├── docs/
 │   └── API.md               # Full API reference
-├── .github/workflows/ci.yml # gcc/clang/macOS + ASAN/UBSAN + scalar + f64 + install
+├── .github/workflows/ci.yml # gcc/clang/macOS + ASAN/UBSAN + TSan + scalar + f64 + install
 ├── rl_lib.pc.in             # pkg-config template (stamped from version.h)
 ├── CHANGELOG.md
 ├── Makefile
@@ -383,9 +404,10 @@ Tests: 61 passed, 0 failed
   field, `tests/test_rl.c` checks the trained weights), but the barrier
   round-trip costs about 30 µs per step while a CartPole or Pendulum step costs
   a fraction of a microsecond. Measured on the shipped Pendulum example, 1200
-  updates take 8.0 s serial and 13.0 s with 8 threads. It starts to pay for
-  environments whose single step costs more than that (a physics simulator, a
-  renderer, a network call), where the same pool scales as expected.
+  updates take 8.0 s serial and 13.0 s with 8 threads. It pays off once a step
+  costs more than that: on a synthetic compute-bound env the pool measures
+  1.92× on 2 threads, 3.2× on 4 and 2.7× on 8 against the serial loop (the
+  benchmark table above has the numbers and the machine's core layout).
 - **Reproducibility is within a machine, not across machines.** Seeding makes
   runs deterministic for a given binary and libm, but `expf`/`logf` differ
   across libc implementations and `-O3` may reassociate, so bit-for-bit

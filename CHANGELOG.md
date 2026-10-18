@@ -146,7 +146,9 @@ independently reimplemented, and carried through the Phase 0–5 roadmap.
   for 260 steps on CartPole and Pendulum, `tests/test_rl.c` compares the trained
   weights — and it is visible end to end (`./train_ppo_continuous 42 1200 8`).
   `-pthread` is now part of the build, `THREAD_FLAGS=` plus
-  `-DRL_LIB_NO_THREADS` removes it, and `rl_lib.pc` carries the flag.
+  `-DRL_LIB_NO_THREADS` removes it, and `rl_lib.pc` carries the flag. The
+  benchmark measures the crossover with a synthetic compute-bound env:
+  1.92×/3.2×/2.7× on 2/4/8 threads against the serial loop.
 - `make gradcheck-double`: builds the library in f64 (`-DRL_LIB_USE_DOUBLE`, the
   `real` scalar typedef) so the gradient check runs with `h = 1e-5` and a
   `1e-6` tolerance. Input/activation gradients and an elementwise `mul` with
@@ -161,8 +163,10 @@ independently reimplemented, and carried through the Phase 0–5 roadmap.
 - `tests/test_envs.c` (191 checks) grew threaded-vs-serial stepping, compared
   field by field over 260 steps for a discrete and a continuous vecenv of 7 envs
   on 3 threads.
-- `make asan` (ASAN + UBSAN) and a GitHub Actions workflow running `make test`
-  with warnings as errors on gcc/clang/macOS, plus the sanitizer target.
+- `make asan` (ASAN + UBSAN) and `make tsan` (ThreadSanitizer over the threaded
+  `VecEnv` suites), plus a GitHub Actions workflow running `make test`
+  with warnings as errors on gcc/clang/macOS, the sanitizer targets, a
+  scalar-backend build, the f64 suites, and an install-and-consume smoke test.
 - `examples/train_a2c.c` and `examples/train_ppo.c`.
 
 ### Changed
@@ -174,6 +178,15 @@ independently reimplemented, and carried through the Phase 0–5 roadmap.
   `net_batch_size` rebuild the batched subgraph from the architecture the
   builders now record, sharing the existing parameter tensors, and the trainers
   apply `TrainCfg.batch_size` before sizing anything from the graph.
+- **Auto-reset seeds are per sub-environment.** `VecEnv` no longer carries one
+  shared `Rng` that handed out reset seeds in stepping order — a sub-environment's
+  trajectory then depended on how many of its siblings reset first, which both
+  serialised the reset path and made parallel stepping change the results. Each
+  env now keeps its own stream (`reset_base` + `reset_counts`, seeded by
+  `vecenv_reset[_seeds]` and mixed once per auto-reset), so trajectories are
+  order-independent, which is exactly the property the threaded pool relies on.
+  Runs seeded before this change produce slightly different trajectories: the
+  Pendulum table in the README moved by a few points, into the same regime.
 - Removed the short-name macros from the linear-algebra header; everything uses
   the `mat_*` names.
 - Extracted a `Dense` struct (`dense_new` / `dense_apply`) and deleted the three
@@ -181,7 +194,10 @@ independently reimplemented, and carried through the Phase 0–5 roadmap.
 - The matrix-multiply kernels are `static` (`mm_nn` / `mm_nt` / `mm_tn` /
   `mm_tt`); `mat_mm` dispatches to the SIMD kernels when a backend is available.
 - The benchmark reports the active SIMD backend, two MatMul shapes (large and
-  RL-sized), and `VecEnv` throughput.
+  RL-sized), `VecEnv` throughput, and the threaded `VecEnv` scaling on a
+  synthetic compute-bound env. The scalar sections keep using CPU time
+  (`clock()`); the threaded section uses a monotonic wall clock, because a
+  speedup is invisible in CPU time by construction.
 
 ### Known limitations
 See the "Known limitations" section of the README.

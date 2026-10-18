@@ -59,6 +59,17 @@ jobs:
       - name: Build and run every suite in f64
         run: make ERR=1 test-double
 
+  # The threaded VecEnv pool is the only concurrent code in the library, so it
+  # gets a ThreadSanitizer run of the two suites that drive it (they compare the
+  # threaded trajectories against the serial ones field by field).
+  threads:
+    name: TSan (ubuntu-latest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: ThreadSanitizer build and threaded suites
+        run: make tsan
+
   # Proves the packaged library works outside the source tree: install into a
   # scratch prefix, then compile and run examples/hello_rl.c against only the
   # installed headers and librl_lib, discovered through pkg-config.
@@ -82,7 +93,7 @@ jobs:
         run: |
           cc -O2 -Wall -Wextra -Werror -I"$RUNNER_TEMP/prefix/include/rl_lib" \
              examples/hello_rl.c "$RUNNER_TEMP/prefix/lib/librl_lib.a" -lm \
-             -o "$RUNNER_TEMP/hello_static"
+             -pthread -o "$RUNNER_TEMP/hello_static"
           "$RUNNER_TEMP/hello_static"
       - name: Uninstall removes everything it installed
         run: |
