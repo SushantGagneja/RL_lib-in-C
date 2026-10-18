@@ -47,3 +47,46 @@ jobs:
       - uses: actions/checkout@v4
       - name: Scalar-backend build and math tests
         run: make ERR=1 EXTRA_CFLAGS=-DRL_SIMD_BACKEND=0 test_mat && ./test_mat
+
+  # Every suite is also run in double precision (RL_LIB_USE_DOUBLE), so f64 is
+  # not only exercised by the gradient check. The tests build into their own
+  # object tree, so this does not touch the default f32 objects.
+  double-precision:
+    name: f64 suites (ubuntu-latest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and run every suite in f64
+        run: make ERR=1 test-double
+
+  # Proves the packaged library works outside the source tree: install into a
+  # scratch prefix, then compile and run examples/hello_rl.c against only the
+  # installed headers and librl_lib, discovered through pkg-config.
+  install-smoke:
+    name: install & consume (ubuntu-latest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install into a scratch prefix
+        run: make ERR=1 install PREFIX="$RUNNER_TEMP/prefix"
+      - name: Build and run a consumer via pkg-config
+        env:
+          PKG_CONFIG_PATH: ${{ runner.temp }}/prefix/lib/pkgconfig
+        run: |
+          echo "cflags: $(pkg-config --cflags rl_lib)"
+          echo "libs:   $(pkg-config --libs rl_lib)"
+          cc -O2 -Wall -Wextra -Werror $(pkg-config --cflags rl_lib) \
+             examples/hello_rl.c $(pkg-config --libs rl_lib) -o "$RUNNER_TEMP/hello_shared"
+          LD_LIBRARY_PATH="$RUNNER_TEMP/prefix/lib" "$RUNNER_TEMP/hello_shared"
+      - name: Build and run a consumer against the static archive
+        run: |
+          cc -O2 -Wall -Wextra -Werror -I"$RUNNER_TEMP/prefix/include/rl_lib" \
+             examples/hello_rl.c "$RUNNER_TEMP/prefix/lib/librl_lib.a" -lm \
+             -o "$RUNNER_TEMP/hello_static"
+          "$RUNNER_TEMP/hello_static"
+      - name: Uninstall removes everything it installed
+        run: |
+          make uninstall PREFIX="$RUNNER_TEMP/prefix"
+          test ! -e "$RUNNER_TEMP/prefix/include/rl_lib"
+          test ! -e "$RUNNER_TEMP/prefix/lib/librl_lib.a"
+          test ! -e "$RUNNER_TEMP/prefix/lib/pkgconfig/rl_lib.pc"

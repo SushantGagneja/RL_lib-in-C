@@ -1,9 +1,16 @@
 # Changelog
 
-All notable changes to this project are recorded here. There is no released
-version yet; entries below are grouped by the review that prompted them.
+All notable changes to this project are recorded here. The format follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions are
+[Semantic Versioning](https://semver.org/spec/v2.0.0.html) and the API only
+breaks on a major bump. `RL_LIB_VERSION_STRING` in `include/version.h` is the
+single source of truth — it is also stamped into `rl_lib.pc`.
 
-## Unreleased
+## 1.0.0 — 2026-10-18
+
+First release. Everything below landed while preparing it, so this entry is the
+whole history: the project was renamed to **RL_lib-in-C**, licensed under MIT,
+independently reimplemented, and carried through the Phase 0–5 roadmap.
 
 ### Project renamed
 - The project is now **RL_lib-in-C**: `CRL_*` macros and `[cRL ...]` messages
@@ -64,6 +71,28 @@ version yet; entries below are grouped by the review that prompted them.
   clean.
 
 ### Added
+- **Checkpointing** (`checkpoint.c` / `checkpoint.h`): `net_save`, `net_load`,
+  `adam_save`, `adam_load`, `checkpoint_save`, `checkpoint_load`, and
+  `checkpoint_last_error`. A checkpoint is a versioned, endian-independent,
+  block-structured binary file holding the parameters and the Adam moments, so a
+  run can be stopped and resumed. Loads validate the scalar width, parameter
+  count, payload size and every shape, and stage the payload before writing, so a
+  rejected file leaves the model untouched. Covered by `tests/test_checkpoint.c`
+  (53 checks), including a bit-exact Adam-state resume test.
+- **Packaging**: `make lib` builds `librl_lib.a` and a versioned shared library
+  (`librl_lib.<major>.dylib` / `librl_lib.so.<version>` with a soname); `make
+  install PREFIX=...` installs headers into `include/rl_lib/`, both libraries and
+  a generated `rl_lib.pc`; `make uninstall` reverses it. A CI job installs into a
+  scratch prefix and builds `examples/hello_rl.c` against only the installed
+  headers and library.
+- **`include/version.h`** with `RL_LIB_VERSION_MAJOR/MINOR/PATCH/STRING`, read by
+  the Makefile when it stamps `rl_lib.pc`.
+- **`docs/API.md`**: a complete reference for every public header, with the
+  ownership, error-handling and precision conventions stated up front.
+- **`examples/hello_rl.c`**: the smallest end-to-end program (build, train, save,
+  load, evaluate), used as the packaging smoke test, plus `make hello`.
+- **`make test-double`**: builds the f64 configuration into its own object tree
+  and runs *every* suite in double precision, not just the gradient check.
 - **SIMD MatMul** (`simd.c` / `simd.h` plus `linalg.c`): register-blocked NEON
   and AVX2+FMA kernels for the NN/NT/TN cases, a portable `mat_mm_scalar`
   reference, a compile-time backend selector (`-DRL_SIMD_BACKEND=0` forces
@@ -81,7 +110,7 @@ version yet; entries below are grouped by the review that prompted them.
   `examples/train_ppo.c`.
 - `make ppo`, `EXTRA_CFLAGS` Makefile support, and a scalar-backend CI job.
 - `make gradcheck-double`: builds the library in f64 (`-DRL_LIB_USE_DOUBLE`, the
-  new `real` scalar typedef) so the gradient check runs with `h = 1e-5` and a
+  `real` scalar typedef) so the gradient check runs with `h = 1e-5` and a
   `1e-6` tolerance. Input/activation gradients and an elementwise `mul` with
   both operands requiring grad are checked too.
 - `tests/test_rl.c`: GAE against a hand-computed trajectory, a single Adam step,

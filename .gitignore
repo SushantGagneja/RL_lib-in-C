@@ -18,17 +18,27 @@
 /train_cartpole
 /train_a2c
 /train_ppo
+/hello_rl
+/hello_rl.ckpt
 /test_mat
 /test_gradcheck
 /test_gradcheck_double
 /test_envs
 /test_rl
+/test_checkpoint
+/checkpoint_test*.bin
 /rl_lib_bench
 /exercise/arena
 /exercise/autograd
 /exercise/mat
 
-# Out-of-tree object trees (double-precision gradcheck build)
+# Library artifacts from `make lib` / `make install`
+/librl_lib.a
+/librl_lib.*.dylib
+/librl_lib.so*
+/rl_lib.pc
+
+# Out-of-tree object trees (double-precision gradcheck build, shared objects)
 /build/
 
 # Generated benchmark report

@@ -58,6 +58,46 @@ so there is nothing to attribute and no external license to carry.
   behind a runtime CPU probe) kernels for the NN/NT/TN cases, with the portable
   scalar path as the reference. The default f32 build uses them; the f64 build
   and `-DRL_SIMD_BACKEND=0` fall back to scalar.
+- **Checkpointing** — a versioned, endian-independent binary format that saves
+  and restores the parameters *and* the Adam moments, so a training run can be
+  stopped and resumed. Loading is all-or-nothing: a file that does not match the
+  model's shapes or scalar width is rejected without mutating anything.
+- **Installable and packageable** — `make install` puts the headers in
+  `include/rl_lib/`, builds `librl_lib.a` plus a versioned shared library, and
+  writes a `rl_lib.pc` pkg-config file. There is no CMake and no build-time
+  dependency beyond `make`, a C99 compiler, and `libm`.
+
+---
+
+## Install as a library
+
+```bash
+make install PREFIX=/usr/local     # or any prefix you own
+```
+
+That installs:
+
+```
+$PREFIX/include/rl_lib/*.h        # + envs/*.h
+$PREFIX/lib/librl_lib.a
+$PREFIX/lib/librl_lib.<major>.dylib   (Linux: librl_lib.so.<version>)
+$PREFIX/lib/librl_lib.dylib           (Linux: librl_lib.so)
+$PREFIX/lib/pkgconfig/rl_lib.pc
+```
+
+Then link as usual:
+
+```bash
+cc -O2 $(pkg-config --cflags rl_lib) my_program.c $(pkg-config --libs rl_lib) -o my_program
+```
+
+`PREFIX` is baked into the shared library's install name, so pass the same value
+when building and installing (a single `make install PREFIX=...` does both).
+`make uninstall PREFIX=...` removes exactly what was installed.
+
+The [`docs/API.md`](docs/API.md) reference documents every public function, and
+`examples/hello_rl.c` is a complete program that CI builds against the *installed*
+library to prove the packaged copy works outside the source tree.
 
 ---
 
@@ -146,14 +186,20 @@ wired into the Snake benchmark.
 
 ```bash
 make test               # build + run every test suite (incl. the f64 gradcheck)
+make test-double        # run every suite in double precision as well
 make release            # -O3 training binaries
 make asan               # ASAN + UBSAN build, then run all tests
 make ERR=1 test         # the strict warning set as errors (what CI runs)
+
+make lib                # librl_lib.a + the shared library + rl_lib.pc
+make install PREFIX=... # headers, libraries and pkg-config file
+make uninstall PREFIX=...
 
 make snake              # train Snake
 make cartpole           # train CartPole
 make a2c                # train CartPole with A2C
 make ppo                # train CartPole with PPO
+make hello              # the minimal end-to-end example
 
 make bench              # multi-seed benchmarks -> bench_results.md
 make bench-cartpole     # CartPole only
@@ -175,6 +221,11 @@ make clean
 | `test_gradcheck` (f32) | the same 10 suites in the default build (looser tolerance) |
 | `test_envs` | 45 checks: CartPole bounds/termination/determinism; Snake reset, grid validation, wall/self collision, tail vacate, eating; VecEnv shape, determinism, independent clones, and auto-reset terminal-observation capture |
 | `test_rl` | 25 checks: GAE vs a hand-computed trajectory, one Adam step, grad clipping, actor-critic build, value-head learning, batched-vs-per-sample gradient equivalence, CartPole learning smoke tests for REINFORCE and PPO, and same-seed determinism for both |
+| `test_checkpoint` | 53 checks: byte-exact parameter round trips, bit-exact Adam-state resume, parameter-only and optimiser-only files, and rejection of missing, corrupt, truncated, wrong-width, wrongly-sized and wrongly-shaped files — each verified to leave the model untouched |
+
+`make test-double` then rebuilds the library with `-DRL_LIB_USE_DOUBLE` and runs
+every one of those suites in f64, so the f64 path is not only exercised by the
+gradient check.
 
 Representative output:
 
@@ -194,6 +245,10 @@ Passed: 45  Failed: 0
 
 --- test_rl ---
 Tests: 25 passed, 0 failed
+
+--- test_checkpoint ---
+  Adam state resumes a run exactly... OK
+Tests: 53 passed, 0 failed
 ```
 
 ---
@@ -204,6 +259,7 @@ Tests: 25 passed, 0 failed
 .
 ├── include/
 │   ├── base.h               # Primitive types, real/f32/f64, RL_LIB_ASSERT/RL_LIB_CHECK
+│   ├── version.h            # RL_LIB_VERSION_* (also stamped into rl_lib.pc)
 │   ├── memory.h             # 64-byte aligned bump allocator + temp scopes
 │   ├── random.h             # xoshiro256** PRNG
 │   ├── simd.h               # SIMD backend selection (NEON / AVX2 / scalar)
@@ -211,6 +267,7 @@ Tests: 25 passed, 0 failed
 │   ├── graph.h              # Computation graph, Tensor nodes, reverse-mode AD
 │   ├── layers.h             # Dense layer, MLP, discrete actor, actor-critic
 │   ├── optim.h              # SGD, Adam, gradient clipping
+│   ├── checkpoint.h         # Parameter + Adam state save/load
 │   ├── env.h                # Env interface (reset(seed), step, observe, clone)
 │   ├── vecenv.h             # Vectorized (batched) environment wrapper
 │   └── rl.h                 # Rollout buffer, REINFORCE, A2C, PPO, GAE, evaluation
@@ -222,6 +279,7 @@ Tests: 25 passed, 0 failed
 │   ├── graph.c              # Reverse-mode AD engine + op interpreter
 │   ├── layers.c             # Builders and initialization
 │   ├── optim.c              # Parameter updates
+│   ├── checkpoint.c         # Versioned checkpoint format (LE, block-structured)
 │   ├── vecenv.c             # Synchronized env vector with auto-reset
 │   └── rl.c                 # Rollout, REINFORCE, A2C, PPO/GAE, evaluation
 ├── envs/
@@ -232,13 +290,18 @@ Tests: 25 passed, 0 failed
 │   ├── train_cartpole.c
 │   ├── train_a2c.c
 │   ├── train_ppo.c
+│   ├── hello_rl.c           # Smallest end-to-end program (also used by CI)
 │   └── bench.c              # Multi-seed harness + throughput micro-benchmarks
 ├── tests/
 │   ├── test_mat.c
 │   ├── test_gradcheck.c     # f32 and f64 numerical gradient checks
 │   ├── test_envs.c
-│   └── test_rl.c
-├── .github/workflows/ci.yml # gcc/clang/macOS + ASAN/UBSAN + scalar-backend
+│   ├── test_rl.c
+│   └── test_checkpoint.c    # Round trips and rejection of bad files
+├── docs/
+│   └── API.md               # Full API reference
+├── .github/workflows/ci.yml # gcc/clang/macOS + ASAN/UBSAN + scalar + f64 + install
+├── rl_lib.pc.in             # pkg-config template (stamped from version.h)
 ├── CHANGELOG.md
 ├── Makefile
 └── README.md
@@ -269,20 +332,24 @@ Tests: 25 passed, 0 failed
   across libc implementations and `-O3` may reassociate, so bit-for-bit
   cross-machine reproduction is not guaranteed.
 - **Precision is f32 by default.** The `real` typedef switches the whole
-  library to f64 with `-DRL_LIB_USE_DOUBLE`; the gradient check uses this. The
-  training pipeline is only exercised in f32.
+  library to f64 with `-DRL_LIB_USE_DOUBLE`; the gradient check uses this, and
+  `make test-double` now runs every suite in f64 as well.
 - **Snake is not solved.** REINFORCE + Adam plateaus well below a BFS planner.
-- **Fixed capacity limits.** `MAX_PARAMS` is 128 and `MAX_ARITY` is 2;
-  exceeding them aborts. The arena is bump-only (no reuse within a run except
-  the `arena_mark`/`arena_rewind` temp scopes).
+- **Fixed capacity limits.** `MAX_PARAMS` is 128; exceeding it aborts.
+  `MAX_ARITY` is 2 because every operation in the set is unary or binary — that
+  is a property of the op set, not a cap. The arena is bump-only (no reuse
+  within a run except the `arena_mark`/`arena_rewind` temp scopes).
 - **One graph per batch size.** Inference (B=1) and batched training are
   separate graphs sharing parameter pointers; the batch size is frozen at build
   time. `TrainCfg.batch_size` is asserted against the graph, not used to resize
   it.
+- **Checkpoints cover parameters and optimiser state, not the RNG.** A resumed
+  run re-derives its generator from `TrainCfg.seed`, so it continues from the
+  saved weights but is not bit-identical to a run that was never interrupted.
 - **A few small heap allocations** remain (shuffle scratch, evaluation buffers,
-  entropy scratch) alongside the arena.
-- **Stack-based placement is untested.** Build/test coverage is Linux + macOS
-  + clang/gcc only.
+  entropy scratch, checkpoint staging) alongside the arena.
+- **Platform coverage is Linux + macOS, gcc/clang.** There is no Windows/MSVC
+  path and no CMake; the build is a POSIX Makefile.
 
 ---
 
