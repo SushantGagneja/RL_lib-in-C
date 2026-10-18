@@ -698,6 +698,10 @@ u32 vecenv_threads(const VecEnv *v);
 void vecenv_shutdown(VecEnv *v);
 ```
 
+`vecenv.h` also defines which threading backend was compiled in:
+`RL_LIB_USE_PTHREADS` (POSIX), `RL_LIB_USE_WIN32_THREADS` (Windows) or neither,
+plus `RL_LIB_HAS_THREADS` — 1 when one of them is present.
+
 `vecenv_new` clones the prototype `num_envs` times and resets every clone from a
 per-index derived seed (or explicit seeds via `vecenv_reset_seeds`, which is how
 two policies are compared on identical start states).
@@ -742,8 +746,15 @@ The synchronisation is a barrier built from a mutex and a condition variable
 handful of microseconds per step, so threading only pays for environments whose
 single step is more expensive than that — CartPole and Pendulum are far below
 the crossover and get slower (8.0 s → 13.0 s for the 1200-update Pendulum run
-with 8 threads). Builds without POSIX threads (`-DRL_LIB_NO_THREADS`, or
-`_WIN32`) compile the serial path and refuse a count above 1 loudly.
+with 8 threads).
+
+On Windows the same pool, barrier and entry points are implemented over the
+Win32 thread API (`CreateThread`, `CRITICAL_SECTION`, `CONDITION_VARIABLE`, with
+`SleepConditionVariableCS` as the `pthread_cond_wait` analogue), so the
+behaviour is identical on both platforms. A build without a threading backend
+(`-DRL_LIB_NO_THREADS`, or a platform with neither API) compiles the serial path
+and refuses a count above 1 loudly; the suites report their threaded
+comparisons as skipped rather than failing in that configuration.
 
 ---
 
@@ -957,6 +968,11 @@ Build it against an installed copy:
 make install PREFIX=/usr/local
 cc -O2 $(pkg-config --cflags rl_lib) hello_rl.c $(pkg-config --libs rl_lib) -o hello_rl
 ```
+
+On Windows (or with a CMake toolchain) the same install comes from
+`cmake --install build --prefix ...`, and a CMake project can instead use
+`find_package(RL_lib-in-C)` + `RL_lib-in-C::rl_lib`; both are described in the
+README's build section.
 
 See the [README](../README.md) for building from source and the
 [CHANGELOG](../CHANGELOG.md) for what changed in each release.

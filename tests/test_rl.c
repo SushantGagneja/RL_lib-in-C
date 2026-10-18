@@ -11,6 +11,7 @@
 #include "optim.h"
 #include "random.h"
 #include "rl.h"
+#include "vecenv.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -689,7 +690,12 @@ static void test_ppo_continuous_determinism(void) {
 // The threaded VecEnv is a scheduling choice, not a numerical one: the
 // trajectories are the same, so training from the same seed reaches the same
 // weights with 4 worker threads as with none. Checked for both trainers.
+// Skipped when the build has no threading backend (see vecenv.h).
 static void test_threaded_training_determinism(void) {
+#if !RL_LIB_HAS_THREADS
+  printf("  threaded rollouts => identical weights... "
+         "SKIP (no threading backend)\n");
+#else
   printf("  threaded rollouts => identical weights... ");
   real checksum[2][2]; // [trainer][thread setting]
 
@@ -744,6 +750,7 @@ static void test_threaded_training_determinism(void) {
                 "threads changed the trained weights");
   }
   printf(" OK\n");
+#endif // RL_LIB_HAS_THREADS
 }
 
 // ── Parameter registry is not capped at a fixed count ────────────────

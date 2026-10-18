@@ -10,7 +10,7 @@ single source of truth — it is also stamped into `rl_lib.pc`.
 
 First release. Everything below landed while preparing it, so this entry is the
 whole history: the project was renamed to **RL_lib-in-C**, licensed under MIT,
-independently reimplemented, and carried through the Phase 0–5 roadmap.
+independently reimplemented, and carried through the Phase 0–7 roadmap.
 
 ### Project renamed
 - The project is now **RL_lib-in-C**: `CRL_*` macros and `[cRL ...]` messages
@@ -155,7 +155,9 @@ independently reimplemented, and carried through the Phase 0–5 roadmap.
   for 260 steps on CartPole and Pendulum, `tests/test_rl.c` compares the trained
   weights — and it is visible end to end (`./train_ppo_continuous 42 1200 8`).
   `-pthread` is now part of the build, `THREAD_FLAGS=` plus
-  `-DRL_LIB_NO_THREADS` removes it, and `rl_lib.pc` carries the flag. The
+  `-DRL_LIB_NO_THREADS` removes it, and `rl_lib.pc` carries the flag — now via
+  the `@LIBS_EXTRA@` token the CMake project stamps too, so a no-threads build
+  no longer advertises `-pthread`. The
   benchmark measures the crossover with a synthetic compute-bound env:
   1.92×/3.2×/2.7× on 2/4/8 threads against the serial loop.
 - `make gradcheck-double`: builds the library in f64 (`-DRL_LIB_USE_DOUBLE`, the
@@ -188,6 +190,30 @@ independently reimplemented, and carried through the Phase 0–5 roadmap.
   in the README rather than smoothed over: 4× the updates still misses parity and
   collapses in the last few hundred updates, and shaping affects that late-run
   stability but not the 1500-update score.
+- **A CMake project** (`CMakeLists.txt`, `cmake/`), which is what Windows uses:
+  static + shared libraries, every example, every suite, `ctest`, the same
+  install layout as `make install` plus a `find_package(RL_lib-in-C)` package
+  config, and a pkg-config file with a relocatable `${pcfiledir}` prefix. Its
+  options mirror the Makefile knobs (`RL_LIB_USE_DOUBLE`, `RL_LIB_NO_THREADS`,
+  `RL_SIMD_BACKEND`, `RL_LIB_BUILD_TESTS`, `RL_LIB_BUILD_EXAMPLES`).
+- **Windows support.** The threaded `VecEnv` pool has a Win32 backend now
+  (`CreateThread`, `CRITICAL_SECTION`, `CONDITION_VARIABLE` — the same pool and
+  the same sense-reversing barrier, so stepping stays bit-identical),
+  `arena_new` uses `_aligned_malloc`/`_aligned_free` where there is no
+  `posix_memalign`, and the benchmark's wall clock is `QueryPerformanceCounter`.
+  MSVC builds select the scalar SIMD reference, because it cannot compile the
+  `target`-attributed AVX2 kernels; MinGW and clang-cl get AVX2.
+- `RL_LIB_HAS_THREADS` (`vecenv.h`): 1 when a threading backend was compiled in.
+  The threaded comparisons in `test_envs` / `test_rl` skip themselves — and say
+  so — when it is 0, so the documented `-DRL_LIB_NO_THREADS` build now passes its
+  suites instead of aborting on `vecenv_set_threads`.
+- `make examples` compiles every example and the benchmark with the current
+  flags; CI runs it with `ERR=1`, so example code is held to the same warning
+  standard as the library. (The test binaries cannot do that: their
+  target-specific `CFLAGS` give the shared library objects
+  `-fsanitize=undefined`.)
+- CI: a `windows-latest` job (MSVC configure / build / `ctest` / install) and a
+  serial-only job for the no-threads configuration.
 
 ### Changed
 - **`MAX_PARAMS` is gone.** The parameter registry (`Net.params`) now doubles

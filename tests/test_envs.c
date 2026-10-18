@@ -528,6 +528,8 @@ static void test_vecenv_continuous(Arena *arena) {
   printf("OK\n");
 }
 
+#if RL_LIB_HAS_THREADS
+
 // Compares two vecenvs field by field (bitwise, so a single ULP shows up).
 static b32 vecenv_same(const VecEnv *a, const VecEnv *b) {
   if (a->num_envs != b->num_envs || a->obs_dim != b->obs_dim ||
@@ -543,12 +545,24 @@ static b32 vecenv_same(const VecEnv *a, const VecEnv *b) {
          memcmp(a->truncateds, b->truncateds, sizeof(b8) * a->num_envs) == 0;
 }
 
+#endif // RL_LIB_HAS_THREADS
+
 // Threaded stepping must produce exactly the serial trajectories: the
 // sub-environments are independent and nothing is shared, so the pool only
 // decides who computes what. Checked long enough (260 steps, above CartPole's
 // 500-step cap crossed by random play and Pendulum's 200-step limit) to cross
 // many auto-resets.
+//
+// Threaded stepping only exists when a threading backend is compiled in:
+// pthreads on POSIX, or the Win32 thread API on Windows. Without one,
+// vecenv_set_threads refuses loudly, so the comparison below is skipped instead
+// of aborting the suite (`make EXTRA_CFLAGS=-DRL_LIB_NO_THREADS`, or
+// `cmake -DRL_LIB_NO_THREADS=ON`).
 static void test_vecenv_threads(Arena *arena) {
+#if !RL_LIB_HAS_THREADS
+  (void)arena;
+  printf("  vecenv threaded stepping == serial... SKIP (no threading backend)\n");
+#else
   printf("  vecenv threaded stepping == serial... ");
 
   for (u32 kind = 0; kind < 2; kind++) {
@@ -620,6 +634,7 @@ static void test_vecenv_threads(Arena *arena) {
     ASSERT_TRUE(tail, "stepping continues to match after the pool is gone");
   }
   printf("OK\n");
+#endif // RL_LIB_HAS_THREADS
 }
 
 int main(void) {

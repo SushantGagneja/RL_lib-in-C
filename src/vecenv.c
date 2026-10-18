@@ -2,6 +2,12 @@
 
 #if defined(RL_LIB_USE_PTHREADS)
 #include <pthread.h>
+#elif defined(RL_LIB_USE_WIN32_THREADS)
+// windows.h is what brings in CreateThread, CRITICAL_SECTION and
+// CONDITION_VARIABLE. WIN32_LEAN_AND_MEAN keeps the winsock/OLE declarations out
+// of the way; nothing here needs them.
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
 #endif
 
 // What a worker should do when it is released for a step.
@@ -150,12 +156,51 @@ static void vecenv_run_slice(VecEnv *v, u32 tid, u32 stride, VecEnvStepMode mode
 // is optional in POSIX and absent on macOS (a first-class target here), and a
 // spinning C11 barrier would burn a core while the slowest sub-environment
 // finishes. The same mutex is what publishes the action buffer to the workers.
+//
+// Win32 exposes the same two primitives under different names, so the pool below
+// is written once against the wrappers in this block: POSIX gets the pthread
+// mutex/condition/thread trio, Windows the critical-section / condition-variable
+// / CreateThread family (Vista and later).
 
-#if defined(RL_LIB_USE_PTHREADS)
+#if defined(RL_LIB_USE_PTHREADS) || defined(RL_LIB_USE_WIN32_THREADS)
+
+#if defined(RL_LIB_USE_WIN32_THREADS)
+typedef CRITICAL_SECTION RlMutex;
+typedef CONDITION_VARIABLE RlCond;
+typedef HANDLE RlThread;
+
+static void rl_mutex_init(RlMutex *m) { InitializeCriticalSection(m); }
+static void rl_mutex_lock(RlMutex *m) { EnterCriticalSection(m); }
+static void rl_mutex_unlock(RlMutex *m) { LeaveCriticalSection(m); }
+static void rl_cond_init(RlCond *c) { InitializeConditionVariable(c); }
+
+// SleepConditionVariableCS is the pthread_cond_wait analogue: it releases the
+// critical section while waiting and reacquires it before returning. These waits
+// have no deadline, so the timeout is INFINITE.
+static void rl_cond_wait(RlCond *c, RlMutex *m) {
+  (void)SleepConditionVariableCS(c, m, INFINITE);
+}
+static void rl_cond_broadcast(RlCond *c) { WakeAllConditionVariable(c); }
+#else
+typedef pthread_mutex_t RlMutex;
+typedef pthread_cond_t RlCond;
+typedef pthread_t RlThread;
+
+static void rl_mutex_init(RlMutex *m) {
+  RL_LIB_ASSERT(pthread_mutex_init(m, NULL) == 0, "vecenv: mutex init failed");
+}
+static void rl_mutex_lock(RlMutex *m) { pthread_mutex_lock(m); }
+static void rl_mutex_unlock(RlMutex *m) { pthread_mutex_unlock(m); }
+static void rl_cond_init(RlCond *c) {
+  RL_LIB_ASSERT(pthread_cond_init(c, NULL) == 0, "vecenv: cond init failed");
+}
+static void rl_cond_wait(RlCond *c, RlMutex *m) { pthread_cond_wait(c, m); }
+static void rl_cond_broadcast(RlCond *c) { pthread_cond_broadcast(c); }
+#endif
 
 typedef struct {
-  pthread_mutex_t mtx;
-  pthread_cond_t cnd;
+  RlMutex mtx;
+  RlCond cnd;
   u32 parties;  // participants per generation, counting the main thread
   u32 arrived;
   u32 generation;
@@ -169,13 +214,13 @@ typedef struct {
 struct VecEnvPool {
   VecEnv *v;
   u32 num_threads;  // participants, including the calling thread
-  pthread_t *tids;  // num_threads - 1 spawned workers
+  RlThread *tids;   // num_threads - 1 spawned workers
   VecEnvWorker *workers;
 
   // Workers spin up before the pool knows how many of them actually started, so
   // they park on this gate until the barriers have their final party count.
-  pthread_mutex_t gate_mtx;
-  pthread_cond_t gate_cnd;
+  RlMutex gate_mtx;
+  RlCond gate_cnd;
   b32 gate_open;
 
   VecEnvBarrier start;  // main -> workers: "here is the next step"
@@ -186,46 +231,61 @@ struct VecEnvPool {
   const real *cont_actions;
 };
 
+#if defined(RL_LIB_USE_WIN32_THREADS)
+static DWORD WINAPI vecenv_worker_entry(LPVOID arg);
+static b32 rl_thread_start(RlThread *t, VecEnvWorker *w) {
+  *t = CreateThread(NULL, 0, vecenv_worker_entry, (LPVOID)w, 0, NULL);
+  return *t != NULL;
+}
+static void rl_thread_join(RlThread t) {
+  WaitForSingleObject(t, INFINITE);
+  CloseHandle(t);
+}
+#else
+static void *vecenv_worker_entry(void *arg);
+static b32 rl_thread_start(RlThread *t, VecEnvWorker *w) {
+  return pthread_create(t, NULL, vecenv_worker_entry, (void *)w) == 0;
+}
+static void rl_thread_join(RlThread t) { pthread_join(t, NULL); }
+#endif
+
 static void vecenv_barrier_init(VecEnvBarrier *b, u32 parties) {
   b->parties = parties;
   b->arrived = 0;
   b->generation = 0;
-  RL_LIB_ASSERT(pthread_mutex_init(&b->mtx, NULL) == 0,
-                "vecenv: pthread_mutex_init failed");
-  RL_LIB_ASSERT(pthread_cond_init(&b->cnd, NULL) == 0,
-                "vecenv: pthread_cond_init failed");
+  rl_mutex_init(&b->mtx);
+  rl_cond_init(&b->cnd);
 }
 
 static void vecenv_pool_barrier(VecEnvBarrier *b) {
-  pthread_mutex_lock(&b->mtx);
+  rl_mutex_lock(&b->mtx);
   const u32 generation = b->generation;
   b->arrived++;
   if (b->arrived == b->parties) {
     b->arrived = 0;
     b->generation++;
-    pthread_cond_broadcast(&b->cnd);
+    rl_cond_broadcast(&b->cnd);
   } else {
     while (b->generation == generation) {
-      pthread_cond_wait(&b->cnd, &b->mtx);
+      rl_cond_wait(&b->cnd, &b->mtx);
     }
   }
-  pthread_mutex_unlock(&b->mtx);
+  rl_mutex_unlock(&b->mtx);
 }
 
-static void *vecenv_worker_main(void *arg) {
-  VecEnvWorker *w = (VecEnvWorker *)arg;
+static void vecenv_worker_main(VecEnvWorker *w) {
   VecEnvPool *p = w->pool;
 
-  pthread_mutex_lock(&p->gate_mtx);
+  rl_mutex_lock(&p->gate_mtx);
   while (!p->gate_open) {
-    pthread_cond_wait(&p->gate_cnd, &p->gate_mtx);
+    rl_cond_wait(&p->gate_cnd, &p->gate_mtx);
   }
-  pthread_mutex_unlock(&p->gate_mtx);
+  rl_mutex_unlock(&p->gate_mtx);
 
   for (;;) {
     vecenv_pool_barrier(&p->start);
     if (p->mode == VECENV_STEP_STOP) {
-      return NULL;
+      return;
     }
     vecenv_run_slice(p->v, w->tid, p->num_threads, p->mode, p->disc_actions,
                      p->cont_actions);
@@ -233,14 +293,26 @@ static void *vecenv_worker_main(void *arg) {
   }
 }
 
-#endif // RL_LIB_USE_PTHREADS
+#if defined(RL_LIB_USE_WIN32_THREADS)
+static DWORD WINAPI vecenv_worker_entry(LPVOID arg) {
+  vecenv_worker_main((VecEnvWorker *)arg);
+  return 0;
+}
+#else
+static void *vecenv_worker_entry(void *arg) {
+  vecenv_worker_main((VecEnvWorker *)arg);
+  return NULL;
+}
+#endif
+
+#endif // RL_LIB_USE_PTHREADS || RL_LIB_USE_WIN32_THREADS
 
 // Steps the whole vector: through the worker pool when one is installed, or
 // straight through when serial.
 static void vecenv_step_all(VecEnv *v, VecEnvStepMode mode,
                             const u32 *disc_actions,
                             const real *cont_actions) {
-#if defined(RL_LIB_USE_PTHREADS)
+#if defined(RL_LIB_USE_PTHREADS) || defined(RL_LIB_USE_WIN32_THREADS)
   if (v->pool != NULL) {
     VecEnvPool *p = v->pool;
     p->mode = mode;
@@ -302,15 +374,13 @@ void vecenv_set_threads(Arena *arena, VecEnv *v, u32 num_threads) {
   if (num_threads <= 1) {
     return;
   }
-#if defined(RL_LIB_USE_PTHREADS)
+#if defined(RL_LIB_USE_PTHREADS) || defined(RL_LIB_USE_WIN32_THREADS)
   VecEnvPool *p = ARENA_OBJ(arena, VecEnvPool);
   p->v = v;
   p->mode = VECENV_STEP_STOP;
-  RL_LIB_ASSERT(pthread_mutex_init(&p->gate_mtx, NULL) == 0,
-                "vecenv: pthread_mutex_init failed");
-  RL_LIB_ASSERT(pthread_cond_init(&p->gate_cnd, NULL) == 0,
-                "vecenv: pthread_cond_init failed");
-  p->tids = ARENA_ARR(arena, pthread_t, num_threads - 1);
+  rl_mutex_init(&p->gate_mtx);
+  rl_cond_init(&p->gate_cnd);
+  p->tids = ARENA_ARR(arena, RlThread, num_threads - 1);
   p->workers = ARENA_ARR(arena, VecEnvWorker, num_threads - 1);
 
   // Spawn first, then learn how many threads the system actually gave us: the
@@ -321,8 +391,7 @@ void vecenv_set_threads(Arena *arena, VecEnv *v, u32 num_threads) {
   for (u32 i = 0; i + 1 < num_threads; i++) {
     p->workers[i].pool = p;
     p->workers[i].tid = i + 1;
-    if (pthread_create(&p->tids[i], NULL, vecenv_worker_main,
-                       (void *)&p->workers[i]) != 0) {
+    if (!rl_thread_start(&p->tids[i], &p->workers[i])) {
       break;
     }
     spawned++;
@@ -334,20 +403,20 @@ void vecenv_set_threads(Arena *arena, VecEnv *v, u32 num_threads) {
   vecenv_barrier_init(&p->start, p->num_threads);
   vecenv_barrier_init(&p->done, p->num_threads);
 
-  pthread_mutex_lock(&p->gate_mtx);
+  rl_mutex_lock(&p->gate_mtx);
   p->gate_open = true;
-  pthread_cond_broadcast(&p->gate_cnd);
-  pthread_mutex_unlock(&p->gate_mtx);
+  rl_cond_broadcast(&p->gate_cnd);
+  rl_mutex_unlock(&p->gate_mtx);
 
   v->pool = p;
 #else
-  RL_LIB_ASSERT(false, "vecenv_set_threads: this build has no POSIX threads");
+  RL_LIB_ASSERT(false, "vecenv_set_threads: this build has no thread support");
 #endif
 }
 
 u32 vecenv_threads(const VecEnv *v) {
   RL_LIB_ASSERT(v != NULL, "vecenv_threads: NULL vecenv");
-#if defined(RL_LIB_USE_PTHREADS)
+#if defined(RL_LIB_USE_PTHREADS) || defined(RL_LIB_USE_WIN32_THREADS)
   return v->pool != NULL ? v->pool->num_threads : 1u;
 #else
   return 1u;
@@ -356,7 +425,7 @@ u32 vecenv_threads(const VecEnv *v) {
 
 void vecenv_shutdown(VecEnv *v) {
   RL_LIB_ASSERT(v != NULL, "vecenv_shutdown: NULL vecenv");
-#if defined(RL_LIB_USE_PTHREADS)
+#if defined(RL_LIB_USE_PTHREADS) || defined(RL_LIB_USE_WIN32_THREADS)
   VecEnvPool *p = v->pool;
   if (p == NULL) {
     return;
@@ -364,7 +433,7 @@ void vecenv_shutdown(VecEnv *v) {
   p->mode = VECENV_STEP_STOP;
   vecenv_pool_barrier(&p->start);  // release the workers so they can return
   for (u32 i = 0; i + 1 < p->num_threads; i++) {
-    pthread_join(p->tids[i], NULL);
+    rl_thread_join(p->tids[i]);
   }
   v->pool = NULL;
 #endif

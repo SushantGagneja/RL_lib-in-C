@@ -77,6 +77,37 @@ jobs:
       - name: ThreadSanitizer build and threaded suites
         run: make tsan
 
+  # The serial-only configuration: no pthreads at all, so the threaded VecEnv
+  # comparisons skip themselves instead of aborting the suites. Documented in
+  # the Makefile header, and what a user who cannot link a thread library
+  # builds (`cmake -DRL_LIB_NO_THREADS=ON` is the CMake equivalent).
+  serial-only:
+    name: no threads (ubuntu-latest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and test without threads
+        run: make ERR=1 EXTRA_CFLAGS=-DRL_LIB_NO_THREADS THREAD_FLAGS= test
+
+  # Windows has no make toolchain in the default image, so this is the CMake
+  # path: MSVC builds the library, the examples and the suites, and ctest runs
+  # them. It is also the only job that exercises the Windows-only branches -
+  # Win32 threads in the VecEnv pool, _aligned_malloc, the
+  # QueryPerformanceCounter bench clock - and the only MSVC build.
+  windows:
+    name: Windows (MSVC, cmake)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build --config Release --parallel
+      - name: Run the test suites
+        run: ctest --test-dir build -C Release --output-on-failure
+      - name: Install into a scratch prefix
+        run: cmake --install build --config Release --prefix "${{ runner.temp }}/prefix"
+
   # Proves the packaged library works outside the source tree: install into a
   # scratch prefix, then compile and run examples/hello_rl.c against only the
   # installed headers and librl_lib, discovered through pkg-config.

@@ -1,0 +1,11 @@
+@PACKAGE_INIT@
+
+# The static library references Threads on platforms that have pthreads, so a
+# consumer needs the imported target to exist before the targets file is read.
+include(CMakeFindDependencyMacro)
+if(@RL_LIB_PC_THREADS@)
+  find_dependency(Threads)
+endif()
+
+include("${CMAKE_CURRENT_LIST_DIR}/RL_lib-in-CTargets.cmake")
+check_required_components(RL_lib-in-C)

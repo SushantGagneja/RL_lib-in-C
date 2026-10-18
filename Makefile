@@ -10,7 +10,9 @@ endif
 #   make EXTRA_CFLAGS=-DRL_LIB_NO_THREADS THREAD_FLAGS= test   (no pthreads)
 EXTRA_CFLAGS ?=
 # The library uses POSIX threads for the optional threaded VecEnv; every target
-# links with it, so the flag lives here where the link rules can see it.
+# links with it, so the flag lives here where the link rules can see it. (Windows
+# has no make toolchain here: the CMake project builds there, and the Win32
+# thread API needs no flag.)
 THREAD_FLAGS ?= -pthread
 CFLAGS = $(WARN) -Iinclude -I. $(THREAD_FLAGS) $(EXTRA_CFLAGS)
 
@@ -35,6 +37,11 @@ PREFIX ?= /usr/local
 LIBDIR ?= $(PREFIX)/lib
 INCLUDEDIR ?= $(PREFIX)/include
 PKGCONFIGDIR ?= $(LIBDIR)/pkgconfig
+
+# Extra link flags a consumer of the installed library needs, stamped into
+# rl_lib.pc: libm, plus the thread flag unless this build dropped threads (the
+# documented no-threads invocation sets THREAD_FLAGS= empty).
+PC_LIBS_EXTRA = -lm $(THREAD_FLAGS)
 
 LIB_STATIC = librl_lib.a
 
@@ -141,6 +148,7 @@ lib: $(LIB_STATIC) $(SHARED_LINK)
 rl_lib.pc: rl_lib.pc.in include/version.h
 	sed -e 's|@PREFIX@|$(PREFIX)|g' -e 's|@LIBDIR@|$(LIBDIR)|g' \
 	    -e 's|@INCLUDEDIR@|$(INCLUDEDIR)|g' -e 's|@VERSION@|$(VERSION)|g' \
+	    -e 's|@LIBS_EXTRA@|$(PC_LIBS_EXTRA)|g' \
 	    $< > $@
 
 install: lib rl_lib.pc

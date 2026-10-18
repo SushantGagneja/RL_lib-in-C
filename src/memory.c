@@ -2,6 +2,9 @@
 
 #include <stdlib.h>
 #include <string.h>
+#if defined(_WIN32)
+#include <malloc.h> // _aligned_malloc / _aligned_free
+#endif
 
 // ARENA_ALIGN is a power of two, so alignment is a mask add.
 static u64 slot_start(u64 offset) {
@@ -15,11 +18,21 @@ Arena *arena_new(u64 capacity) {
   }
 
   void *block = NULL;
+#if defined(_WIN32)
+  // Windows (MSVC and mingw alike) has no posix_memalign; _aligned_malloc is the
+  // native allocator and is freed with _aligned_free, never with free().
+  block = _aligned_malloc((size_t)capacity, (size_t)ARENA_ALIGN);
+  if (block == NULL) {
+    free(arena);
+    return NULL;
+  }
+#else
   if (posix_memalign(&block, ARENA_ALIGN, (size_t)capacity) != 0 ||
       block == NULL) {
     free(arena);
     return NULL;
   }
+#endif
 
   arena->base = (u8 *)block;
   arena->cap = capacity;
@@ -29,7 +42,11 @@ Arena *arena_new(u64 capacity) {
 
 void arena_dispose(Arena *arena) {
   if (arena != NULL) {
+#if defined(_WIN32)
+    _aligned_free(arena->base);
+#else
     free(arena->base);
+#endif
     free(arena);
   }
 }

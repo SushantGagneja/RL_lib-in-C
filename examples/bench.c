@@ -28,6 +28,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h> // QueryPerformanceCounter for the wall-clock sections
+#endif
 
 #define NUM_SEEDS 5
 #define EVAL_EPISODES 100
@@ -421,9 +425,19 @@ static void bench_vecenv_throughput(void) {
 // invisible in CPU time by construction — the same work just moves to another
 // core — so the worker pool is measured on the wall clock.
 static double now_wall_seconds(void) {
+#if defined(_WIN32)
+  // The Windows monotonic clock is the performance counter; clock_gettime is not
+  // part of the C library there.
+  LARGE_INTEGER freq;
+  LARGE_INTEGER now;
+  QueryPerformanceFrequency(&freq);
+  QueryPerformanceCounter(&now);
+  return (double)now.QuadPart / (double)freq.QuadPart;
+#else
   struct timespec ts;
   clock_gettime(CLOCK_MONOTONIC, &ts);
   return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+#endif
 }
 
 // ── Threaded VecEnv scaling (synthetic) ──────────────────────────────

@@ -111,6 +111,10 @@ cc -O2 $(pkg-config --cflags rl_lib) my_program.c $(pkg-config --libs rl_lib) -o
 when building and installing (a single `make install PREFIX=...` does both).
 `make uninstall PREFIX=...` removes exactly what was installed.
 
+The CMake project installs the same layout plus a package config, so a CMake
+consumer can `find_package(RL_lib-in-C)` and link `RL_lib-in-C::rl_lib` — see
+[CMake](#cmake-required-on-windows-an-alternative-everywhere) below.
+
 The [`docs/API.md`](docs/API.md) reference documents every public function, and
 `examples/hello_rl.c` is a complete program that CI builds against the *installed*
 library to prove the packaged copy works outside the source tree.
@@ -275,8 +279,10 @@ The same seed gives byte-identical evaluation returns at `-O2` and `-O3`.
 ## Build & test
 
 ### Prerequisites
-- A C99 compiler (`gcc` or `clang`)
-- POSIX `make`
+- A C99 compiler — `gcc` or `clang` on POSIX, MSVC or MinGW on Windows
+- POSIX `make`, or CMake 3.20+ (CMake is the only path on Windows)
+- POSIX threads for the threaded `VecEnv`; optional (`-DRL_LIB_NO_THREADS`), and
+  unnecessary on Windows, where the Win32 thread API is used instead
 
 ### Commands
 
@@ -288,7 +294,7 @@ make asan               # ASAN + UBSAN build, then run all tests
 make tsan               # ThreadSanitizer over the threaded VecEnv suites
 make ERR=1 test         # the strict warning set as errors (what CI runs)
 
-make lib                # librl_lib.a + the shared library + rl_lib.pc
+make lib                # librl_lib.a + the shared library
 make install PREFIX=... # headers, libraries and pkg-config file
 make uninstall PREFIX=...
 
@@ -309,6 +315,49 @@ make gradcheck-double   # reconfirm the gradient check in f64
 
 make clean
 ```
+
+### CMake (required on Windows, an alternative everywhere)
+
+The same project configures, builds, tests and installs with CMake 3.20+ and no
+POSIX tools:
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release --parallel
+ctest --test-dir build -C Release --output-on-failure
+cmake --install build --config Release --prefix /somewhere
+```
+
+It builds the static and shared libraries, every example and every suite, and
+installs what `make install` installs (flat headers under `include/rl_lib` with
+an `envs/` subdirectory, plus a pkg-config file with a relocatable
+`${pcfiledir}` prefix) and additionally a CMake package config, so a CMake
+consumer can:
+
+```cmake
+find_package(RL_lib-in-C REQUIRED)
+target_link_libraries(my_app PRIVATE RL_lib-in-C::rl_lib)
+```
+
+The Makefile knobs have CMake equivalents: `-DRL_LIB_USE_DOUBLE=ON`,
+`-DRL_LIB_NO_THREADS=ON`, `-DRL_SIMD_BACKEND=0|1|2`, `-DRL_LIB_BUILD_TESTS=OFF`,
+`-DRL_LIB_BUILD_EXAMPLES=OFF`.
+
+Three Windows-specific notes:
+
+- The threaded `VecEnv` exists there too: `src/vecenv.c` wraps the Win32 thread
+  API (`CreateThread`, `CRITICAL_SECTION`, `CONDITION_VARIABLE`) behind the same
+  pool and the same sense-reversing barrier, so both platforms step identically.
+- `arena_new` uses `_aligned_malloc` instead of `posix_memalign`, and the
+  benchmark's wall clock is `QueryPerformanceCounter` instead of `clock_gettime`.
+- MSVC cannot compile the per-function `__attribute__((target("avx2,fma")))`
+  kernels, so an MSVC build selects the scalar reference; MinGW (gcc) and
+  clang-cl compile the AVX2 path like any other x86-64 GCC/Clang build. On ARM64
+  Windows, clang-cl gets NEON.
+
+A build with no threading backend (`RL_LIB_NO_THREADS`) reports the threaded
+comparisons in `test_envs` / `test_rl` as `SKIP (no threading backend)` instead
+of aborting; `RL_LIB_HAS_THREADS` in `vecenv.h` is the compile-time answer.
 
 ### Test suites
 
@@ -407,8 +456,11 @@ Tests: 61 passed, 0 failed
 │   └── test_checkpoint.c    # Round trips and rejection of bad files
 ├── docs/
 │   └── API.md               # Full API reference
-├── .github/workflows/ci.yml # gcc/clang/macOS + ASAN/UBSAN + TSan + scalar + f64 + install
+├── .github/workflows/ci.yml # POSIX matrix + ASAN/UBSAN + TSan + serial-only + f64 + install + Windows/MSVC
+├── cmake/
+│   └── RL_lib-in-CConfig.cmake.in  # find_package() config template
 ├── rl_lib.pc.in             # pkg-config template (stamped from version.h)
+├── CMakeLists.txt           # CMake project (POSIX and Windows)
 ├── CHANGELOG.md
 ├── Makefile
 └── README.md
@@ -434,9 +486,12 @@ Tests: 61 passed, 0 failed
   `__builtin_cpu_supports("avx2")`; NEON is assumed on AArch64. Note that the NT
   kernel reassociates the K reduction and TT adds a transpose pass, so those two
   can differ from the scalar reference by a few ULPs (the tests bound this).
+  MSVC cannot compile `__attribute__((target(...)))` at all, so an MSVC build
+  selects the scalar reference; MinGW and clang-cl get the AVX2 path.
 - **Vectorized environments are synchronous, and threading them is opt-in and
   rarely worth it.** `vecenv_step` loops over the cloned sub-environments on one
-  core; `vecenv_set_threads` spreads that loop over worker threads and is
+  core; `vecenv_set_threads` spreads that loop over worker threads (pthreads on
+  POSIX, the Win32 thread API on Windows) and is
   bit-identical to the serial run (`tests/test_envs.c` checks 260 steps field by
   field, `tests/test_rl.c` checks the trained weights), but the barrier
   round-trip costs about 30 µs per step while a CartPole or Pendulum step costs
@@ -541,4 +596,16 @@ Tests: 61 passed, 0 failed
 
 ### Remaining
 
-- [ ] Windows/MSVC build via CMake.
+- [x] Windows/MSVC build via CMake: `CMakeLists.txt` configures, builds, tests
+      and installs on POSIX and Windows, `src/vecenv.c` has a Win32 thread
+      backend, `arena_new` uses `_aligned_malloc` there and the benchmark uses
+      `QueryPerformanceCounter`. MSVC gets the scalar SIMD reference (it cannot
+      compile the `target`-attributed AVX2 kernels), MinGW/clang-cl get AVX2.
+      CI gained a `windows-latest` job (MSVC + ctest + install), a serial-only
+      job, and every example is now compiled with `-Werror`.
+
+Two things are deliberately not attempted, and said so rather than faked:
+multi-machine benchmarks (this is a single-machine project — the numbers above
+are one machine's, and they are not extrapolated) and bit-exact reproduction
+across machines (that would need a pinned libm and compiler version; the
+reproducibility limitation is stated instead).

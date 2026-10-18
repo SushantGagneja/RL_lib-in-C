@@ -4,11 +4,25 @@
 #include "memory.h"
 #include "env.h"
 
-// Threaded stepping needs POSIX threads. Define RL_LIB_NO_THREADS to build the
-// serial path only; a thread count above 1 is then refused loudly instead of
-// silently running serially.
-#if !defined(RL_LIB_NO_THREADS) && !defined(_WIN32)
+// Threaded stepping uses pthreads where they exist and Win32 threads (the
+// CreateThread / critical-section / condition-variable family) on Windows. Define
+// RL_LIB_NO_THREADS to build the serial path only; a thread count above 1 is then
+// refused loudly instead of silently running serially.
+#if !defined(RL_LIB_NO_THREADS)
+#if defined(_WIN32)
+#define RL_LIB_USE_WIN32_THREADS 1
+#else
 #define RL_LIB_USE_PTHREADS 1
+#endif
+#endif
+
+// 1 when a threading backend was compiled in (so `vecenv_set_threads` can
+// install a pool), 0 in a serial-only build: RL_LIB_NO_THREADS, or a platform
+// with neither pthreads nor the Win32 thread API.
+#if defined(RL_LIB_USE_PTHREADS) || defined(RL_LIB_USE_WIN32_THREADS)
+#define RL_LIB_HAS_THREADS 1
+#else
+#define RL_LIB_HAS_THREADS 0
 #endif
 
 // A synchronised vector of independent environments — the standard shape for

@@ -1,3 +1,8 @@
+# pkg-config template, stamped by `make lib` (sed) and by the CMake project
+# (configure_file), so both builds describe the library identically.
+# Tokens: PREFIX, LIBDIR, INCLUDEDIR, VERSION and LIBS_EXTRA - the extra link
+# flags this platform needs (-lm, -pthread when threads are enabled; empty on
+# Windows).
 prefix=@PREFIX@
 exec_prefix=${prefix}
 libdir=@LIBDIR@
@@ -7,4 +12,4 @@ Name: RL_lib-in-C
 Description: Compact reverse-mode autograd, neural network and reinforcement learning library in C
 Version: @VERSION@
 Cflags: -I${includedir}/rl_lib
-Libs: -L${libdir} -lrl_lib -lm -pthread
+Libs: -L${libdir} -lrl_lib @LIBS_EXTRA@
