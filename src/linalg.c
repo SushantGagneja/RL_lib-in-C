@@ -17,12 +17,12 @@ static u64 count_of(u32 rows, u32 cols) {
 
 Mat *mat_new(Arena *arena, u32 rows, u32 cols) {
   Mat *m = ARENA_OBJ(arena, Mat);
-  CRL_ASSERT(m != NULL, "mat_new: arena exhausted");
+  RL_LIB_ASSERT(m != NULL, "mat_new: arena exhausted");
 
   m->rows = rows;
   m->cols = cols;
   m->data = ARENA_ARR(arena, real, count_of(rows, cols));
-  CRL_ASSERT(m->data != NULL, "mat_new: arena exhausted allocating data");
+  RL_LIB_ASSERT(m->data != NULL, "mat_new: arena exhausted allocating data");
 
   return m;
 }

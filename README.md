@@ -1,4 +1,4 @@
-# cRL: Compact Reinforcement Learning & Autograd Library in C
+# RL_lib-in-C: Compact Reinforcement Learning & Autograd Library in C
 
 A small, readable C library for reverse-mode autograd, neural networks, and
 reinforcement learning. No third-party dependencies — only the C standard
@@ -177,7 +177,7 @@ Tests: 23 passed, 0 failed
 ```
 .
 ├── include/
-│   ├── base.h               # Primitive types, real/f32/f64, CRL_ASSERT/CRL_CHECK
+│   ├── base.h               # Primitive types, real/f32/f64, RL_LIB_ASSERT/RL_LIB_CHECK
 │   ├── memory.h             # 64-byte aligned bump allocator + temp scopes
 │   ├── random.h             # xoshiro256** PRNG
 │   ├── linalg.h             # Matrix type, linear algebra, mat_* API
@@ -213,8 +213,6 @@ Tests: 23 passed, 0 failed
 └── README.md
 ```
 
-`crl-improvement-plan.md` is intentionally untracked (see `.gitignore`).
-
 ---
 
 ## Known limitations
@@ -228,7 +226,7 @@ Tests: 23 passed, 0 failed
   across libc implementations and `-O3` may reassociate, so bit-for-bit
   cross-machine reproduction is not guaranteed.
 - **Precision is f32 by default.** The `real` typedef switches the whole
-  library to f64 with `-DCRL_USE_DOUBLE`; the gradient check uses this. The
+  library to f64 with `-DRL_LIB_USE_DOUBLE`; the gradient check uses this. The
   training pipeline is only exercised in f32.
 - **Snake is not solved.** REINFORCE + Adam plateaus well below a BFS planner.
 - **Fixed capacity limits.** `MAX_PARAMS` is 128 and `MAX_ARITY` is 2;

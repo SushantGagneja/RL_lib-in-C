@@ -71,10 +71,10 @@ $(TEST_RL_BIN): $(LIB_OBJS) tests/test_rl.c
 	$(CC) $(CFLAGS) -o $@ $(LIB_OBJS) tests/test_rl.c -lm
 
 # ── Double-precision gradient check ─────────────────────────────────
-# Rebuilds the library in f64 (CRL_USE_DOUBLE) into its own object tree so the
+# Rebuilds the library in f64 (RL_LIB_USE_DOUBLE) into its own object tree so the
 # default f32 objects are not clobbered. Enables h=1e-5 and a 1e-6 tolerance.
 DOUBLE_DIR = build/double
-DOUBLE_CFLAGS = $(WARN) -Iinclude -I. -g -O2 -DCRL_USE_DOUBLE -fsanitize=undefined
+DOUBLE_CFLAGS = $(WARN) -Iinclude -I. -g -O2 -DRL_LIB_USE_DOUBLE -fsanitize=undefined
 DOUBLE_OBJS = $(patsubst %.c,$(DOUBLE_DIR)/%.o,$(LIB_SRCS)) \
               $(DOUBLE_DIR)/tests/test_gradcheck.o
 TEST_GRAD_DOUBLE_BIN = test_gradcheck_double
@@ -114,7 +114,7 @@ a2c: release
 
 # ── Benchmark ───────────────────────────────────────────────────────
 
-BENCH_BIN = crl_bench
+BENCH_BIN = rl_lib_bench
 
 $(BENCH_BIN): CFLAGS += -O3
 $(BENCH_BIN): $(LIB_OBJS) examples/bench.o

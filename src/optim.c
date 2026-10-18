@@ -37,7 +37,7 @@ void sgd_step(Net *model, real lr, real grad_scale) {
 }
 
 Adam *adam_new(Arena *arena, Net *model, real lr) {
-  CRL_ASSERT(model != NULL, "adam_new: NULL model");
+  RL_LIB_ASSERT(model != NULL, "adam_new: NULL model");
 
   Adam *adam = ARENA_OBJ(arena, Adam);
   adam->lr = lr;
@@ -111,7 +111,7 @@ real clip_grad_norm(Net *model, real max_norm) {
   }
 
   const real norm = real_sqrt(sum_sq);
-  CRL_ASSERT(isfinite(norm),
+  RL_LIB_ASSERT(isfinite(norm),
              "clip_grad_norm: non-finite gradient norm (NaN/Inf in grads)");
 
   if (norm > max_norm && norm > 1e-8f) {

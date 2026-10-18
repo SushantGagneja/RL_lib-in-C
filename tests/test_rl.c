@@ -177,7 +177,7 @@ static void test_actor_critic_value_learns(void) {
   seed->data[0] = 1.0f;
   Mat *loss = mat_new(arena, 1, 1);
 
-  CRL_CHECK(mat_mse_loss(loss, model->batch_value->val, target));
+  RL_LIB_CHECK(mat_mse_loss(loss, model->batch_value->val, target));
   real first_loss = 0.0f;
 
   for (u32 step = 0; step < 400; step++) {
@@ -185,20 +185,20 @@ static void test_actor_critic_value_learns(void) {
     schedule_zero_act(&model->train);
 
     // Only the value head is trained here.
-    CRL_CHECK(mat_mse_add_grad(model->batch_value->grad, model->batch_value->val,
+    RL_LIB_CHECK(mat_mse_add_grad(model->batch_value->grad, model->batch_value->val,
                                target, seed));
     schedule_grad_accum(&model->train);
     adam_step(adam, model);
     zero_grad(model);
 
     if (step == 0) {
-      CRL_CHECK(mat_mse_loss(loss, model->batch_value->val, target));
+      RL_LIB_CHECK(mat_mse_loss(loss, model->batch_value->val, target));
       first_loss = loss->data[0];
     }
   }
 
   schedule_run(&model->train);
-  CRL_CHECK(mat_mse_loss(loss, model->batch_value->val, target));
+  RL_LIB_CHECK(mat_mse_loss(loss, model->batch_value->val, target));
   real final_loss = loss->data[0];
 
   printf("(loss %.4f -> %.4f) ", first_loss, final_loss);
@@ -234,7 +234,7 @@ static void test_batch_equivalence(void) {
   // (a) Forward equivalence: batched softmax columns match single-sample runs.
   schedule_run(&model->train);
   Mat *batch_probs = mat_new(arena, act_dim, B);
-  CRL_CHECK(mat_softmax(batch_probs, model->batch_logits->val));
+  RL_LIB_CHECK(mat_softmax(batch_probs, model->batch_logits->val));
 
   real max_diff = 0.0f;
   for (u32 c = 0; c < B; c++) {
@@ -259,7 +259,7 @@ static void test_batch_equivalence(void) {
   schedule_zero_act(&model->train);
   Mat *seed = mat_new(arena, 1, 1);
   seed->data[0] = 1.0f;
-  CRL_CHECK(mat_fused_policy_add_grad(model->batch_logits->grad,
+  RL_LIB_CHECK(mat_fused_policy_add_grad(model->batch_logits->grad,
                                       model->batch_logits->val, actions, advs, B,
                                       seed));
   schedule_grad_accum(&model->train);

@@ -46,7 +46,7 @@ version yet; entries below are grouped by the review that prompted them.
 - **Numerics.** `sample_action` uses strict `<`; the misleading `randn` name is
   gone (it was always a uniform range); Adam clipping guards against non-finite
   global norms.
-- **Failures are loud.** `CRL_ASSERT` / `CRL_CHECK` replace silent `false`
+- **Failures are loud.** `RL_LIB_ASSERT` / `RL_LIB_CHECK` replace silent `false`
   returns, empty-graph no-ops, and unchecked arena pointers; `arena_alloc`
   aborts on OOM.
 - **Arena.** 64-byte aligned backing store; `arena_mark` / `arena_rewind` for
@@ -58,7 +58,7 @@ version yet; entries below are grouped by the review that prompted them.
   clean.
 
 ### Added
-- `make gradcheck-double`: builds the library in f64 (`-DCRL_USE_DOUBLE`, the
+- `make gradcheck-double`: builds the library in f64 (`-DRL_LIB_USE_DOUBLE`, the
   new `real` scalar typedef) so the gradient check runs with `h = 1e-5` and a
   `1e-6` tolerance. Input/activation gradients and an elementwise `mul` with
   both operands requiring grad are checked too.

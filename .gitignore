@@ -13,7 +13,7 @@
 /mat
 /mnist
 /arena
-/cRL
+/RL_lib-in-C
 /train_snake
 /train_cartpole
 /train_a2c
@@ -22,7 +22,7 @@
 /test_gradcheck_double
 /test_envs
 /test_rl
-/crl_bench
+/rl_lib_bench
 /exercise/arena
 /exercise/autograd
 /exercise/mat
@@ -35,6 +35,3 @@
 
 #  MNIST data files
 /*.mat
-# Extra Docs
-/crl-improvement-plan.md
-/cRL Brutal Code Review What to Fix and Improve.md

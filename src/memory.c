@@ -35,12 +35,12 @@ void arena_dispose(Arena *arena) {
 }
 
 void *arena_alloc(Arena *arena, u64 size, b32 zero) {
-  CRL_ASSERT(arena != NULL, "arena_alloc: NULL arena");
+  RL_LIB_ASSERT(arena != NULL, "arena_alloc: NULL arena");
 
   const u64 start = slot_start(arena->offset);
   if (start > arena->cap || size > arena->cap - start) {
     fprintf(stderr,
-            "[cRL FATAL] arena exhausted: %llu bytes requested at offset "
+            "[RL_lib-in-C FATAL] arena exhausted: %llu bytes requested at offset "
             "%llu of %llu\n",
             (unsigned long long)size, (unsigned long long)start,
             (unsigned long long)arena->cap);
@@ -57,13 +57,13 @@ void *arena_alloc(Arena *arena, u64 size, b32 zero) {
 }
 
 u64 arena_mark(const Arena *arena) {
-  CRL_ASSERT(arena != NULL, "arena_mark: NULL arena");
+  RL_LIB_ASSERT(arena != NULL, "arena_mark: NULL arena");
   return arena->offset;
 }
 
 void arena_rewind(Arena *arena, u64 mark) {
-  CRL_ASSERT(arena != NULL, "arena_rewind: NULL arena");
-  CRL_ASSERT(mark <= arena->offset,
+  RL_LIB_ASSERT(arena != NULL, "arena_rewind: NULL arena");
+  RL_LIB_ASSERT(mark <= arena->offset,
              "arena_rewind: mark is ahead of the bump pointer");
   arena->offset = mark;
 }

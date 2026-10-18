@@ -356,7 +356,7 @@ static void test_mul_tanh_mse(Arena *arena) {
 
 int main(void) {
   Arena *arena = arena_new(MiB(16));
-  CRL_ASSERT(arena != NULL, "arena_new failed");
+  RL_LIB_ASSERT(arena != NULL, "arena_new failed");
 
   printf("\n=== mat.c unit tests ===\n\n");
   printf("[mat_mm variants]\n");

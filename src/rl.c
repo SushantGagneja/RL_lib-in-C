@@ -6,8 +6,8 @@
 
 Rollout *rollout_new(Arena *arena, u32 num_trajectories,
                                 u32 max_steps, u32 obs_dim) {
-  CRL_ASSERT(arena != NULL, "rollout_new: NULL arena");
-  CRL_ASSERT(num_trajectories > 0 && max_steps > 0 && obs_dim > 0,
+  RL_LIB_ASSERT(arena != NULL, "rollout_new: NULL arena");
+  RL_LIB_ASSERT(num_trajectories > 0 && max_steps > 0 && obs_dim > 0,
              "rollout_new: zero-sized buffer");
 
   Rollout *buf = ARENA_OBJ(arena, Rollout);
@@ -99,7 +99,7 @@ static void shuffle_samples(real **obs, u32 *actions, real *values, real *extra_
   u32 *act_copy = malloc(sizeof(u32) * n);
   real *val_copy = malloc(sizeof(real) * n);
   real *b_copy = malloc(sizeof(real) * n);
-  CRL_ASSERT(obs_copy && act_copy && val_copy && b_copy,
+  RL_LIB_ASSERT(obs_copy && act_copy && val_copy && b_copy,
              "shuffle_samples: allocation failure");
 
   memcpy(obs_copy, obs, sizeof(real *) * n);
@@ -122,11 +122,11 @@ static void shuffle_samples(real **obs, u32 *actions, real *values, real *extra_
 
 void train_reinforce(Env *env, Net *model, const TrainCfg *config,
                         Arena *train_arena) {
-  CRL_ASSERT(env != NULL && model != NULL && config != NULL,
+  RL_LIB_ASSERT(env != NULL && model != NULL && config != NULL,
              "train_reinforce: NULL argument");
-  CRL_ASSERT(model->fwd.len > 0,
+  RL_LIB_ASSERT(model->fwd.len > 0,
              "train_reinforce: forward_graph is empty (forgot schedule_from?)");
-  CRL_ASSERT(train_arena != NULL, "train_reinforce: NULL arena");
+  RL_LIB_ASSERT(train_arena != NULL, "train_reinforce: NULL arena");
 
   u32 rollout_size = config->rollout_size > 0 ? config->rollout_size : 32;
   u32 max_steps = config->max_steps > 0 ? config->max_steps : env->max_steps;
@@ -151,12 +151,12 @@ void train_reinforce(Env *env, Net *model, const TrainCfg *config,
   u32 batch_size = use_batching ? model->batch_input->val->cols : 1;
 
   // The config batch size must agree with the shape frozen into the graph.
-  CRL_ASSERT(config->batch_size == 0 || !use_batching ||
+  RL_LIB_ASSERT(config->batch_size == 0 || !use_batching ||
                  config->batch_size == batch_size,
              "TrainCfg.batch_size does not match the graph's batch dimension");
 
   if (!use_batching) {
-    CRL_ASSERT(model->loss_plan.len > 0,
+    RL_LIB_ASSERT(model->loss_plan.len > 0,
                "train_reinforce: no batch graph and no cost graph");
   }
 
@@ -270,9 +270,9 @@ void train_reinforce(Env *env, Net *model, const TrainCfg *config,
         schedule_run(&model->train);
         schedule_zero_act(&model->train);
 
-        CRL_CHECK(mat_fused_policy_loss(loss_out, model->batch_logits->val,
+        RL_LIB_CHECK(mat_fused_policy_loss(loss_out, model->batch_logits->val,
                                         batch_acts, batch_advs, batch_size));
-        CRL_CHECK(mat_fused_policy_add_grad(
+        RL_LIB_CHECK(mat_fused_policy_add_grad(
             model->batch_logits->grad, model->batch_logits->val, batch_acts,
             batch_advs, batch_size, seed_grad));
 
@@ -324,13 +324,13 @@ void train_reinforce(Env *env, Net *model, const TrainCfg *config,
 
 void train_a2c(Env *env, Net *model, const TrainCfg *config,
                   Arena *train_arena) {
-  CRL_ASSERT(env != NULL && model != NULL && config != NULL,
+  RL_LIB_ASSERT(env != NULL && model != NULL && config != NULL,
              "train_a2c: NULL argument");
-  CRL_ASSERT(model->fwd.len > 0 && model->train.len > 0,
+  RL_LIB_ASSERT(model->fwd.len > 0 && model->train.len > 0,
              "train_a2c: missing graph (use actor_critic_build)");
-  CRL_ASSERT(model->value != NULL && model->batch_value != NULL,
+  RL_LIB_ASSERT(model->value != NULL && model->batch_value != NULL,
              "train_a2c: model has no value head");
-  CRL_ASSERT(train_arena != NULL, "train_a2c: NULL arena");
+  RL_LIB_ASSERT(train_arena != NULL, "train_a2c: NULL arena");
 
   u32 rollout_size = config->rollout_size > 0 ? config->rollout_size : 32;
   u32 max_steps = config->max_steps > 0 ? config->max_steps : env->max_steps;
@@ -354,7 +354,7 @@ void train_a2c(Env *env, Net *model, const TrainCfg *config,
                         : NULL;
 
   u32 batch_size = model->batch_input->val->cols;
-  CRL_ASSERT(config->batch_size == 0 || config->batch_size == batch_size,
+  RL_LIB_ASSERT(config->batch_size == 0 || config->batch_size == batch_size,
              "TrainCfg.batch_size does not match the graph's batch dimension");
 
   printf("Starting A2C Training:\n");
@@ -466,7 +466,7 @@ void train_a2c(Env *env, Net *model, const TrainCfg *config,
     // (keeps the data on-policy: a single step per batch of collected data).
     zero_grad(model);
     u32 num_batches = sample_count / batch_size;
-    CRL_ASSERT(num_batches > 0, "train_a2c: not enough samples for one batch");
+    RL_LIB_ASSERT(num_batches > 0, "train_a2c: not enough samples for one batch");
 
     shuffle_samples(sample_obs, sample_actions, sample_values, sample_advantages,
                     order, sample_count, &shuf_rng);
@@ -496,15 +496,15 @@ void train_a2c(Env *env, Net *model, const TrainCfg *config,
       // code seeded first and then cleared, wiping every seeded gradient.
       schedule_zero_act(&model->train);
 
-      CRL_CHECK(mat_fused_policy_add_grad(model->batch_logits->grad,
+      RL_LIB_CHECK(mat_fused_policy_add_grad(model->batch_logits->grad,
                                           model->batch_logits->val, batch_acts,
                                           batch_advs, batch_size, seed_pi));
       if (entropy_coef != 0.0f) {
-        CRL_CHECK(mat_entropy_add_grad(model->batch_logits->grad,
+        RL_LIB_CHECK(mat_entropy_add_grad(model->batch_logits->grad,
                                        model->batch_logits->val, batch_size,
                                        seed_ent));
       }
-      CRL_CHECK(mat_mse_add_grad(model->batch_value->grad,
+      RL_LIB_CHECK(mat_mse_add_grad(model->batch_value->grad,
                                  model->batch_value->val, target_val_mat,
                                  seed_vf));
 
@@ -531,13 +531,13 @@ void train_a2c(Env *env, Net *model, const TrainCfg *config,
 
 EvalResult evaluate_seeded(Env *env, Net *model, const u64 *seeds,
                                 u32 num_episodes, b32 greedy) {
-  CRL_ASSERT(env != NULL && model != NULL && seeds != NULL && num_episodes > 0,
+  RL_LIB_ASSERT(env != NULL && model != NULL && seeds != NULL && num_episodes > 0,
              "evaluate_seeded: bad argument");
 
   real total_reward = 0.0f;
   u64 total_steps = 0;
   real *obs_buf = malloc(sizeof(real) * env->obs_dim);
-  CRL_ASSERT(obs_buf != NULL, "evaluate_seeded: allocation failure");
+  RL_LIB_ASSERT(obs_buf != NULL, "evaluate_seeded: allocation failure");
 
   for (u32 ep = 0; ep < num_episodes; ep++) {
     env->reset(env, seeds[ep]);
@@ -576,11 +576,11 @@ EvalResult evaluate_seeded(Env *env, Net *model, const u64 *seeds,
 
 EvalResult evaluate(Env *env, Net *model, Rng *rng,
                          u32 episodes, b32 greedy) {
-  CRL_ASSERT(env != NULL && model != NULL && rng != NULL && episodes > 0,
+  RL_LIB_ASSERT(env != NULL && model != NULL && rng != NULL && episodes > 0,
              "evaluate: bad argument");
 
   u64 *seeds = malloc(sizeof(u64) * episodes);
-  CRL_ASSERT(seeds != NULL, "evaluate: allocation failure");
+  RL_LIB_ASSERT(seeds != NULL, "evaluate: allocation failure");
   for (u32 i = 0; i < episodes; i++) {
     seeds[i] = next_seed(rng);
   }

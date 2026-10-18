@@ -10,11 +10,11 @@
 #include <math.h>
 #include <string.h>
 
-// Build the whole library with -DCRL_USE_DOUBLE (see `make gradcheck-double`)
+// Build the whole library with -DRL_LIB_USE_DOUBLE (see `make gradcheck-double`)
 // to run these checks in double precision with a much tighter tolerance.
 // The library is single precision by default, so the default build keeps a
 // looser tolerance and is only a rough sanity check.
-#ifdef CRL_USE_DOUBLE
+#ifdef RL_LIB_USE_DOUBLE
 #define GRADCHECK_NAME "f64"
 #define GRAD_H (real)(1e-5)
 #define GRAD_TOL (real)(1e-6)
@@ -139,7 +139,7 @@ static void test_gradcheck_mlp(void) {
   Tensor *output = tensor_add(arena, model, z1, b1);
 
   Schedule graph = schedule_from(arena, model, output);
-  CRL_ASSERT(graph.len > 0, "graph build failed");
+  RL_LIB_ASSERT(graph.len > 0, "graph build failed");
 
   // Init parameters away from zero (some positive, some negative so both ReLU
   // branches run)
@@ -207,7 +207,7 @@ static void test_gradcheck_softmax(void) {
   Tensor *output = tensor_mm(arena, model, target, sm);
 
   Schedule graph = schedule_from(arena, model, output);
-  CRL_ASSERT(graph.len > 0, "graph build failed");
+  RL_LIB_ASSERT(graph.len > 0, "graph build failed");
 
   rng_seed_g(99999, 2);
   mat_rand(W->val, -0.5f, 0.5f);
@@ -251,7 +251,7 @@ static void test_gradcheck_sub(void) {
   Tensor *output = tensor_sub(arena, model, z, b);
 
   Schedule graph = schedule_from(arena, model, output);
-  CRL_ASSERT(graph.len > 0, "graph build failed");
+  RL_LIB_ASSERT(graph.len > 0, "graph build failed");
 
   rng_seed_g(77777, 3);
   mat_rand(W->val, -1.0f, 1.0f);
@@ -318,7 +318,7 @@ static void test_gradcheck_reinforce(void) {
   Tensor *cost = tensor_reinforce_loss(arena, model, probs, advantage);
 
   Schedule graph = schedule_from(arena, model, cost);
-  CRL_ASSERT(graph.len > 0, "graph build failed");
+  RL_LIB_ASSERT(graph.len > 0, "graph build failed");
 
   // Init everything away from zero
   rng_seed_g(54321, 7);
@@ -378,7 +378,7 @@ static void test_gradcheck_broadcast_add(void) {
   Tensor *output = tensor_add(arena, model, z, b);
 
   Schedule graph = schedule_from(arena, model, output);
-  CRL_ASSERT(graph.len > 0, "graph build failed");
+  RL_LIB_ASSERT(graph.len > 0, "graph build failed");
 
   rng_seed_g(112233, 4);
   mat_rand(W->val, -0.5f, 0.5f);
@@ -424,7 +424,7 @@ static void test_gradcheck_tanh_mul(void) {
   Tensor *output = tensor_mul(arena, model, z1, t2);
 
   Schedule graph = schedule_from(arena, model, output);
-  CRL_ASSERT(graph.len > 0, "graph build failed");
+  RL_LIB_ASSERT(graph.len > 0, "graph build failed");
 
   rng_seed_g(445566, 5);
   mat_rand(W1->val, -0.5f, 0.5f);
@@ -467,7 +467,7 @@ static void test_gradcheck_mse(void) {
   Tensor *loss = tensor_mse(arena, model, pred, target);
 
   Schedule graph = schedule_from(arena, model, loss);
-  CRL_ASSERT(graph.len > 0, "graph build failed");
+  RL_LIB_ASSERT(graph.len > 0, "graph build failed");
 
   rng_seed_g(778899, 6);
   mat_rand(W->val, -0.5f, 0.5f);
@@ -499,7 +499,7 @@ static void test_gradcheck_fused_policy(void) {
   Mat *logits_grad = mat_new(arena, 4, 3);
   Mat *loss_out = mat_new(arena, 1, 1);
   Mat *seed_grad = mat_new(arena, 1, 1);
-  CRL_ASSERT(logits && logits_grad && loss_out && seed_grad,
+  RL_LIB_ASSERT(logits && logits_grad && loss_out && seed_grad,
              "arena out of memory in fused policy test");
   seed_grad->data[0] = 1.0f;
 
@@ -510,8 +510,8 @@ static void test_gradcheck_fused_policy(void) {
   mat_rand(logits, -1.0f, 1.0f);
 
   mat_zero(logits_grad);
-  CRL_CHECK(mat_fused_policy_loss(loss_out, logits, actions, advantages, 3));
-  CRL_CHECK(mat_fused_policy_add_grad(logits_grad, logits, actions, advantages,
+  RL_LIB_CHECK(mat_fused_policy_loss(loss_out, logits, actions, advantages, 3));
+  RL_LIB_CHECK(mat_fused_policy_add_grad(logits_grad, logits, actions, advantages,
                                       3, seed_grad));
 
   real h = GRAD_H;
@@ -523,11 +523,11 @@ static void test_gradcheck_fused_policy(void) {
 
     logits->data[i] = orig + h;
     Mat *up = mat_new(arena, 1, 1);
-    CRL_CHECK(mat_fused_policy_loss(up, logits, actions, advantages, 3));
+    RL_LIB_CHECK(mat_fused_policy_loss(up, logits, actions, advantages, 3));
 
     logits->data[i] = orig - h;
     Mat *dn = mat_new(arena, 1, 1);
-    CRL_CHECK(mat_fused_policy_loss(dn, logits, actions, advantages, 3));
+    RL_LIB_CHECK(mat_fused_policy_loss(dn, logits, actions, advantages, 3));
 
     logits->data[i] = orig;
 
@@ -575,7 +575,7 @@ static void test_gradcheck_input_and_mul(void) {
   Tensor *output = tensor_mul(arena, model, z, gate); // both sides require grad
 
   Schedule graph = schedule_from(arena, model, output);
-  CRL_ASSERT(graph.len > 0, "graph build failed");
+  RL_LIB_ASSERT(graph.len > 0, "graph build failed");
 
   rng_seed_g(246810, 8);
   mat_rand(W->val, -0.5f, 0.5f);

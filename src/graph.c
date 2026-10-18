@@ -97,7 +97,7 @@ static ShapeRule *shape_rule(OpKind op) {
 Tensor *tensor_create(Arena *arena, Net *model, u32 rows, u32 cols,
                       u32 flags) {
   Tensor *out = ARENA_OBJ(arena, Tensor);
-  CRL_ASSERT(out != NULL, "Arena out of memory in tensor_create");
+  RL_LIB_ASSERT(out != NULL, "Arena out of memory in tensor_create");
 
   out->index = model->n_tensors++;
   out->flags = flags;
@@ -109,7 +109,7 @@ Tensor *tensor_create(Arena *arena, Net *model, u32 rows, u32 cols,
   out->grad = (flags & TENSOR_GRAD) ? mat_new(arena, rows, cols) : NULL;
 
   if (flags & TENSOR_PARAM) {
-    CRL_ASSERT(model->n_params < MAX_PARAMS, "Exceeded MAX_PARAMS");
+    RL_LIB_ASSERT(model->n_params < MAX_PARAMS, "Exceeded MAX_PARAMS");
     model->params[model->n_params++] = out;
   }
 
@@ -119,11 +119,11 @@ Tensor *tensor_create(Arena *arena, Net *model, u32 rows, u32 cols,
 static Tensor *make_op(Arena *arena, Net *model, OpKind op, Tensor *a,
                        Tensor *b) {
   ShapeRule *rule = shape_rule(op);
-  CRL_ASSERT(rule != NULL, "make_op: unknown operation");
+  RL_LIB_ASSERT(rule != NULL, "make_op: unknown operation");
 
   u32 rows = 0;
   u32 cols = 0;
-  CRL_ASSERT(rule(a, b, &rows, &cols), "make_op: operand shape mismatch");
+  RL_LIB_ASSERT(rule(a, b, &rows, &cols), "make_op: operand shape mismatch");
 
   const b32 needs_grad = (a != NULL && (a->flags & TENSOR_GRAD)) ||
                          (b != NULL && (b->flags & TENSOR_GRAD));
@@ -192,7 +192,7 @@ Schedule schedule_from_roots(Arena *arena, Net *model, Tensor **roots,
   if (arena == NULL || model == NULL || roots == NULL || num_roots == 0u ||
       model->n_tensors == 0u) {
     fprintf(stderr,
-            "[cRL ERROR] schedule build: invalid arguments "
+            "[RL_lib-in-C ERROR] schedule build: invalid arguments "
             "(arena=%p model=%p roots=%p num_roots=%u n_tensors=%u)\n",
             (void *)arena, (void *)model, (void *)roots, num_roots,
             model != NULL ? model->n_tensors : 0u);
@@ -203,15 +203,15 @@ Schedule schedule_from_roots(Arena *arena, Net *model, Tensor **roots,
   u8 *mark = ARENA_ARR(arena, u8, total);
   Frame *stack = ARENA_ARR_RAW(arena, Frame, total);
   Tensor **order = ARENA_ARR_RAW(arena, Tensor *, total);
-  CRL_ASSERT(mark != NULL && stack != NULL && order != NULL,
+  RL_LIB_ASSERT(mark != NULL && stack != NULL && order != NULL,
              "Arena out of memory in schedule_from_roots");
 
   u32 emitted = 0u;
 
   for (u32 r = 0; r < num_roots; r++) {
     Tensor *root = roots[r];
-    CRL_ASSERT(root != NULL, "schedule_from_roots: NULL root");
-    CRL_ASSERT(root->index < total,
+    RL_LIB_ASSERT(root != NULL, "schedule_from_roots: NULL root");
+    RL_LIB_ASSERT(root->index < total,
                "schedule_from_roots: root index out of range");
     if (mark[root->index] == 2u) {
       continue; // already reachable from an earlier root
@@ -231,7 +231,7 @@ Schedule schedule_from_roots(Arena *arena, Net *model, Tensor **roots,
           Tensor *in = cur->inputs[i];
           if (in != NULL && mark[in->index] == 0u) {
             mark[in->index] = 1u;
-            CRL_ASSERT(sp < total, "schedule_from_roots: stack overflow");
+            RL_LIB_ASSERT(sp < total, "schedule_from_roots: stack overflow");
             stack[sp++] = (Frame){in, false};
           }
         }
@@ -239,16 +239,16 @@ Schedule schedule_from_roots(Arena *arena, Net *model, Tensor **roots,
       }
 
       mark[top->node->index] = 2u;
-      CRL_ASSERT(emitted < total, "schedule_from_roots: output overflow");
+      RL_LIB_ASSERT(emitted < total, "schedule_from_roots: output overflow");
       order[emitted++] = top->node;
       sp--;
     }
   }
 
-  CRL_ASSERT(emitted > 0u, "schedule_from_roots: no reachable nodes");
+  RL_LIB_ASSERT(emitted > 0u, "schedule_from_roots: no reachable nodes");
 
   sched.ops = ARENA_ARR_RAW(arena, Tensor *, emitted);
-  CRL_ASSERT(sched.ops != NULL, "Arena out of memory in schedule_from_roots");
+  RL_LIB_ASSERT(sched.ops != NULL, "Arena out of memory in schedule_from_roots");
   memcpy(sched.ops, order, sizeof(Tensor *) * emitted);
   sched.len = emitted;
 
@@ -268,31 +268,31 @@ static void apply_forward(Tensor *t) {
   case OP_NONE:
     return;
   case OP_RELU:
-    CRL_CHECK(mat_relu(t->val, t->inputs[0]->val));
+    RL_LIB_CHECK(mat_relu(t->val, t->inputs[0]->val));
     return;
   case OP_TANH:
-    CRL_CHECK(mat_tanh(t->val, t->inputs[0]->val));
+    RL_LIB_CHECK(mat_tanh(t->val, t->inputs[0]->val));
     return;
   case OP_SOFTMAX:
-    CRL_CHECK(mat_softmax(t->val, t->inputs[0]->val));
+    RL_LIB_CHECK(mat_softmax(t->val, t->inputs[0]->val));
     return;
   case OP_ADD:
-    CRL_CHECK(mat_add(t->val, t->inputs[0]->val, t->inputs[1]->val));
+    RL_LIB_CHECK(mat_add(t->val, t->inputs[0]->val, t->inputs[1]->val));
     return;
   case OP_SUB:
-    CRL_CHECK(mat_sub(t->val, t->inputs[0]->val, t->inputs[1]->val));
+    RL_LIB_CHECK(mat_sub(t->val, t->inputs[0]->val, t->inputs[1]->val));
     return;
   case OP_MUL:
-    CRL_CHECK(mat_mul(t->val, t->inputs[0]->val, t->inputs[1]->val));
+    RL_LIB_CHECK(mat_mul(t->val, t->inputs[0]->val, t->inputs[1]->val));
     return;
   case OP_MM:
-    CRL_CHECK(mat_mm(t->val, t->inputs[0]->val, t->inputs[1]->val, 1u, 0u, 0u));
+    RL_LIB_CHECK(mat_mm(t->val, t->inputs[0]->val, t->inputs[1]->val, 1u, 0u, 0u));
     return;
   case OP_MSE:
-    CRL_CHECK(mat_mse_loss(t->val, t->inputs[0]->val, t->inputs[1]->val));
+    RL_LIB_CHECK(mat_mse_loss(t->val, t->inputs[0]->val, t->inputs[1]->val));
     return;
   case OP_REINFORCE:
-    CRL_CHECK(mat_reinforce_loss(t->val, t->inputs[0]->val,
+    RL_LIB_CHECK(mat_reinforce_loss(t->val, t->inputs[0]->val,
                                  t->inputs[1]->val));
     return;
   }
@@ -324,48 +324,48 @@ static void apply_backward(Tensor *t) {
     return;
   case OP_RELU:
     if (wants_grad(a)) {
-      CRL_CHECK(mat_relu_add_grad(a->grad, a->val, t->grad));
+      RL_LIB_CHECK(mat_relu_add_grad(a->grad, a->val, t->grad));
     }
     return;
   case OP_TANH:
     if (wants_grad(a)) {
-      CRL_CHECK(mat_tanh_add_grad(a->grad, t->val, t->grad));
+      RL_LIB_CHECK(mat_tanh_add_grad(a->grad, t->val, t->grad));
     }
     return;
   case OP_SOFTMAX:
     if (wants_grad(a)) {
-      CRL_CHECK(mat_softmax_add_grad(a->grad, t->val, t->grad));
+      RL_LIB_CHECK(mat_softmax_add_grad(a->grad, t->val, t->grad));
     }
     return;
   case OP_ADD:
-    CRL_CHECK(mat_add_broadcast_grad(wants_grad(a) ? a->grad : NULL,
+    RL_LIB_CHECK(mat_add_broadcast_grad(wants_grad(a) ? a->grad : NULL,
                                      wants_grad(b) ? b->grad : NULL, t->grad));
     return;
   case OP_SUB:
-    CRL_CHECK(mat_sub_broadcast_grad(wants_grad(a) ? a->grad : NULL,
+    RL_LIB_CHECK(mat_sub_broadcast_grad(wants_grad(a) ? a->grad : NULL,
                                      wants_grad(b) ? b->grad : NULL, t->grad));
     return;
   case OP_MUL:
-    CRL_CHECK(mat_mul_add_grad(wants_grad(a) ? a->grad : NULL,
+    RL_LIB_CHECK(mat_mul_add_grad(wants_grad(a) ? a->grad : NULL,
                                wants_grad(b) ? b->grad : NULL, a->val, b->val,
                                t->grad));
     return;
   case OP_MM:
     if (wants_grad(a)) {
-      CRL_CHECK(mat_mm(a->grad, t->grad, b->val, 0u, 0u, 1u));
+      RL_LIB_CHECK(mat_mm(a->grad, t->grad, b->val, 0u, 0u, 1u));
     }
     if (wants_grad(b)) {
-      CRL_CHECK(mat_mm(b->grad, a->val, t->grad, 0u, 1u, 0u));
+      RL_LIB_CHECK(mat_mm(b->grad, a->val, t->grad, 0u, 1u, 0u));
     }
     return;
   case OP_MSE:
     if (wants_grad(a)) {
-      CRL_CHECK(mat_mse_add_grad(a->grad, a->val, b->val, t->grad));
+      RL_LIB_CHECK(mat_mse_add_grad(a->grad, a->val, b->val, t->grad));
     }
     return;
   case OP_REINFORCE:
     if (wants_grad(a)) {
-      CRL_CHECK(mat_reinforce_add_grad(a->grad, a->val, b->val, t->grad));
+      RL_LIB_CHECK(mat_reinforce_add_grad(a->grad, a->val, b->val, t->grad));
     }
     return;
   }
@@ -424,7 +424,7 @@ void schedule_grad_from(Schedule *graph, Tensor *loss_var, b32 seed_one) {
       break;
     }
   }
-  CRL_ASSERT(present, "schedule_grad_from: loss_var is not in the graph");
+  RL_LIB_ASSERT(present, "schedule_grad_from: loss_var is not in the graph");
 
   if (seed_one && root->grad != NULL) {
     mat_fill(root->grad, (real)1.0);

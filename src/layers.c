@@ -10,7 +10,7 @@ static Tensor *make_param(Arena *arena, Net *model, u32 rows, u32 cols) {
 
 Dense dense_new(Arena *arena, Net *model, Rng *rng, u32 in_features,
                 u32 out_features, b32 with_bias, real gain) {
-  CRL_ASSERT(in_features > 0 && out_features > 0,
+  RL_LIB_ASSERT(in_features > 0 && out_features > 0,
              "dense_new: zero-sized layer");
 
   Dense layer = {
