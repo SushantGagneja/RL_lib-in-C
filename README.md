@@ -2,7 +2,7 @@
 
 A small, readable C library for reverse-mode autograd, neural networks, and
 reinforcement learning. No third-party dependencies — only the C standard
-library, `libm`, and POSIX `make`.
+library, `libm`, and either POSIX `make` or CMake.
 
 It is a learning project: the code is meant to be read in one sitting, and the
 benchmarks below are reported with their real weaknesses rather than tuned to
@@ -532,8 +532,11 @@ Tests: 61 passed, 0 failed
   saved weights but is not bit-identical to a run that was never interrupted.
 - **A few small heap allocations** remain (shuffle scratch, evaluation buffers,
   entropy scratch, checkpoint staging) alongside the arena.
-- **Platform coverage is Linux + macOS, gcc/clang.** There is no Windows/MSVC
-  path and no CMake; the build is a POSIX Makefile.
+- **Platform coverage is Linux, macOS and Windows, gcc/clang/MSVC.** The POSIX
+  path is a Makefile; Windows builds with CMake (MSVC or MinGW) and has a Win32
+  threading backend. MSVC gets the scalar SIMD reference, and the sanitizer
+  targets and the benchmark's core-layout notes are POSIX-only (they are
+  development aids, not part of the library).
 
 ---
 

@@ -107,6 +107,22 @@ jobs:
         run: ctest --test-dir build -C Release --output-on-failure
       - name: Install into a scratch prefix
         run: cmake --install build --config Release --prefix "${{ runner.temp }}/prefix"
+      - name: Consume the install from a CMake project
+        shell: bash
+        run: |
+          C="$RUNNER_TEMP/consumer"
+          mkdir -p "$C"
+          printf '%s\n' \
+            'cmake_minimum_required(VERSION 3.20)' \
+            'project(rl_consumer C)' \
+            'find_package(RL_lib-in-C REQUIRED)' \
+            'add_executable(hello "${HELLO_SRC}")' \
+            'target_link_libraries(hello PRIVATE RL_lib-in-C::rl_lib)' > "$C/CMakeLists.txt"
+          cmake -S "$C" -B "$C/build" \
+            -DHELLO_SRC="$GITHUB_WORKSPACE/examples/hello_rl.c" \
+            -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/prefix"
+          cmake --build "$C/build" --config Release
+          "$C/build/Release/hello.exe"
 
   # Proves the packaged library works outside the source tree: install into a
   # scratch prefix, then compile and run examples/hello_rl.c against only the
