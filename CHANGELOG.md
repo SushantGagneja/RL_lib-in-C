@@ -86,11 +86,16 @@ independently reimplemented, and carried through the Phase 0–7 roadmap.
   went unnoticed locally because Apple's `libclang_rt.tsan_osx_dynamic.dylib`
   also exports the `__ubsan_*` handlers (56 of them) and GCC's runtime does not.
 - **On MSVC the static archive and the shared library's import library were both
-  `rl_lib.lib`**, so one silently replaced the other in the build tree and in
-  the install prefix, and a consumer that linked the survivor needed
-  `rl_lib.dll` without being told (it fails at load time, not link time). The
-  import library is `rl_lib_shared.lib` now; the DLL keeps its name. The CI
-  Windows job builds and runs a `find_package` consumer against both targets.
+  `rl_lib.lib`**, so one silently replaced the other in the build tree, and a
+  consumer that linked the survivor needed `rl_lib.dll` without being told (that
+  fails at load time, not link time — the first Windows CI runs died with exit
+  code 127 on the consumer's last line). On top of that the shared target had no
+  `ARCHIVE` install destination at all, so its import library was never
+  installed and the exported `RL_lib-in-C::rl_lib_shared` carried no
+  `IMPORTED_IMPLIB`, which makes a CMake consumer fail at configure time. The
+  import library is `rl_lib_shared.lib` and it is installed now; the DLL keeps
+  its name. The CI Windows job builds and runs a `find_package` consumer against
+  both targets.
 
 ### Added
 - **Checkpointing** (`checkpoint.c` / `checkpoint.h`): `net_save`, `net_load`,

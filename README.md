@@ -322,10 +322,10 @@ The same project configures, builds, tests and installs with CMake 3.20+ and no
 POSIX tools:
 
 ```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/somewhere
 cmake --build build --config Release --parallel
 ctest --test-dir build -C Release --output-on-failure
-cmake --install build --config Release --prefix /somewhere
+cmake --install build --config Release
 ```
 
 It builds the static and shared libraries, every example and every suite, and
@@ -343,7 +343,7 @@ The Makefile knobs have CMake equivalents: `-DRL_LIB_USE_DOUBLE=ON`,
 `-DRL_LIB_NO_THREADS=ON`, `-DRL_SIMD_BACKEND=0|1|2`, `-DRL_LIB_BUILD_TESTS=OFF`,
 `-DRL_LIB_BUILD_EXAMPLES=OFF`.
 
-Three Windows-specific notes:
+Five platform notes:
 
 - The threaded `VecEnv` exists there too: `src/vecenv.c` wraps the Win32 thread
   API (`CreateThread`, `CRITICAL_SECTION`, `CONDITION_VARIABLE`) behind the same
@@ -359,6 +359,10 @@ Three Windows-specific notes:
   archive (MSVC would otherwise have the two overwrite each other). A consumer
   that links `RL_lib-in-C::rl_lib_shared` needs the DLL next to its executable
   or on `PATH`; the static target needs nothing.
+- On macOS the shared library records the configure-time
+  `CMAKE_INSTALL_PREFIX` as its install name, exactly like the Makefile's
+  `PREFIX`, so configure with the prefix you will install to rather than moving
+  the tree afterwards with `cmake --install --prefix`.
 
 A build with no threading backend (`RL_LIB_NO_THREADS`) reports the threaded
 comparisons in `test_envs` / `test_rl` as `SKIP (no threading backend)` instead

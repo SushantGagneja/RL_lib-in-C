@@ -129,9 +129,9 @@ jobs:
             'target_link_libraries(hello_static PRIVATE RL_lib-in-C::rl_lib)' \
             'add_executable(hello_shared "${HELLO_SRC}")' \
             'target_link_libraries(hello_shared PRIVATE RL_lib-in-C::rl_lib_shared)' \
-            'get_target_property(_implib RL_lib-in-C::rl_lib IMPORTED_IMPLIB)' \
-            'get_target_property(_loc RL_lib-in-C::rl_lib IMPORTED_LOCATION)' \
-            'message(STATUS "RL_lib-in-C::rl_lib implib=${_implib} location=${_loc}")' \
+            'get_target_property(_implib RL_lib-in-C::rl_lib IMPORTED_IMPLIB_RELEASE)' \
+            'get_target_property(_loc RL_lib-in-C::rl_lib IMPORTED_LOCATION_RELEASE)' \
+            'message(STATUS "RL_lib-in-C::rl_lib (Release) implib=${_implib} location=${_loc}")' \
             > "$C/CMakeLists.txt"
           cmake -S "$C" -B "$C/build" \
             -DHELLO_SRC="$W/examples/hello_rl.c" \

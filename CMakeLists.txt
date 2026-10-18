@@ -128,6 +128,10 @@ install(TARGETS rl_lib
 if(RL_LIB_BUILD_SHARED)
   install(TARGETS rl_lib_shared
           EXPORT RL_lib-in-CTargets
+          # ARCHIVE is the import library on Windows (rl_lib_shared.lib with
+          # MSVC, librl_lib.dll.a with MinGW); without a destination for it the
+          # exported target has no IMPORTED_IMPLIB and consumers cannot link.
+          ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
           LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
           RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 endif()
