@@ -7,7 +7,7 @@ WARN += -Werror
 endif
 CFLAGS = $(WARN) -Iinclude -I.
 
-LIB_SRCS = src/arena.c src/prng.c src/mat.c src/autograd.c src/nn.c src/optim.c src/rl.c envs/snake.c envs/cartpole.c
+LIB_SRCS = src/memory.c src/random.c src/linalg.c src/graph.c src/layers.c src/optim.c src/rl.c envs/snake.c envs/cartpole.c
 LIB_OBJS = $(LIB_SRCS:.c=.o)
 
 TARGET_SNAKE = train_snake

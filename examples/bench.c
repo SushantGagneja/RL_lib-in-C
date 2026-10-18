@@ -14,10 +14,10 @@
  *   ./crl_bench snake            # Snake only
  */
 
-#include "arena.h"
+#include "memory.h"
 #include "envs/cartpole.h"
 #include "envs/snake.h"
-#include "nn.h"
+#include "layers.h"
 #include "rl.h"
 #include <math.h>
 #include <stdarg.h>
@@ -74,11 +74,11 @@ static Stat compute_stat(const double *v, u32 n) {
 
 // Identical per-episode start seeds for every policy.
 static void make_eval_seeds(u64 *seeds, u32 n, u64 base) {
-  prng_state r;
-  prng_seed_r(&r, base, 11);
+  Rng r;
+  rng_seed(&r, base, 11);
   for (u32 i = 0; i < n; i++) {
-    u64 hi = prng_rand_r(&r);
-    u64 lo = prng_rand_r(&r);
+    u64 hi = rng_u32(&r);
+    u64 lo = rng_u32(&r);
     seeds[i] = (hi << 32) ^ lo;
   }
 }
@@ -89,10 +89,10 @@ static double eval_random(Env *env, const u64 *seeds, u32 n) {
   double total = 0.0;
   for (u32 ep = 0; ep < n; ep++) {
     env->reset(env, seeds[ep]);
-    prng_state r;
-    prng_seed_r(&r, seeds[ep] ^ 0xdeadbeefULL, 1);
+    Rng r;
+    rng_seed(&r, seeds[ep] ^ 0xdeadbeefULL, 1);
     for (u32 t = 0; t < env->max_steps; t++) {
-      u32 act = prng_range_r(&r, env->act_dim);
+      u32 act = rng_below(&r, env->act_dim);
       b32 done = false, trunc = false;
       total += env->step(env, act, &done, &trunc);
       if (done || trunc) break;
@@ -223,55 +223,55 @@ static double eval_snake_greedy(Env *env, const u64 *seeds, u32 n) {
 
 /* ── Training ─────────────────────────────────────────────────────── */
 
-static model_state *train_cartpole(mem_arena *arena, u64 seed, u32 epochs) {
-  model_state *model = model_create(arena);
+static Net *train_cartpole(Arena *arena, u64 seed, u32 epochs) {
+  Net *model = net_new(arena);
   Env *env = env_cartpole_create(arena);
-  prng_state model_rng;
-  prng_seed_r(&model_rng, seed, 1);
+  Rng model_rng;
+  rng_seed(&model_rng, seed, 1);
 
   const u32 hidden[] = {64, 64};
-  nn_build_discrete_actor(arena, model, &model_rng, env->obs_dim, hidden, 2,
+  actor_build(arena, model, &model_rng, env->obs_dim, hidden, 2,
                           env->act_dim, 32);
-  model->cost_graph = build_graph(arena, model, model->cost);
+  model->loss_plan = schedule_from(arena, model, model->cost);
 
-  RLConfig cfg = {
+  TrainCfg cfg = {
       .epochs = epochs,
       .rollout_size = 32,
       .max_steps = env->max_steps,
       .learning_rate = 0.005f,
       .gamma = 0.99f,
       .seed = seed,
-      .optim = OPTIM_ADAM,
+      .optim = OPT_ADAM,
       .max_grad_norm = 0.5f,
       .batch_size = 32,
   };
-  rl_train_reinforce(env, model, &cfg, arena);
+  train_reinforce(env, model, &cfg, arena);
   return model;
 }
 
-static model_state *train_snake(mem_arena *arena, u64 seed, u32 epochs) {
-  model_state *model = model_create(arena);
+static Net *train_snake(Arena *arena, u64 seed, u32 epochs) {
+  Net *model = net_new(arena);
   Env *env = env_snake_create(arena, 36);
-  prng_state model_rng;
-  prng_seed_r(&model_rng, seed, 1);
+  Rng model_rng;
+  rng_seed(&model_rng, seed, 1);
 
   const u32 hidden[] = {128, 128};
-  nn_build_discrete_actor(arena, model, &model_rng, env->obs_dim, hidden, 2,
+  actor_build(arena, model, &model_rng, env->obs_dim, hidden, 2,
                           env->act_dim, 32);
-  model->cost_graph = build_graph(arena, model, model->cost);
+  model->loss_plan = schedule_from(arena, model, model->cost);
 
-  RLConfig cfg = {
+  TrainCfg cfg = {
       .epochs = epochs,
       .rollout_size = 64,
       .max_steps = env->max_steps,
       .learning_rate = 0.001f,
       .gamma = 0.99f,
       .seed = seed,
-      .optim = OPTIM_ADAM,
+      .optim = OPT_ADAM,
       .max_grad_norm = 0.5f,
       .batch_size = 32,
   };
-  rl_train_reinforce(env, model, &cfg, arena);
+  train_reinforce(env, model, &cfg, arena);
   return model;
 }
 
@@ -290,32 +290,32 @@ static void bench_env_throughput(void) {
 
   const char *names[2] = {"CartPole-v1", "Snake 6x6"};
   for (u32 e = 0; e < 2; e++) {
-    mem_arena *arena = arena_create(GiB(1));
+    Arena *arena = arena_new(GiB(1));
     Env *env = (e == 0) ? env_cartpole_create(arena) : env_snake_create(arena, 36);
-    prng_state r;
-    prng_seed_r(&r, 12345, 7);
+    Rng r;
+    rng_seed(&r, 12345, 7);
     env->reset(env, 1);
 
     const u64 target = 200000;
     u64 steps = 0;
     double t0 = now_seconds();
     while (steps < target) {
-      u32 act = prng_range_r(&r, env->act_dim);
+      u32 act = rng_below(&r, env->act_dim);
       b32 done = false, trunc = false;
       env->step(env, act, &done, &trunc);
-      if (done || trunc) env->reset(env, prng_rand_r(&r));
+      if (done || trunc) env->reset(env, rng_u32(&r));
       steps++;
     }
     double dt = now_seconds() - t0;
     double rate = (double)steps / dt;
     printf("  [throughput] %-12s %8.0f steps/sec\n", names[e], rate);
     emit("| %s | %.0f |\n", names[e], rate);
-    arena_destroy(arena);
+    arena_dispose(arena);
   }
 }
 
 // Naive triple-loop GEMM used as the comparison point for the NN kernel.
-static void matmul_naive(matrix *out, const matrix *a, const matrix *b) {
+static void matmul_naive(Mat *out, const Mat *a, const Mat *b) {
   for (u32 i = 0; i < out->rows; i++) {
     for (u32 j = 0; j < out->cols; j++) {
       real sum = 0.0f;
@@ -329,13 +329,13 @@ static void matmul_naive(matrix *out, const matrix *a, const matrix *b) {
 
 static void bench_matmul_throughput(void) {
   const u32 N = 256;
-  mem_arena *arena = arena_create(MiB(64));
-  matrix *a = mat_create(arena, N, N);
-  matrix *b = mat_create(arena, N, N);
-  matrix *c = mat_create(arena, N, N);
-  prng_seed(2024, 1);
-  mat_fill_rand(a, -1.0f, 1.0f);
-  mat_fill_rand(b, -1.0f, 1.0f);
+  Arena *arena = arena_new(MiB(64));
+  Mat *a = mat_new(arena, N, N);
+  Mat *b = mat_new(arena, N, N);
+  Mat *c = mat_new(arena, N, N);
+  rng_seed_g(2024, 1);
+  mat_rand(a, -1.0f, 1.0f);
+  mat_rand(b, -1.0f, 1.0f);
 
   const double flops_per_call = 2.0 * (double)N * N * N;
   volatile real sink = 0.0f;
@@ -343,7 +343,7 @@ static void bench_matmul_throughput(void) {
   const u32 reps_lib = 200;
   double t0 = now_seconds();
   for (u32 i = 0; i < reps_lib; i++) {
-    mat_matmul(c, a, b, 1, 0, 0);
+    mat_mm(c, a, b, 1, 0, 0);
     sink += c->data[0];
   }
   double dt_lib = now_seconds() - t0;
@@ -360,13 +360,13 @@ static void bench_matmul_throughput(void) {
 
   emit("\nMatMul %ux%u (single core, -O3):\n\n", N, N);
   emit("| Implementation | GFLOPS |\n|---|---|\n");
-  emit("| `mat_matmul` (NN kernel) | %.3f |\n", gflops_lib);
+  emit("| `mat_mm` (NN kernel) | %.3f |\n", gflops_lib);
   emit("| Naive triple loop | %.3f |\n", gflops_naive);
   printf("  [throughput] matmul %ux%u kernel %.3f GFLOPS | naive %.3f GFLOPS\n",
          N, N, gflops_lib, gflops_naive);
   (void)sink;
 
-  arena_destroy(arena);
+  arena_dispose(arena);
 }
 
 /* ── Main ─────────────────────────────────────────────────────────── */
@@ -402,7 +402,7 @@ int main(int argc, char **argv) {
     double rnd[NUM_SEEDS], grd[NUM_SEEDS], tr_grd[NUM_SEEDS], tr_sto[NUM_SEEDS];
     emit("\n=== CartPole-v1 ===\n");
     for (u32 s = 0; s < NUM_SEEDS; s++) {
-      mem_arena *arena = arena_create(GiB(1));
+      Arena *arena = arena_new(GiB(1));
       Env *env = env_cartpole_create(arena);
       u64 eval_seeds[EVAL_EPISODES];
       make_eval_seeds(eval_seeds, EVAL_EPISODES, SEEDS[s] + 5000);
@@ -410,17 +410,17 @@ int main(int argc, char **argv) {
       rnd[s] = eval_random(env, eval_seeds, EVAL_EPISODES);
       grd[s] = eval_cartpole_greedy(env, eval_seeds, EVAL_EPISODES);
 
-      model_state *model = train_cartpole(arena, SEEDS[s], 50);
-      tr_grd[s] = rl_evaluate_seeded(env, model, eval_seeds, EVAL_EPISODES, true)
-                      .mean_reward;
+      Net *model = train_cartpole(arena, SEEDS[s], 50);
+      tr_grd[s] = evaluate_seeded(env, model, eval_seeds, EVAL_EPISODES, true)
+                      .avg_return;
       tr_sto[s] =
-          rl_evaluate_seeded(env, model, eval_seeds, EVAL_EPISODES, false)
-              .mean_reward;
+          evaluate_seeded(env, model, eval_seeds, EVAL_EPISODES, false)
+              .avg_return;
 
       printf("  [seed %-4llu] Random: %6.1f | Greedy: %6.1f | Trained(greedy): "
              "%6.1f | Trained(stoch): %6.1f\n",
              (unsigned long long)SEEDS[s], rnd[s], grd[s], tr_grd[s], tr_sto[s]);
-      arena_destroy(arena);
+      arena_dispose(arena);
     }
 
     emit("\n| Policy | Return (mean ± sample std) | Best seed | Worst seed |\n");
@@ -443,7 +443,7 @@ int main(int argc, char **argv) {
     double rnd[NUM_SEEDS], grd[NUM_SEEDS], tr_grd[NUM_SEEDS], tr_sto[NUM_SEEDS];
     emit("\n=== Snake 6x6 ===\n");
     for (u32 s = 0; s < NUM_SEEDS; s++) {
-      mem_arena *arena = arena_create(GiB(1));
+      Arena *arena = arena_new(GiB(1));
       Env *env = env_snake_create(arena, 36);
       u64 eval_seeds[EVAL_EPISODES];
       make_eval_seeds(eval_seeds, EVAL_EPISODES, SEEDS[s] + 5000);
@@ -451,17 +451,17 @@ int main(int argc, char **argv) {
       rnd[s] = eval_random(env, eval_seeds, EVAL_EPISODES);
       grd[s] = eval_snake_greedy(env, eval_seeds, EVAL_EPISODES);
 
-      model_state *model = train_snake(arena, SEEDS[s], 200);
-      tr_grd[s] = rl_evaluate_seeded(env, model, eval_seeds, EVAL_EPISODES, true)
-                      .mean_reward;
+      Net *model = train_snake(arena, SEEDS[s], 200);
+      tr_grd[s] = evaluate_seeded(env, model, eval_seeds, EVAL_EPISODES, true)
+                      .avg_return;
       tr_sto[s] =
-          rl_evaluate_seeded(env, model, eval_seeds, EVAL_EPISODES, false)
-              .mean_reward;
+          evaluate_seeded(env, model, eval_seeds, EVAL_EPISODES, false)
+              .avg_return;
 
       printf("  [seed %-4llu] Random: %6.1f | Greedy(BFS): %6.1f | "
              "Trained(greedy): %6.1f | Trained(stoch): %6.1f\n",
              (unsigned long long)SEEDS[s], rnd[s], grd[s], tr_grd[s], tr_sto[s]);
-      arena_destroy(arena);
+      arena_dispose(arena);
     }
 
     emit("\n| Policy | Return (mean ± sample std) | Best seed | Worst seed |\n");

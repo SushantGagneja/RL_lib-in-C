@@ -4,27 +4,27 @@
 #include <stdlib.h>
 #include <string.h>
 
-RolloutBuffer *rl_buffer_create(mem_arena *arena, u32 num_trajectories,
+Rollout *rollout_new(Arena *arena, u32 num_trajectories,
                                 u32 max_steps, u32 obs_dim) {
-  CRL_ASSERT(arena != NULL, "rl_buffer_create: NULL arena");
+  CRL_ASSERT(arena != NULL, "rollout_new: NULL arena");
   CRL_ASSERT(num_trajectories > 0 && max_steps > 0 && obs_dim > 0,
-             "rl_buffer_create: zero-sized buffer");
+             "rollout_new: zero-sized buffer");
 
-  RolloutBuffer *buf = PUSH_STRUCT(arena, RolloutBuffer);
+  Rollout *buf = ARENA_OBJ(arena, Rollout);
   buf->count = num_trajectories;
   buf->max_steps = max_steps;
   buf->obs_dim = obs_dim;
-  buf->trajectories = PUSH_ARRAY(arena, RLTrajectory, num_trajectories);
+  buf->trajectories = ARENA_ARR(arena, Episode, num_trajectories);
 
   for (u32 i = 0; i < num_trajectories; i++) {
-    buf->trajectories[i].obs = PUSH_ARRAY(arena, real, (u64)max_steps * obs_dim);
-    buf->trajectories[i].actions = PUSH_ARRAY(arena, u32, max_steps);
-    buf->trajectories[i].rewards = PUSH_ARRAY(arena, real, max_steps);
-    buf->trajectories[i].returns = PUSH_ARRAY(arena, real, max_steps);
-    buf->trajectories[i].values = PUSH_ARRAY(arena, real, max_steps);
-    buf->trajectories[i].advantages = PUSH_ARRAY(arena, real, max_steps);
-    buf->trajectories[i].dones = PUSH_ARRAY(arena, b8, max_steps);
-    buf->trajectories[i].truncateds = PUSH_ARRAY(arena, b8, max_steps);
+    buf->trajectories[i].obs = ARENA_ARR(arena, real, (u64)max_steps * obs_dim);
+    buf->trajectories[i].actions = ARENA_ARR(arena, u32, max_steps);
+    buf->trajectories[i].rewards = ARENA_ARR(arena, real, max_steps);
+    buf->trajectories[i].returns = ARENA_ARR(arena, real, max_steps);
+    buf->trajectories[i].values = ARENA_ARR(arena, real, max_steps);
+    buf->trajectories[i].advantages = ARENA_ARR(arena, real, max_steps);
+    buf->trajectories[i].dones = ARENA_ARR(arena, b8, max_steps);
+    buf->trajectories[i].truncateds = ARENA_ARR(arena, b8, max_steps);
     buf->trajectories[i].len = 0;
   }
 
@@ -33,13 +33,13 @@ RolloutBuffer *rl_buffer_create(mem_arena *arena, u32 num_trajectories,
 
 // Derives a fresh 64-bit seed from a PRNG stream so each episode's env.reset()
 // gets an independent but reproducible seed.
-static u64 next_seed(prng_state *rng) {
-  u64 hi = prng_rand_r(rng);
-  u64 lo = prng_rand_r(rng);
+static u64 next_seed(Rng *rng) {
+  u64 hi = rng_u32(rng);
+  u64 lo = rng_u32(rng);
   return (hi << 32) ^ lo;
 }
 
-static u32 sample_action(prng_state *rng, const matrix *probs) {  real r = prng_randf_r(rng);
+static u32 sample_action(Rng *rng, const Mat *probs) {  real r = rng_unit(rng);
   real cdf = 0.0f;
   u32 size = probs->rows * probs->cols;
   for (u32 i = 0; i < size; i++) {
@@ -52,7 +52,7 @@ static u32 sample_action(prng_state *rng, const matrix *probs) {  real r = prng_
   return size - 1;
 }
 
-static u32 argmax_action(const matrix *probs) {
+static u32 argmax_action(const Mat *probs) {
   u32 size = probs->rows * probs->cols;
   u32 best = 0;
   real max_p = probs->data[0];
@@ -65,7 +65,7 @@ static u32 argmax_action(const matrix *probs) {
   return best;
 }
 
-void rl_compute_gae(RLTrajectory *traj, real gamma, real lambda, real last_val) {
+void gae_compute(Episode *traj, real gamma, real lambda, real last_val) {
   if (traj->len == 0) return;
   real gae = 0.0f;
   for (i32 t = (i32)traj->len - 1; t >= 0; t--) {
@@ -83,10 +83,10 @@ void rl_compute_gae(RLTrajectory *traj, real gamma, real lambda, real last_val) 
 // remainder (sample_count % batch_size) drops a random subset instead of the
 // systematically-biased tail (samples are stored in reverse time order).
 static void shuffle_samples(real **obs, u32 *actions, real *values, real *extra_b,
-                            u32 *order, u32 n, prng_state *rng) {
+                            u32 *order, u32 n, Rng *rng) {
   for (u32 i = 0; i < n; i++) order[i] = i;
   for (u32 i = n; i > 1; i--) {
-    u32 j = prng_range_r(rng, i);
+    u32 j = rng_below(rng, i);
     if (j != i - 1) {
       u32 tmp = order[i - 1];
       order[i - 1] = order[j];
@@ -120,64 +120,64 @@ static void shuffle_samples(real **obs, u32 *actions, real *values, real *extra_
   free(b_copy);
 }
 
-void rl_train_reinforce(Env *env, model_state *model, const RLConfig *config,
-                        mem_arena *train_arena) {
+void train_reinforce(Env *env, Net *model, const TrainCfg *config,
+                        Arena *train_arena) {
   CRL_ASSERT(env != NULL && model != NULL && config != NULL,
-             "rl_train_reinforce: NULL argument");
-  CRL_ASSERT(model->forward_graph.size > 0,
-             "rl_train_reinforce: forward_graph is empty (forgot build_graph?)");
-  CRL_ASSERT(train_arena != NULL, "rl_train_reinforce: NULL arena");
+             "train_reinforce: NULL argument");
+  CRL_ASSERT(model->fwd.len > 0,
+             "train_reinforce: forward_graph is empty (forgot schedule_from?)");
+  CRL_ASSERT(train_arena != NULL, "train_reinforce: NULL arena");
 
   u32 rollout_size = config->rollout_size > 0 ? config->rollout_size : 32;
   u32 max_steps = config->max_steps > 0 ? config->max_steps : env->max_steps;
   real gamma = config->gamma > 0.0f ? config->gamma : 0.99f;
   real lr = config->learning_rate > 0.0f ? config->learning_rate : 0.01f;
 
-  RolloutBuffer *buffer =
-      rl_buffer_create(train_arena, rollout_size, max_steps, env->obs_dim);
+  Rollout *buffer =
+      rollout_new(train_arena, rollout_size, max_steps, env->obs_dim);
 
-  prng_state rng;
-  prng_seed_r(&rng, config->seed != 0 ? config->seed : 42, 1);
-  prng_state shuf_rng;
-  prng_seed_r(&shuf_rng, (config->seed != 0 ? config->seed : 42) ^ 0x9e3779b9ULL,
+  Rng rng;
+  rng_seed(&rng, config->seed != 0 ? config->seed : 42, 1);
+  Rng shuf_rng;
+  rng_seed(&shuf_rng, (config->seed != 0 ? config->seed : 42) ^ 0x9e3779b9ULL,
               2);
 
-  AdamOptim *adam = (config->optim == OPTIM_ADAM)
-                        ? optim_adam_create(train_arena, model, lr)
+  Adam *adam = (config->optim == OPT_ADAM)
+                        ? adam_new(train_arena, model, lr)
                         : NULL;
 
-  b32 use_batching = (model->batch_graph.size > 0 && model->batch_input != NULL &&
+  b32 use_batching = (model->train.len > 0 && model->batch_input != NULL &&
                       model->batch_logits != NULL);
   u32 batch_size = use_batching ? model->batch_input->val->cols : 1;
 
   // The config batch size must agree with the shape frozen into the graph.
   CRL_ASSERT(config->batch_size == 0 || !use_batching ||
                  config->batch_size == batch_size,
-             "RLConfig.batch_size does not match the graph's batch dimension");
+             "TrainCfg.batch_size does not match the graph's batch dimension");
 
   if (!use_batching) {
-    CRL_ASSERT(model->cost_graph.size > 0,
-               "rl_train_reinforce: no batch graph and no cost graph");
+    CRL_ASSERT(model->loss_plan.len > 0,
+               "train_reinforce: no batch graph and no cost graph");
   }
 
   printf("Starting REINFORCE Training:\n");
   printf("  Obs Dim: %u | Act Dim: %u | Epochs: %u | Rollout: %u | Batch: %u | "
          "Optim: %s | LR: %.4f | Gamma: %.2f\n\n",
          env->obs_dim, env->act_dim, config->epochs, rollout_size, batch_size,
-         config->optim == OPTIM_ADAM ? "Adam" : "SGD", lr, gamma);
+         config->optim == OPT_ADAM ? "Adam" : "SGD", lr, gamma);
 
   // Persistent buffers for batching (allocated once, not per epoch).
   u64 max_total_samples = (u64)rollout_size * max_steps;
-  real **sample_obs = PUSH_ARRAY(train_arena, real *, max_total_samples);
-  u32 *sample_actions = PUSH_ARRAY(train_arena, u32, max_total_samples);
-  real *sample_values = PUSH_ARRAY(train_arena, real, max_total_samples);
-  real *sample_returns = PUSH_ARRAY(train_arena, real, max_total_samples);
-  u32 *order = PUSH_ARRAY(train_arena, u32, max_total_samples);
-  u32 *batch_acts = PUSH_ARRAY(train_arena, u32, batch_size);
-  real *batch_advs = PUSH_ARRAY(train_arena, real, batch_size);
+  real **sample_obs = ARENA_ARR(train_arena, real *, max_total_samples);
+  u32 *sample_actions = ARENA_ARR(train_arena, u32, max_total_samples);
+  real *sample_values = ARENA_ARR(train_arena, real, max_total_samples);
+  real *sample_returns = ARENA_ARR(train_arena, real, max_total_samples);
+  u32 *order = ARENA_ARR(train_arena, u32, max_total_samples);
+  u32 *batch_acts = ARENA_ARR(train_arena, u32, batch_size);
+  real *batch_advs = ARENA_ARR(train_arena, real, batch_size);
 
-  matrix *seed_grad = mat_create(train_arena, 1, 1);
-  matrix *loss_out = mat_create(train_arena, 1, 1);
+  Mat *seed_grad = mat_new(train_arena, 1, 1);
+  Mat *loss_out = mat_new(train_arena, 1, 1);
 
   for (u32 epoch = 0; epoch < config->epochs; epoch++) {
     real total_reward = 0.0f;
@@ -186,7 +186,7 @@ void rl_train_reinforce(Env *env, model_state *model, const RLConfig *config,
     // 1. Rollout phase
     for (u32 i = 0; i < rollout_size; i++) {
       env->reset(env, next_seed(&rng));
-      RLTrajectory *traj = &buffer->trajectories[i];
+      Episode *traj = &buffer->trajectories[i];
       traj->len = 0;
 
       for (u32 t = 0; t < max_steps; t++) {
@@ -194,7 +194,7 @@ void rl_train_reinforce(Env *env, model_state *model, const RLConfig *config,
         env->observe(env, curr_obs);
 
         memcpy(model->input->val->data, curr_obs, sizeof(real) * env->obs_dim);
-        forward_pass(&model->forward_graph);
+        schedule_run(&model->fwd);
 
         u32 action = sample_action(&rng, model->output->val);
 
@@ -219,7 +219,7 @@ void rl_train_reinforce(Env *env, model_state *model, const RLConfig *config,
     // treated as terminal here (G = 0), which biases the return for truncated
     // episodes. REINFORCE has no value head to bootstrap from; A2C does.
     for (u32 i = 0; i < rollout_size; i++) {
-      RLTrajectory *traj = &buffer->trajectories[i];
+      Episode *traj = &buffer->trajectories[i];
       real G = 0.0f;
 
       for (i32 t = (i32)traj->len - 1; t >= 0; t--) {
@@ -235,7 +235,7 @@ void rl_train_reinforce(Env *env, model_state *model, const RLConfig *config,
     }
 
     // 3. Batched training or legacy fallback
-    optim_zero_grad(model);
+    zero_grad(model);
 
     // Baseline statistics over the whole rollout, used by both paths.
     real ret_sum = 0.0f;
@@ -267,8 +267,8 @@ void rl_train_reinforce(Env *env, model_state *model, const RLConfig *config,
               (sample_returns[idx] - ret_mean) / (ret_std + 1e-8f);
         }
 
-        forward_pass(&model->batch_graph);
-        graph_zero_activation_grads(&model->batch_graph);
+        schedule_run(&model->train);
+        schedule_zero_act(&model->train);
 
         CRL_CHECK(mat_fused_policy_loss(loss_out, model->batch_logits->val,
                                         batch_acts, batch_advs, batch_size));
@@ -276,39 +276,39 @@ void rl_train_reinforce(Env *env, model_state *model, const RLConfig *config,
             model->batch_logits->grad, model->batch_logits->val, batch_acts,
             batch_advs, batch_size, seed_grad));
 
-        backward_pass_accumulate(&model->batch_graph);
+        schedule_grad_accum(&model->train);
       }
 
       if (config->max_grad_norm > 0.0f) {
-        optim_clip_grad_norm(model, config->max_grad_norm);
+        clip_grad_norm(model, config->max_grad_norm);
       }
-      if (config->optim == OPTIM_ADAM) {
-        optim_adam_step(adam, model);
+      if (config->optim == OPT_ADAM) {
+        adam_step(adam, model);
       } else {
-        optim_sgd_step(model, lr, 1.0f);
+        sgd_step(model, lr, 1.0f);
       }
-      optim_zero_grad(model);
+      zero_grad(model);
     } else {
       // Unbatched 1-by-1 fallback through the single-sample cost graph.
       for (u32 i = 0; i < sample_count; i++) {
         memcpy(model->input->val->data, sample_obs[i],
                sizeof(real) * env->obs_dim);
-        mat_clear(model->advantage->val);
+        mat_zero(model->advantage->val);
         real adv = (sample_returns[i] - ret_mean) / (ret_std + 1e-8f);
         model->advantage->val->data[sample_actions[i]] = adv;
 
-        forward_pass(&model->cost_graph);
-        backward_pass(&model->cost_graph);
+        schedule_run(&model->loss_plan);
+        schedule_grad(&model->loss_plan);
       }
 
       if (sample_count > 0) {
         if (config->max_grad_norm > 0.0f) {
-          optim_clip_grad_norm(model, config->max_grad_norm);
+          clip_grad_norm(model, config->max_grad_norm);
         }
-        if (config->optim == OPTIM_ADAM) {
-          optim_adam_step(adam, model);
+        if (config->optim == OPT_ADAM) {
+          adam_step(adam, model);
         } else {
-          optim_sgd_step(model, lr, 1.0f / (real)sample_count);
+          sgd_step(model, lr, 1.0f / (real)sample_count);
         }
       }
     }
@@ -322,15 +322,15 @@ void rl_train_reinforce(Env *env, model_state *model, const RLConfig *config,
   }
 }
 
-void rl_train_a2c(Env *env, model_state *model, const RLConfig *config,
-                  mem_arena *train_arena) {
+void train_a2c(Env *env, Net *model, const TrainCfg *config,
+                  Arena *train_arena) {
   CRL_ASSERT(env != NULL && model != NULL && config != NULL,
-             "rl_train_a2c: NULL argument");
-  CRL_ASSERT(model->forward_graph.size > 0 && model->batch_graph.size > 0,
-             "rl_train_a2c: missing graph (use nn_build_actor_critic)");
+             "train_a2c: NULL argument");
+  CRL_ASSERT(model->fwd.len > 0 && model->train.len > 0,
+             "train_a2c: missing graph (use actor_critic_build)");
   CRL_ASSERT(model->value != NULL && model->batch_value != NULL,
-             "rl_train_a2c: model has no value head");
-  CRL_ASSERT(train_arena != NULL, "rl_train_a2c: NULL arena");
+             "train_a2c: model has no value head");
+  CRL_ASSERT(train_arena != NULL, "train_a2c: NULL arena");
 
   u32 rollout_size = config->rollout_size > 0 ? config->rollout_size : 32;
   u32 max_steps = config->max_steps > 0 ? config->max_steps : env->max_steps;
@@ -340,22 +340,22 @@ void rl_train_a2c(Env *env, model_state *model, const RLConfig *config,
   real entropy_coef = config->entropy_coef;
   real lr = config->learning_rate > 0.0f ? config->learning_rate : 0.001f;
 
-  RolloutBuffer *buffer =
-      rl_buffer_create(train_arena, rollout_size, max_steps, env->obs_dim);
+  Rollout *buffer =
+      rollout_new(train_arena, rollout_size, max_steps, env->obs_dim);
 
-  prng_state rng;
-  prng_seed_r(&rng, config->seed != 0 ? config->seed : 42, 1);
-  prng_state shuf_rng;
-  prng_seed_r(&shuf_rng, (config->seed != 0 ? config->seed : 42) ^ 0x9e3779b9ULL,
+  Rng rng;
+  rng_seed(&rng, config->seed != 0 ? config->seed : 42, 1);
+  Rng shuf_rng;
+  rng_seed(&shuf_rng, (config->seed != 0 ? config->seed : 42) ^ 0x9e3779b9ULL,
               3);
 
-  AdamOptim *adam = (config->optim == OPTIM_ADAM)
-                        ? optim_adam_create(train_arena, model, lr)
+  Adam *adam = (config->optim == OPT_ADAM)
+                        ? adam_new(train_arena, model, lr)
                         : NULL;
 
   u32 batch_size = model->batch_input->val->cols;
   CRL_ASSERT(config->batch_size == 0 || config->batch_size == batch_size,
-             "RLConfig.batch_size does not match the graph's batch dimension");
+             "TrainCfg.batch_size does not match the graph's batch dimension");
 
   printf("Starting A2C Training:\n");
   printf("  Obs Dim: %u | Act Dim: %u | Epochs: %u | Rollout: %u | Batch: %u | "
@@ -364,21 +364,21 @@ void rl_train_a2c(Env *env, model_state *model, const RLConfig *config,
          lr, gamma, lambda, entropy_coef);
 
   u64 max_total_samples = (u64)rollout_size * max_steps;
-  real **sample_obs = PUSH_ARRAY(train_arena, real *, max_total_samples);
-  u32 *sample_actions = PUSH_ARRAY(train_arena, u32, max_total_samples);
-  real *sample_values = PUSH_ARRAY(train_arena, real, max_total_samples);
-  real *sample_advantages = PUSH_ARRAY(train_arena, real, max_total_samples);
-  u32 *order = PUSH_ARRAY(train_arena, u32, max_total_samples);
+  real **sample_obs = ARENA_ARR(train_arena, real *, max_total_samples);
+  u32 *sample_actions = ARENA_ARR(train_arena, u32, max_total_samples);
+  real *sample_values = ARENA_ARR(train_arena, real, max_total_samples);
+  real *sample_advantages = ARENA_ARR(train_arena, real, max_total_samples);
+  u32 *order = ARENA_ARR(train_arena, u32, max_total_samples);
 
-  u32 *batch_acts = PUSH_ARRAY(train_arena, u32, batch_size);
-  real *batch_advs = PUSH_ARRAY(train_arena, real, batch_size);
-  matrix *target_val_mat = mat_create(train_arena, 1, batch_size);
+  u32 *batch_acts = ARENA_ARR(train_arena, u32, batch_size);
+  real *batch_advs = ARENA_ARR(train_arena, real, batch_size);
+  Mat *target_val_mat = mat_new(train_arena, 1, batch_size);
 
-  matrix *seed_pi = mat_create(train_arena, 1, 1);
-  matrix *seed_vf = mat_create(train_arena, 1, 1);
-  matrix *seed_ent = mat_create(train_arena, 1, 1);
+  Mat *seed_pi = mat_new(train_arena, 1, 1);
+  Mat *seed_vf = mat_new(train_arena, 1, 1);
+  Mat *seed_ent = mat_new(train_arena, 1, 1);
 
-  real *last_obs = PUSH_ARRAY(train_arena, real, env->obs_dim);
+  real *last_obs = ARENA_ARR(train_arena, real, env->obs_dim);
 
   for (u32 epoch = 0; epoch < config->epochs; epoch++) {
     real total_reward = 0.0f;
@@ -387,7 +387,7 @@ void rl_train_a2c(Env *env, model_state *model, const RLConfig *config,
     // 1. Rollout collection with state values and GAE
     for (u32 i = 0; i < rollout_size; i++) {
       env->reset(env, next_seed(&rng));
-      RLTrajectory *traj = &buffer->trajectories[i];
+      Episode *traj = &buffer->trajectories[i];
       traj->len = 0;
       b32 gae_done = false;
 
@@ -396,7 +396,7 @@ void rl_train_a2c(Env *env, model_state *model, const RLConfig *config,
         env->observe(env, curr_obs);
 
         memcpy(model->input->val->data, curr_obs, sizeof(real) * env->obs_dim);
-        forward_pass(&model->forward_graph);
+        schedule_run(&model->fwd);
 
         u32 action = sample_action(&rng, model->output->val);
         real val = model->value->val->data[0];
@@ -419,10 +419,10 @@ void rl_train_a2c(Env *env, model_state *model, const RLConfig *config,
             env->observe(env, last_obs);
             memcpy(model->input->val->data, last_obs,
                    sizeof(real) * env->obs_dim);
-            forward_pass(&model->forward_graph);
+            schedule_run(&model->fwd);
             last_val = model->value->val->data[0];
           }
-          rl_compute_gae(traj, gamma, lambda, last_val);
+          gae_compute(traj, gamma, lambda, last_val);
           gae_done = true;
           break;
         }
@@ -434,9 +434,9 @@ void rl_train_a2c(Env *env, model_state *model, const RLConfig *config,
         real last_val = 0.0f;
         env->observe(env, last_obs);
         memcpy(model->input->val->data, last_obs, sizeof(real) * env->obs_dim);
-        forward_pass(&model->forward_graph);
+        schedule_run(&model->fwd);
         last_val = model->value->val->data[0];
-        rl_compute_gae(traj, gamma, lambda, last_val);
+        gae_compute(traj, gamma, lambda, last_val);
       }
 
       for (u32 t = 0; t < traj->len; t++) {
@@ -464,9 +464,9 @@ void rl_train_a2c(Env *env, model_state *model, const RLConfig *config,
 
     // 3. Collect minibatches, accumulate gradients, then one update per rollout
     // (keeps the data on-policy: a single step per batch of collected data).
-    optim_zero_grad(model);
+    zero_grad(model);
     u32 num_batches = sample_count / batch_size;
-    CRL_ASSERT(num_batches > 0, "rl_train_a2c: not enough samples for one batch");
+    CRL_ASSERT(num_batches > 0, "train_a2c: not enough samples for one batch");
 
     shuffle_samples(sample_obs, sample_actions, sample_values, sample_advantages,
                     order, sample_count, &shuf_rng);
@@ -491,10 +491,10 @@ void rl_train_a2c(Env *env, model_state *model, const RLConfig *config,
         target_val_mat->data[b] = sample_values[idx] + sample_advantages[idx];
       }
 
-      forward_pass(&model->batch_graph);
+      schedule_run(&model->train);
       // Clear activation grads, THEN seed the policy and value nodes. The old
       // code seeded first and then cleared, wiping every seeded gradient.
-      graph_zero_activation_grads(&model->batch_graph);
+      schedule_zero_act(&model->train);
 
       CRL_CHECK(mat_fused_policy_add_grad(model->batch_logits->grad,
                                           model->batch_logits->val, batch_acts,
@@ -508,18 +508,18 @@ void rl_train_a2c(Env *env, model_state *model, const RLConfig *config,
                                  model->batch_value->val, target_val_mat,
                                  seed_vf));
 
-      backward_pass_accumulate(&model->batch_graph);
+      schedule_grad_accum(&model->train);
     }
 
     if (config->max_grad_norm > 0.0f) {
-      optim_clip_grad_norm(model, config->max_grad_norm);
+      clip_grad_norm(model, config->max_grad_norm);
     }
-    if (config->optim == OPTIM_ADAM) {
-      optim_adam_step(adam, model);
+    if (config->optim == OPT_ADAM) {
+      adam_step(adam, model);
     } else {
-      optim_sgd_step(model, lr, 1.0f);
+      sgd_step(model, lr, 1.0f);
     }
-    optim_zero_grad(model);
+    zero_grad(model);
 
     if (config->verbose || (epoch + 1) % 50 == 0 || epoch == 0 ||
         epoch + 1 == config->epochs) {
@@ -529,26 +529,26 @@ void rl_train_a2c(Env *env, model_state *model, const RLConfig *config,
   }
 }
 
-RLEvalResult rl_evaluate_seeded(Env *env, model_state *model, const u64 *seeds,
+EvalResult evaluate_seeded(Env *env, Net *model, const u64 *seeds,
                                 u32 num_episodes, b32 greedy) {
   CRL_ASSERT(env != NULL && model != NULL && seeds != NULL && num_episodes > 0,
-             "rl_evaluate_seeded: bad argument");
+             "evaluate_seeded: bad argument");
 
   real total_reward = 0.0f;
   u64 total_steps = 0;
   real *obs_buf = malloc(sizeof(real) * env->obs_dim);
-  CRL_ASSERT(obs_buf != NULL, "rl_evaluate_seeded: allocation failure");
+  CRL_ASSERT(obs_buf != NULL, "evaluate_seeded: allocation failure");
 
   for (u32 ep = 0; ep < num_episodes; ep++) {
     env->reset(env, seeds[ep]);
-    prng_state ep_rng;
-    prng_seed_r(&ep_rng, seeds[ep] ^ 0x5851f42d4c957f2dULL, ep + 1);
+    Rng ep_rng;
+    rng_seed(&ep_rng, seeds[ep] ^ 0x5851f42d4c957f2dULL, ep + 1);
     real ep_reward = 0.0f;
 
     for (u32 t = 0; t < env->max_steps; t++) {
       env->observe(env, obs_buf);
       memcpy(model->input->val->data, obs_buf, sizeof(real) * env->obs_dim);
-      forward_pass(&model->forward_graph);
+      schedule_run(&model->fwd);
 
       u32 action = greedy ? argmax_action(model->output->val)
                           : sample_action(&ep_rng, model->output->val);
@@ -568,24 +568,24 @@ RLEvalResult rl_evaluate_seeded(Env *env, model_state *model, const u64 *seeds,
   }
 
   free(obs_buf);
-  return (RLEvalResult){
-      .mean_reward = total_reward / (real)num_episodes,
-      .mean_steps = (real)total_steps / (real)num_episodes,
+  return (EvalResult){
+      .avg_return = total_reward / (real)num_episodes,
+      .avg_steps = (real)total_steps / (real)num_episodes,
   };
 }
 
-RLEvalResult rl_evaluate(Env *env, model_state *model, prng_state *rng,
+EvalResult evaluate(Env *env, Net *model, Rng *rng,
                          u32 episodes, b32 greedy) {
   CRL_ASSERT(env != NULL && model != NULL && rng != NULL && episodes > 0,
-             "rl_evaluate: bad argument");
+             "evaluate: bad argument");
 
   u64 *seeds = malloc(sizeof(u64) * episodes);
-  CRL_ASSERT(seeds != NULL, "rl_evaluate: allocation failure");
+  CRL_ASSERT(seeds != NULL, "evaluate: allocation failure");
   for (u32 i = 0; i < episodes; i++) {
     seeds[i] = next_seed(rng);
   }
 
-  RLEvalResult res = rl_evaluate_seeded(env, model, seeds, episodes, greedy);
+  EvalResult res = evaluate_seeded(env, model, seeds, episodes, greedy);
   free(seeds);
   return res;
 }

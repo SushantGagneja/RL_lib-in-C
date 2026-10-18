@@ -1,15 +1,15 @@
 #ifndef RL_H
 #define RL_H
 
-#include "arena.h"
-#include "autograd.h"
+#include "memory.h"
+#include "graph.h"
 #include "env.h"
 #include "optim.h"
 
 typedef enum {
-  OPTIM_SGD = 0,
-  OPTIM_ADAM = 1,
-} OptimType;
+  OPT_SGD = 0,
+  OPT_ADAM = 1,
+} OptimKind;
 
 // Configuration for training
 typedef struct {
@@ -23,16 +23,16 @@ typedef struct {
   real entropy_coef;   // Entropy bonus coefficient (e.g. 0.01f)
   u64 seed;
   b32 verbose;
-  OptimType optim;
+  OptimKind optim;
   real max_grad_norm;
   u32 batch_size;
-} RLConfig;
+} TrainCfg;
 
 // Evaluation metrics
 typedef struct {
-  real mean_reward;
-  real mean_steps;
-} RLEvalResult;
+  real avg_return;
+  real avg_steps;
+} EvalResult;
 
 // Rollout buffer holding trajectories
 typedef struct {
@@ -45,38 +45,38 @@ typedef struct {
   b8 *dones;        // [max_steps] (True environment termination)
   b8 *truncateds;   // [max_steps] (Time limit truncation)
   u32 len;
-} RLTrajectory;
+} Episode;
 
 typedef struct {
-  RLTrajectory *trajectories;
+  Episode *trajectories;
   u32 count;
   u32 max_steps;
   u32 obs_dim;
-} RolloutBuffer;
+} Rollout;
 
 // Allocates a rollout buffer from the arena
-RolloutBuffer *rl_buffer_create(mem_arena *arena, u32 num_trajectories,
+Rollout *rollout_new(Arena *arena, u32 num_trajectories,
                                 u32 max_steps, u32 obs_dim);
 
 // Computes Generalized Advantage Estimation (GAE-Lambda) for a trajectory
-void rl_compute_gae(RLTrajectory *traj, real gamma, real lambda, real last_val);
+void gae_compute(Episode *traj, real gamma, real lambda, real last_val);
 
 // Trains an actor model on any Env using batched REINFORCE
-void rl_train_reinforce(Env *env, model_state *model, const RLConfig *config,
-                        mem_arena *train_arena);
+void train_reinforce(Env *env, Net *model, const TrainCfg *config,
+                        Arena *train_arena);
 
 // Trains an Actor-Critic model on any Env using Advantage Actor-Critic (A2C) with GAE
-void rl_train_a2c(Env *env, model_state *model, const RLConfig *config,
-                  mem_arena *train_arena);
+void train_a2c(Env *env, Net *model, const TrainCfg *config,
+                  Arena *train_arena);
 
 // Evaluates an actor model on an Env across a number of episodes. `greedy`
 // selects argmax actions; otherwise actions are sampled.
 // The seed-less variant derives per-episode seeds from `rng`; the seeded
 // variant uses the caller's seeds so different policies can be compared on
 // identical start states.
-RLEvalResult rl_evaluate(Env *env, model_state *model, prng_state *rng,
+EvalResult evaluate(Env *env, Net *model, Rng *rng,
                          u32 episodes, b32 greedy);
-RLEvalResult rl_evaluate_seeded(Env *env, model_state *model, const u64 *seeds,
+EvalResult evaluate_seeded(Env *env, Net *model, const u64 *seeds,
                                 u32 num_episodes, b32 greedy);
 
 #endif // RL_H

@@ -1,6 +1,6 @@
-#include "arena.h"
+#include "memory.h"
 #include "envs/snake.h"
-#include "nn.h"
+#include "layers.h"
 #include "rl.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -12,39 +12,39 @@ int main(int argc, char **argv) {
   printf("=== Training Snake (seed: %llu, epochs: %u) ===\n",
          (unsigned long long)seed, epochs);
 
-  mem_arena *arena = arena_create(GiB(1));
-  model_state *model = model_create(arena);
+  Arena *arena = arena_new(GiB(1));
+  Net *model = net_new(arena);
   Env *env = env_snake_create(arena, 36);
 
-  prng_state model_rng;
-  prng_seed_r(&model_rng, seed, 1);
+  Rng model_rng;
+  rng_seed(&model_rng, seed, 1);
 
   const u32 hidden_dims[] = {128, 128};
-  nn_build_discrete_actor(arena, model, &model_rng, env->obs_dim, hidden_dims, 2,
+  actor_build(arena, model, &model_rng, env->obs_dim, hidden_dims, 2,
                           env->act_dim, 32);
-  model->cost_graph = build_graph(arena, model, model->cost);
+  model->loss_plan = schedule_from(arena, model, model->cost);
 
-  RLConfig cfg = {
+  TrainCfg cfg = {
       .epochs = epochs,
       .rollout_size = 64,
       .max_steps = env->max_steps,
       .learning_rate = 0.001f,
       .gamma = 0.99f,
       .seed = seed,
-      .optim = OPTIM_ADAM,
+      .optim = OPT_ADAM,
       .max_grad_norm = 0.5f,
       .batch_size = 32,
   };
 
-  rl_train_reinforce(env, model, &cfg, arena);
+  train_reinforce(env, model, &cfg, arena);
 
-  prng_state eval_rng;
-  prng_seed_r(&eval_rng, seed + 1000, 1);
-  RLEvalResult res = rl_evaluate(env, model, &eval_rng, 100, true);
+  Rng eval_rng;
+  rng_seed(&eval_rng, seed + 1000, 1);
+  EvalResult res = evaluate(env, model, &eval_rng, 100, true);
   printf("\nFinal Evaluation (100 episodes):\n");
-  printf("  Mean Return: %.2f | Mean Steps: %.1f\n\n", res.mean_reward,
-         res.mean_steps);
+  printf("  Mean Return: %.2f | Mean Steps: %.1f\n\n", res.avg_return,
+         res.avg_steps);
 
-  arena_destroy(arena);
+  arena_dispose(arena);
   return 0;
 }

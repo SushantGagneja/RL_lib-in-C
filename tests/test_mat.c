@@ -1,9 +1,9 @@
 // test_mat.c — Unit tests for mat.c operations
 // Phase 0.2: Prove the math layer is correct.
-#include "arena.h"
+#include "memory.h"
 #include "base.h"
-#include "mat.h"
-#include "prng.h"
+#include "linalg.h"
+#include "random.h"
 
 #include <math.h>
 
@@ -25,7 +25,7 @@ static u32 tests_failed = 0;
 #define ASSERT_NEAR(a, b, tol, msg)                                            \
   ASSERT_TRUE(real_fabs((a) - (b)) < (tol), msg)
 
-// Naive triple-loop mat_matmul for reference (no transpose, always zeroes out).
+// Naive triple-loop mat_mm for reference (no transpose, always zeroes out).
 static void naive_matmul(real *out, const real *a, const real *b, u32 M, u32 K,
                          u32 N) {
   for (u32 i = 0; i < M; i++) {
@@ -41,21 +41,21 @@ static void naive_matmul(real *out, const real *a, const real *b, u32 M, u32 K,
 
 // ── Matmul tests ─────────────────────────────────────────────────────
 
-static void test_matmul_nn(mem_arena *arena) {
-  printf("  mat_matmul NN... ");
+static void test_matmul_nn(Arena *arena) {
+  printf("  mat_mm NN... ");
   // Non-square: (3x5) * (5x4) = (3x4)
-  matrix *a = mat_create(arena, 3, 5);
-  matrix *b = mat_create(arena, 5, 4);
-  matrix *out = mat_create(arena, 3, 4);
+  Mat *a = mat_new(arena, 3, 5);
+  Mat *b = mat_new(arena, 5, 4);
+  Mat *out = mat_new(arena, 3, 4);
 
-  prng_seed(42, 1);
-  mat_fill_rand(a, -1.0f, 1.0f);
-  mat_fill_rand(b, -1.0f, 1.0f);
+  rng_seed_g(42, 1);
+  mat_rand(a, -1.0f, 1.0f);
+  mat_rand(b, -1.0f, 1.0f);
 
   real ref[12];
   naive_matmul(ref, a->data, b->data, 3, 5, 4);
 
-  mat_matmul(out, a, b, 1, 0, 0);
+  mat_mm(out, a, b, 1, 0, 0);
 
   b32 ok = true;
   for (u32 i = 0; i < 12; i++) {
@@ -68,16 +68,16 @@ static void test_matmul_nn(mem_arena *arena) {
   printf("%s\n", ok ? "OK" : "FAIL");
 }
 
-static void test_matmul_nt(mem_arena *arena) {
-  printf("  mat_matmul NT... ");
+static void test_matmul_nt(Arena *arena) {
+  printf("  mat_mm NT... ");
   // A(3x5) * B^T where B is (4x5) → out(3x4)
-  matrix *a = mat_create(arena, 3, 5);
-  matrix *b = mat_create(arena, 4, 5); // will be transposed
-  matrix *out = mat_create(arena, 3, 4);
+  Mat *a = mat_new(arena, 3, 5);
+  Mat *b = mat_new(arena, 4, 5); // will be transposed
+  Mat *out = mat_new(arena, 3, 4);
 
-  prng_seed(100, 2);
-  mat_fill_rand(a, -1.0f, 1.0f);
-  mat_fill_rand(b, -1.0f, 1.0f);
+  rng_seed_g(100, 2);
+  mat_rand(a, -1.0f, 1.0f);
+  mat_rand(b, -1.0f, 1.0f);
 
   // Build explicit transpose of b for reference
   real bt[20]; // 5x4
@@ -88,7 +88,7 @@ static void test_matmul_nt(mem_arena *arena) {
   real ref[12];
   naive_matmul(ref, a->data, bt, 3, 5, 4);
 
-  mat_matmul(out, a, b, 1, 0, 1);
+  mat_mm(out, a, b, 1, 0, 1);
 
   b32 ok = true;
   for (u32 i = 0; i < 12; i++) {
@@ -101,16 +101,16 @@ static void test_matmul_nt(mem_arena *arena) {
   printf("%s\n", ok ? "OK" : "FAIL");
 }
 
-static void test_matmul_tn(mem_arena *arena) {
-  printf("  mat_matmul TN... ");
+static void test_matmul_tn(Arena *arena) {
+  printf("  mat_mm TN... ");
   // A^T where A is (5x3) → effective A^T(3x5) * B(5x4) = out(3x4)
-  matrix *a = mat_create(arena, 5, 3); // will be transposed
-  matrix *b = mat_create(arena, 5, 4);
-  matrix *out = mat_create(arena, 3, 4);
+  Mat *a = mat_new(arena, 5, 3); // will be transposed
+  Mat *b = mat_new(arena, 5, 4);
+  Mat *out = mat_new(arena, 3, 4);
 
-  prng_seed(200, 3);
-  mat_fill_rand(a, -1.0f, 1.0f);
-  mat_fill_rand(b, -1.0f, 1.0f);
+  rng_seed_g(200, 3);
+  mat_rand(a, -1.0f, 1.0f);
+  mat_rand(b, -1.0f, 1.0f);
 
   // Build explicit transpose of a for reference
   real at[15]; // 3x5
@@ -121,7 +121,7 @@ static void test_matmul_tn(mem_arena *arena) {
   real ref[12];
   naive_matmul(ref, at, b->data, 3, 5, 4);
 
-  mat_matmul(out, a, b, 1, 1, 0);
+  mat_mm(out, a, b, 1, 1, 0);
 
   b32 ok = true;
   for (u32 i = 0; i < 12; i++) {
@@ -134,16 +134,16 @@ static void test_matmul_tn(mem_arena *arena) {
   printf("%s\n", ok ? "OK" : "FAIL");
 }
 
-static void test_matmul_tt(mem_arena *arena) {
-  printf("  mat_matmul TT... ");
+static void test_matmul_tt(Arena *arena) {
+  printf("  mat_mm TT... ");
   // A^T where A is (5x3) and B^T where B is (4x5) → out(3x4)
-  matrix *a = mat_create(arena, 5, 3);
-  matrix *b = mat_create(arena, 4, 5);
-  matrix *out = mat_create(arena, 3, 4);
+  Mat *a = mat_new(arena, 5, 3);
+  Mat *b = mat_new(arena, 4, 5);
+  Mat *out = mat_new(arena, 3, 4);
 
-  prng_seed(300, 4);
-  mat_fill_rand(a, -1.0f, 1.0f);
-  mat_fill_rand(b, -1.0f, 1.0f);
+  rng_seed_g(300, 4);
+  mat_rand(a, -1.0f, 1.0f);
+  mat_rand(b, -1.0f, 1.0f);
 
   real at[15]; // 3x5
   for (u32 i = 0; i < 5; i++)
@@ -157,7 +157,7 @@ static void test_matmul_tt(mem_arena *arena) {
   real ref[12];
   naive_matmul(ref, at, bt, 3, 5, 4);
 
-  mat_matmul(out, a, b, 1, 1, 1);
+  mat_mm(out, a, b, 1, 1, 1);
 
   b32 ok = true;
   for (u32 i = 0; i < 12; i++) {
@@ -172,13 +172,13 @@ static void test_matmul_tt(mem_arena *arena) {
 
 // ── Softmax tests ────────────────────────────────────────────────────
 
-static void test_softmax_sums_to_one(mem_arena *arena) {
+static void test_softmax_sums_to_one(Arena *arena) {
   printf("  mat_softmax sums to 1... ");
-  matrix *in = mat_create(arena, 5, 1);
-  matrix *out = mat_create(arena, 5, 1);
+  Mat *in = mat_new(arena, 5, 1);
+  Mat *out = mat_new(arena, 5, 1);
 
-  prng_seed(500, 5);
-  mat_fill_rand(in, -3.0f, 3.0f);
+  rng_seed_g(500, 5);
+  mat_rand(in, -3.0f, 3.0f);
   mat_softmax(out, in);
 
   real sum = 0.0f;
@@ -189,13 +189,13 @@ static void test_softmax_sums_to_one(mem_arena *arena) {
   printf("%s\n", real_fabs(sum - 1.0f) < 1e-6f ? "OK" : "FAIL");
 }
 
-static void test_softmax_positive(mem_arena *arena) {
+static void test_softmax_positive(Arena *arena) {
   printf("  mat_softmax all positive... ");
-  matrix *in = mat_create(arena, 5, 1);
-  matrix *out = mat_create(arena, 5, 1);
+  Mat *in = mat_new(arena, 5, 1);
+  Mat *out = mat_new(arena, 5, 1);
 
-  prng_seed(600, 6);
-  mat_fill_rand(in, -10.0f, 10.0f);
+  rng_seed_g(600, 6);
+  mat_rand(in, -10.0f, 10.0f);
   mat_softmax(out, in);
 
   b32 ok = true;
@@ -209,10 +209,10 @@ static void test_softmax_positive(mem_arena *arena) {
   printf("%s\n", ok ? "OK" : "FAIL");
 }
 
-static void test_softmax_large_values(mem_arena *arena) {
+static void test_softmax_large_values(Arena *arena) {
   printf("  mat_softmax large values (no overflow)... ");
-  matrix *in = mat_create(arena, 3, 1);
-  matrix *out = mat_create(arena, 3, 1);
+  Mat *in = mat_new(arena, 3, 1);
+  Mat *out = mat_new(arena, 3, 1);
 
   in->data[0] = 1000.0f;
   in->data[1] = 1001.0f;
@@ -228,10 +228,10 @@ static void test_softmax_large_values(mem_arena *arena) {
 
 // ── ReLU tests ───────────────────────────────────────────────────────
 
-static void test_relu(mem_arena *arena) {
+static void test_relu(Arena *arena) {
   printf("  mat_relu... ");
-  matrix *in = mat_create(arena, 4, 1);
-  matrix *out = mat_create(arena, 4, 1);
+  Mat *in = mat_new(arena, 4, 1);
+  Mat *out = mat_new(arena, 4, 1);
 
   in->data[0] = -2.0f;
   in->data[1] = 0.0f;
@@ -248,12 +248,12 @@ static void test_relu(mem_arena *arena) {
 
 // ── Add / Sub tests ──────────────────────────────────────────────────
 
-static void test_add_sub(mem_arena *arena) {
+static void test_add_sub(Arena *arena) {
   printf("  mat_add/mat_sub... ");
-  matrix *a = mat_create(arena, 3, 2);
-  matrix *b = mat_create(arena, 3, 2);
-  matrix *sum_out = mat_create(arena, 3, 2);
-  matrix *sub_out = mat_create(arena, 3, 2);
+  Mat *a = mat_new(arena, 3, 2);
+  Mat *b = mat_new(arena, 3, 2);
+  Mat *sum_out = mat_new(arena, 3, 2);
+  Mat *sub_out = mat_new(arena, 3, 2);
 
   for (u32 i = 0; i < 6; i++) {
     a->data[i] = (real)i;
@@ -274,13 +274,13 @@ static void test_add_sub(mem_arena *arena) {
   printf("%s\n", ok ? "OK" : "FAIL");
 }
 
-static void test_softmax_per_column(mem_arena *arena) {
-  printf("  mat_softmax per-column (4x3 matrix)... ");
-  matrix *in = mat_create(arena, 4, 3);
-  matrix *out = mat_create(arena, 4, 3);
+static void test_softmax_per_column(Arena *arena) {
+  printf("  mat_softmax per-column (4x3 Mat)... ");
+  Mat *in = mat_new(arena, 4, 3);
+  Mat *out = mat_new(arena, 4, 3);
 
-  prng_seed(777, 8);
-  mat_fill_rand(in, -5.0f, 5.0f);
+  rng_seed_g(777, 8);
+  mat_rand(in, -5.0f, 5.0f);
   mat_softmax(out, in);
 
   b32 ok = true;
@@ -298,11 +298,11 @@ static void test_softmax_per_column(mem_arena *arena) {
   printf("%s\n", ok ? "OK" : "FAIL");
 }
 
-static void test_broadcast_add(mem_arena *arena) {
+static void test_broadcast_add(Arena *arena) {
   printf("  broadcast mat_add A(3x4) + b(3x1)... ");
-  matrix *a = mat_create(arena, 3, 4);
-  matrix *b = mat_create(arena, 3, 1);
-  matrix *out = mat_create(arena, 3, 4);
+  Mat *a = mat_new(arena, 3, 4);
+  Mat *b = mat_new(arena, 3, 1);
+  Mat *out = mat_new(arena, 3, 4);
 
   for (u32 i = 0; i < 12; i++) a->data[i] = (real)i;
   b->data[0] = 10.0f;
@@ -325,13 +325,13 @@ static void test_broadcast_add(mem_arena *arena) {
   printf("%s\n", ok ? "OK" : "FAIL");
 }
 
-static void test_mul_tanh_mse(mem_arena *arena) {
+static void test_mul_tanh_mse(Arena *arena) {
   printf("  mat_mul, tanh, mse... ");
-  matrix *a = mat_create(arena, 2, 2);
-  matrix *b = mat_create(arena, 2, 2);
-  matrix *mul_out = mat_create(arena, 2, 2);
-  matrix *tanh_out = mat_create(arena, 2, 2);
-  matrix *mse_out = mat_create(arena, 1, 1);
+  Mat *a = mat_new(arena, 2, 2);
+  Mat *b = mat_new(arena, 2, 2);
+  Mat *mul_out = mat_new(arena, 2, 2);
+  Mat *tanh_out = mat_new(arena, 2, 2);
+  Mat *mse_out = mat_new(arena, 1, 1);
 
   a->data[0] = 2.0f; a->data[1] = -3.0f; a->data[2] = 0.5f; a->data[3] = 4.0f;
   b->data[0] = 3.0f; b->data[1] = 2.0f;  b->data[2] = 4.0f; b->data[3] = -1.0f;
@@ -355,11 +355,11 @@ static void test_mul_tanh_mse(mem_arena *arena) {
 // ── Main ─────────────────────────────────────────────────────────────
 
 int main(void) {
-  mem_arena *arena = arena_create(MiB(16));
-  CRL_ASSERT(arena != NULL, "arena_create failed");
+  Arena *arena = arena_new(MiB(16));
+  CRL_ASSERT(arena != NULL, "arena_new failed");
 
   printf("\n=== mat.c unit tests ===\n\n");
-  printf("[mat_matmul variants]\n");
+  printf("[mat_mm variants]\n");
   test_matmul_nn(arena);
   test_matmul_nt(arena);
   test_matmul_tn(arena);
@@ -379,6 +379,6 @@ int main(void) {
 
   printf("\n---\nPassed: %u  Failed: %u\n\n", tests_passed, tests_failed);
 
-  arena_destroy(arena);
+  arena_dispose(arena);
   return tests_failed > 0 ? 1 : 0;
 }

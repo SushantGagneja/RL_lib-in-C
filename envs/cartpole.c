@@ -8,7 +8,7 @@ typedef struct {
   real theta;
   real theta_dot;
   u32 steps;
-  prng_state rng; // owned by the environment, seeded in reset()
+  Rng rng; // owned by the environment, seeded in reset()
 } CartPoleState;
 
 static const real GRAVITY = 9.8f;
@@ -23,11 +23,11 @@ static const u32 MAX_STEPS = 500;
 
 static void cartpole_reset(Env *e, u64 seed) {
   CartPoleState *s = (CartPoleState *)e->state;
-  prng_seed_r(&s->rng, seed, 1);
-  s->x = (prng_randf_r(&s->rng) * 0.1f) - 0.05f;
-  s->x_dot = (prng_randf_r(&s->rng) * 0.1f) - 0.05f;
-  s->theta = (prng_randf_r(&s->rng) * 0.1f) - 0.05f;
-  s->theta_dot = (prng_randf_r(&s->rng) * 0.1f) - 0.05f;
+  rng_seed(&s->rng, seed, 1);
+  s->x = (rng_unit(&s->rng) * 0.1f) - 0.05f;
+  s->x_dot = (rng_unit(&s->rng) * 0.1f) - 0.05f;
+  s->theta = (rng_unit(&s->rng) * 0.1f) - 0.05f;
+  s->theta_dot = (rng_unit(&s->rng) * 0.1f) - 0.05f;
   s->steps = 0;
 }
 
@@ -71,9 +71,9 @@ static void cartpole_destroy(Env *e) {
   // Allocated on arena; no-op
 }
 
-Env *env_cartpole_create(mem_arena *arena) {
-  Env *env = PUSH_STRUCT(arena, Env);
-  CartPoleState *s = PUSH_STRUCT(arena, CartPoleState);
+Env *env_cartpole_create(Arena *arena) {
+  Env *env = ARENA_OBJ(arena, Env);
+  CartPoleState *s = ARENA_OBJ(arena, CartPoleState);
 
   env->obs_dim = 4;
   env->act_dim = 2;

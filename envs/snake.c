@@ -33,13 +33,13 @@ typedef struct {
   u32 foods_eaten;
   b32 won;
 
-  prng_state rng; // owned by the environment, seeded in reset()
+  Rng rng; // owned by the environment, seeded in reset()
 } SnakeState;
 
-static SnakePos random_food_pos(prng_state *rng, u32 cols, u32 rows) {
+static SnakePos random_food_pos(Rng *rng, u32 cols, u32 rows) {
   return (SnakePos){
-      .x = (i32)prng_range_r(rng, cols),
-      .y = (i32)prng_range_r(rng, rows),
+      .x = (i32)rng_below(rng, cols),
+      .y = (i32)rng_below(rng, rows),
   };
 }
 
@@ -62,7 +62,7 @@ static void respawn_food(SnakeState *s) {
 
 static void snake_reset(Env *e, u64 seed) {
   SnakeState *s = (SnakeState *)e->state;
-  prng_seed_r(&s->rng, seed, 1);
+  rng_seed(&s->rng, seed, 1);
 
   s->body_len = 1;
   s->body[0] = (SnakePos){.x = (i32)(s->cols / 2), .y = (i32)(s->rows / 2)};
@@ -191,7 +191,7 @@ void snake_test_set_food(Env *e, i32 x, i32 y) {
   s->food = (SnakePos){.x = x, .y = y};
 }
 
-Env *env_snake_create(mem_arena *arena, u32 grid_size) {
+Env *env_snake_create(Arena *arena, u32 grid_size) {
   if (grid_size == 0 || grid_size > MAX_SNAKE_LEN) {
     return NULL;
   }
@@ -201,15 +201,15 @@ Env *env_snake_create(mem_arena *arena, u32 grid_size) {
     return NULL;
   }
 
-  Env *env = PUSH_STRUCT(arena, Env);
-  SnakeState *s = PUSH_STRUCT(arena, SnakeState);
+  Env *env = ARENA_OBJ(arena, Env);
+  SnakeState *s = ARENA_OBJ(arena, SnakeState);
 
   s->rows = side;
   s->cols = side;
   s->grid_size = grid_size;
   s->max_steps = 100;
   s->body_len = 1;
-  prng_seed_r(&s->rng, 0, 1);
+  rng_seed(&s->rng, 0, 1);
 
   env->obs_dim = 3 * grid_size;
   env->act_dim = 4;

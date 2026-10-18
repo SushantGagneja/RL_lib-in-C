@@ -1,9 +1,9 @@
 // test_envs.c — Unit tests for CartPole and Snake environments
-#include "arena.h"
+#include "memory.h"
 #include "base.h"
 #include "envs/cartpole.h"
 #include "envs/snake.h"
-#include "prng.h"
+#include "random.h"
 #include <math.h>
 #include <stdio.h>
 
@@ -20,7 +20,7 @@ static u32 tests_failed = 0;
     }                                                                          \
   } while (0)
 
-static void test_cartpole_reset_and_bounds(mem_arena *arena) {
+static void test_cartpole_reset_and_bounds(Arena *arena) {
   printf("  cartpole reset & bounds... ");
   Env *env = env_cartpole_create(arena);
   ASSERT_TRUE(env != NULL, "env create");
@@ -47,7 +47,7 @@ static void test_cartpole_reset_and_bounds(mem_arena *arena) {
   printf("OK\n");
 }
 
-static void test_cartpole_determinism(mem_arena *arena) {
+static void test_cartpole_determinism(Arena *arena) {
   printf("  cartpole same seed gives same trajectory... ");
   Env *a = env_cartpole_create(arena);
   Env *b = env_cartpole_create(arena);
@@ -72,7 +72,7 @@ static void test_cartpole_determinism(mem_arena *arena) {
   printf("OK\n");
 }
 
-static void test_cartpole_termination(mem_arena *arena) {
+static void test_cartpole_termination(Arena *arena) {
   printf("  cartpole termination on fall... ");
   Env *env = env_cartpole_create(arena);
   env->reset(env, 42);
@@ -88,7 +88,7 @@ static void test_cartpole_termination(mem_arena *arena) {
   printf("OK\n");
 }
 
-static void test_snake_reset_and_step(mem_arena *arena) {
+static void test_snake_reset_and_step(Arena *arena) {
   printf("  snake reset & observation... ");
   Env *env = env_snake_create(arena, 36);
   ASSERT_TRUE(env != NULL, "snake create");
@@ -120,7 +120,7 @@ static void test_snake_reset_and_step(mem_arena *arena) {
   printf("OK\n");
 }
 
-static void test_snake_grid_validation(mem_arena *arena) {
+static void test_snake_grid_validation(Arena *arena) {
   printf("  snake grid validation... ");
   // Not a perfect square.
   ASSERT_TRUE(env_snake_create(arena, 35) == NULL, "non-square grid rejected");
@@ -131,7 +131,7 @@ static void test_snake_grid_validation(mem_arena *arena) {
   printf("OK\n");
 }
 
-static void test_snake_wall_death(mem_arena *arena) {
+static void test_snake_wall_death(Arena *arena) {
   printf("  snake wall collision... ");
   Env *env = env_snake_create(arena, 36);
   env->reset(env, 555);
@@ -150,7 +150,7 @@ static void test_snake_wall_death(mem_arena *arena) {
   printf("OK\n");
 }
 
-static void test_snake_self_collision(mem_arena *arena) {
+static void test_snake_self_collision(Arena *arena) {
   printf("  snake self-collision... ");
   Env *env = env_snake_create(arena, 36);
   env->reset(env, 101);
@@ -172,7 +172,7 @@ static void test_snake_self_collision(mem_arena *arena) {
   printf("OK\n");
 }
 
-static void test_snake_tail_vacate(mem_arena *arena) {
+static void test_snake_tail_vacate(Arena *arena) {
   printf("  snake can follow its own tail... ");
   Env *env = env_snake_create(arena, 36);
   env->reset(env, 202);
@@ -191,7 +191,7 @@ static void test_snake_tail_vacate(mem_arena *arena) {
   printf("OK\n");
 }
 
-static void test_snake_eat_grows(mem_arena *arena) {
+static void test_snake_eat_grows(Arena *arena) {
   printf("  snake eating grows and respawns food... ");
   Env *env = env_snake_create(arena, 36);
   env->reset(env, 303);
@@ -225,7 +225,7 @@ static void test_snake_eat_grows(mem_arena *arena) {
 }
 
 int main(void) {
-  mem_arena *arena = arena_create(MiB(16));
+  Arena *arena = arena_new(MiB(16));
   printf("\n=== Environment Interface Unit Tests ===\n\n");
 
   test_cartpole_reset_and_bounds(arena);
@@ -239,6 +239,6 @@ int main(void) {
   test_snake_eat_grows(arena);
 
   printf("\n---\nPassed: %u  Failed: %u\n\n", tests_passed, tests_failed);
-  arena_destroy(arena);
+  arena_dispose(arena);
   return tests_failed > 0 ? 1 : 0;
 }

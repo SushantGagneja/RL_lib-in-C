@@ -2,7 +2,7 @@
 #define ENV_H
 
 #include "base.h"
-#include "prng.h"
+#include "random.h"
 
 // Unified RL Environment Interface.
 // Supports discrete action environments with separate done (terminal) and

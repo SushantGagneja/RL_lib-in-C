@@ -1,36 +1,35 @@
 #ifndef OPTIM_H
 #define OPTIM_H
 
-#include "arena.h"
-#include "autograd.h"
+#include "memory.h"
+#include "graph.h"
 
 typedef struct {
   real lr;
   real beta1;
   real beta2;
   real eps;
-  u64 t;
-  real **m; // 1st moment vector per parameter
-  real **v; // 2nd moment vector per parameter
-  u32 num_params;
-} AdamOptim;
+  u64 step;
+  real **m1; // first moment, one buffer per parameter
+  real **m2; // second moment, one buffer per parameter
+  u32 n_params;
+} Adam;
 
-// Clears gradients for all registered parameters in the model state.
-void optim_zero_grad(model_state *model);
+// Zeroes every registered parameter gradient.
+void zero_grad(Net *model);
 
-// Applies an SGD parameter update: p->val -= (lr * grad_scale) * p->grad
-void optim_sgd_step(model_state *model, real lr, real grad_scale);
+// SGD update: p->val -= (lr * grad_scale) * p->grad
+void sgd_step(Net *model, real lr, real grad_scale);
 
-// Creates an Adam optimizer state with m and v vectors allocated from arena.
-// Default hyperparameters: beta1=0.9, beta2=0.999, eps=1e-8.
-AdamOptim *optim_adam_create(mem_arena *arena, model_state *model, real lr);
+// Allocates Adam state (m1/m2 buffers) from the arena.
+// Defaults: beta1 = 0.9, beta2 = 0.999, eps = 1e-8.
+Adam *adam_new(Arena *arena, Net *model, real lr);
 
-// Applies an Adam optimizer step with bias corrections across all model parameters.
-void optim_adam_step(AdamOptim *adam, model_state *model);
+// One Adam step with bias correction over every parameter.
+void adam_step(Adam *adam, Net *model);
 
-// Clips the global norm of all parameter gradients:
-// If norm > max_norm, scales all parameter gradients by max_norm / norm.
-// Returns the computed pre-clipping global norm.
-real optim_clip_grad_norm(model_state *model, real max_norm);
+// Clips the global gradient norm to max_norm (scaling every parameter gradient
+// by max_norm / norm when exceeded). Returns the pre-clipping norm.
+real clip_grad_norm(Net *model, real max_norm);
 
 #endif // OPTIM_H

@@ -10,45 +10,42 @@ flatter the algorithms.
 
 ---
 
-## License status — read this first
+## License
 
-> **This repository has no LICENSE file and cannot be redistributed yet.**
->
-> The core autograd engine, arena allocator, matrix layout, and computation
-> graph are derived from **[harshbhatt7585/cRL](https://github.com/harshbhatt7585/cRL)**
-> by Harsh Bhatt. That upstream repository does not include an explicit license,
-> which by default means all rights reserved. A derivative work cannot be
-> licensed by us until the upstream author grants permission or the derived
-> parts are rewritten. Public credit does not change this.
->
-> The bundled PCG32 random number generator (`src/prng.c`) is Apache-2.0; its
-> license text and NOTICE should ship with the code once the licensing question
-> above is resolved.
->
-> Treat this as source-available study material, not as a licensed library.
+**No `LICENSE` file is included yet — add one before publishing or
+redistributing.**
 
-Everything else in this fork — the `include/` + `src/` split, seeded PRNG,
-numerical gradient checking, batched training, the CartPole and Snake
-environments, the fused policy loss, GAE/A2C, and the benchmark harness — was
-added here.
+The engine here is an original implementation written for this project:
+
+- the arena allocator (`memory.c`),
+- the row-major linear algebra (`linalg.c`), and
+- the reverse-mode autograd graph (`graph.c`),
+
+are new code. The pseudo-random number generator is **xoshiro256\*\*** with
+SplitMix64 seeding (public domain / CC0). There is no bundled third-party code,
+so there is nothing to attribute and no external license to carry.
+
+Pick and add a license (MIT and Apache-2.0 are both fine for a library like
+this) before distributing.
 
 ---
 
 ## Features
 
 - **Reverse-mode autograd engine**
-  - Static computation graph with vtable-style operators (`VarType`).
-  - Ops: MatMul (NN/NT/TN/TT), ReLU, Tanh, numerically stable per-column
-    Softmax, elementwise Mul, Add, Sub, MSE, REINFORCE loss, and a fused policy
-    cross-entropy loss with a mean-entropy bonus.
-  - Gradient accumulation across minibatches; `build_graph_multi` for models
-    with more than one output (e.g. actor-critic).
+  - Static computation graph; every node carries an operation tag, and forward
+    and backward are interpreted by one `switch` dispatch (no vtable).
+  - Ops: matrix multiply (NN/NT/TN/TT), ReLU, Tanh, numerically stable
+    per-column Softmax, elementwise Mul, Add, Sub, MSE, REINFORCE loss, and a
+    fused policy cross-entropy loss with a mean-entropy bonus.
+  - Gradient accumulation across minibatches; `schedule_from_roots` builds a
+    graph for models with more than one output (e.g. actor-critic).
 - **Arena allocator** — 64-byte aligned bump allocator for graph nodes,
   matrices, parameters, and rollout buffers. A handful of small scratch buffers
   use `malloc`.
-- **Seeded PCG32 PRNG** — deterministic seeding with isolated `prng_state`
-  per environment, weight initializer, and trainer.
-- **Discrete actor / actor-critic builders** with a shared `Linear` struct and
+- **Seeded xoshiro256\*\* PRNG** (SplitMix64 seeding, public domain) — isolated
+  `Rng` state per environment, weight initializer, and trainer.
+- **Discrete actor / actor-critic builders** with a shared `Dense` struct and
   He-uniform initialization (tiny-gain policy head).
 - **Optimizers** — SGD and Adam with bias correction and global gradient-norm
   clipping (with a non-finite guard).
@@ -106,7 +103,7 @@ baseline, the honest conclusion is that this Snake setup is not solved.
 |---|---|
 | CartPole `step()` | ≈ 25 M steps/sec |
 | Snake `step()` | ≈ 94 M steps/sec |
-| `mat_matmul` 256×256 (NN kernel) | ≈ 16.3 GFLOPS |
+| `mat_mm` 256×256 (NN kernel) | ≈ 16.3 GFLOPS |
 | Naive triple-loop 256×256 | ≈ 1.67 GFLOPS |
 
 The SIMD-friendly thing to notice is that the kernel is ~10× a naive loop but
@@ -181,20 +178,20 @@ Tests: 23 passed, 0 failed
 .
 ├── include/
 │   ├── base.h               # Primitive types, real/f32/f64, CRL_ASSERT/CRL_CHECK
-│   ├── arena.h              # 64-byte aligned bump allocator + temp scopes
-│   ├── prng.h               # PCG32 PRNG
-│   ├── mat.h                # Matrix type, linear algebra, mat_* API
-│   ├── autograd.h           # Computation graph, Var nodes, reverse-mode AD
-│   ├── nn.h                 # Linear layer, MLP, discrete actor, actor-critic
+│   ├── memory.h             # 64-byte aligned bump allocator + temp scopes
+│   ├── random.h             # xoshiro256** PRNG
+│   ├── linalg.h             # Matrix type, linear algebra, mat_* API
+│   ├── graph.h              # Computation graph, Tensor nodes, reverse-mode AD
+│   ├── layers.h             # Dense layer, MLP, discrete actor, actor-critic
 │   ├── optim.h              # SGD, Adam, gradient clipping
 │   ├── env.h                # Env interface (reset(seed), step, observe)
 │   └── rl.h                 # Rollout buffer, REINFORCE, A2C, GAE, evaluation
 ├── src/
-│   ├── arena.c
-│   ├── prng.c
-│   ├── mat.c                # Matrix kernels and math ops
-│   ├── autograd.c           # Reverse-mode AD engine + node implementations
-│   ├── nn.c                 # Builders and initialization
+│   ├── memory.c
+│   ├── random.c
+│   ├── linalg.c             # Matrix kernels and math ops
+│   ├── graph.c              # Reverse-mode AD engine + op interpreter
+│   ├── layers.c             # Builders and initialization
 │   ├── optim.c              # Parameter updates
 │   └── rl.c                 # Rollout, REINFORCE, A2C/GAE, evaluation
 ├── envs/
@@ -222,8 +219,7 @@ Tests: 23 passed, 0 failed
 
 ## Known limitations
 
-- **License unresolved** (see the top of this file). This is the one item with
-  real-world consequences.
+- **No `LICENSE` yet.** Add one before distributing (see the top of this file).
 - **Performance is modest and honest.** MatMul is a scalar triple loop
   (~16 GFLOPS at 256×256, ~10× a naive loop); there is no SIMD, no threading,
   and no vectorized environments. "High-performance" is not claimed.
@@ -235,12 +231,12 @@ Tests: 23 passed, 0 failed
   library to f64 with `-DCRL_USE_DOUBLE`; the gradient check uses this. The
   training pipeline is only exercised in f32.
 - **Snake is not solved.** REINFORCE + Adam plateaus well below a BFS planner.
-- **Fixed capacity limits.** `MODEL_MAX_PARAMS` is 128 and `VAR_MAX_INPUTS` is
-  2; exceeding them aborts. The arena is bump-only (no reuse within a run
-  except the `arena_pos`/`arena_pop_to` temp scopes).
+- **Fixed capacity limits.** `MAX_PARAMS` is 128 and `MAX_ARITY` is 2;
+  exceeding them aborts. The arena is bump-only (no reuse within a run except
+  the `arena_mark`/`arena_rewind` temp scopes).
 - **One graph per batch size.** Inference (B=1) and batched training are
   separate graphs sharing parameter pointers; the batch size is frozen at build
-  time. `RLConfig.batch_size` is asserted against the graph, not used to resize
+  time. `TrainCfg.batch_size` is asserted against the graph, not used to resize
   it.
 - **A few small heap allocations** remain (shuffle scratch, evaluation buffers,
   entropy scratch) alongside the arena.
@@ -263,7 +259,7 @@ Tests: 23 passed, 0 failed
         MSE, fused policy loss, entropy), Adam with clipping.
 - [x] **Phase 3: Batching & Snake overhaul**
   - [x] Batched GEMM training, Snake 3-channel observation, per-env RNG,
-        `done` vs `truncated`, `backward_pass_from` seeding, benchmark harness.
+        `done` vs `truncated`, `schedule_grad_from` seeding, benchmark harness.
 - [x] **Phase 4: Advanced RL algorithms**
   - [x] GAE-λ, actor-critic builder, A2C trainer. Verified by
         `tests/test_rl.c` (builds, one update, value-head loss decreases) and
