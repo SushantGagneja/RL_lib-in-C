@@ -7,8 +7,12 @@ WARN += -Werror
 endif
 # Extra flags for ad-hoc configurations, e.g.
 #   make EXTRA_CFLAGS=-DRL_SIMD_BACKEND=0 test
+#   make EXTRA_CFLAGS=-DRL_LIB_NO_THREADS THREAD_FLAGS= test   (no pthreads)
 EXTRA_CFLAGS ?=
-CFLAGS = $(WARN) -Iinclude -I. $(EXTRA_CFLAGS)
+# The library uses POSIX threads for the optional threaded VecEnv; every target
+# links with it, so the flag lives here where the link rules can see it.
+THREAD_FLAGS ?= -pthread
+CFLAGS = $(WARN) -Iinclude -I. $(THREAD_FLAGS) $(EXTRA_CFLAGS)
 
 LIB_SRCS = src/memory.c src/random.c src/simd.c src/linalg.c src/graph.c src/layers.c src/optim.c src/checkpoint.c src/rl.c src/vecenv.c envs/snake.c envs/cartpole.c envs/pendulum.c
 LIB_OBJS = $(LIB_SRCS:.c=.o)

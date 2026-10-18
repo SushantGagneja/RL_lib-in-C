@@ -684,6 +684,68 @@ static void test_ppo_continuous_determinism(void) {
   printf("OK\n");
 }
 
+// ── Threaded rollout collection does not change training ─────────────
+
+// The threaded VecEnv is a scheduling choice, not a numerical one: the
+// trajectories are the same, so training from the same seed reaches the same
+// weights with 4 worker threads as with none. Checked for both trainers.
+static void test_threaded_training_determinism(void) {
+  printf("  threaded rollouts => identical weights... ");
+  real checksum[2][2]; // [trainer][thread setting]
+
+  for (u32 kind = 0; kind < 2; kind++) {
+    for (u32 mode = 0; mode < 2; mode++) {
+      Arena *arena = arena_new(GiB(1));
+      Net *model = net_new(arena);
+      Env *env =
+          kind == 0 ? env_cartpole_create(arena) : env_pendulum_create(arena);
+      Rng rng;
+      rng_seed(&rng, 1234, 1);
+
+      if (kind == 0) {
+        actor_critic_build(arena, model, &rng, env->obs_dim, (u32[]){32, 32}, 2,
+                           env->act_dim, 32);
+      } else {
+        continuous_actor_critic_build(arena, model, &rng, env->obs_dim,
+                                      (u32[]){32, 32}, 2, env->act_dim, 32,
+                                      -1.0f);
+      }
+
+      TrainCfg cfg = {
+          .epochs = 8,
+          .rollout_size = 64,
+          .max_steps = env->max_steps,
+          .learning_rate = 3e-4f,
+          .gamma = kind == 0 ? 0.99f : 0.9f,
+          .lambda = 0.95f,
+          .vf_coef = 0.5f,
+          .entropy_coef = kind == 0 ? 0.01f : 0.0f,
+          .seed = 1234,
+          .optim = OPT_ADAM,
+          .max_grad_norm = 0.5f,
+          .batch_size = 32,
+          .num_envs = 4,
+          .ppo_epochs = 4,
+          .ppo_clip = 0.2f,
+          .num_threads = mode == 0 ? 0 : 4,
+      };
+      if (kind == 0) {
+        train_ppo(env, model, &cfg, arena);
+      } else {
+        train_ppo_continuous(env, model, &cfg, arena);
+      }
+
+      checksum[kind][mode] = param_checksum(model);
+      arena_dispose(arena);
+    }
+    printf("\n    [%s] %.6f vs %.6f", kind == 0 ? "discrete" : "continuous",
+           checksum[kind][0], checksum[kind][1]);
+    ASSERT_TRUE(checksum[kind][0] == checksum[kind][1],
+                "threads changed the trained weights");
+  }
+  printf(" OK\n");
+}
+
 // ── Parameter registry is not capped at a fixed count ────────────────
 
 static void test_param_registry_growth(void) {
@@ -873,6 +935,7 @@ int main(void) {
   test_ppo_continuous_determinism();
   test_determinism();
   test_ppo_determinism();
+  test_threaded_training_determinism();
   test_param_registry_growth();
   test_batch_size_rebuild();
 

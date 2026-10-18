@@ -610,6 +610,7 @@ void train_ppo(Env *env, Net *model, const TrainCfg *config,
   const u64 seed = config->seed != 0 ? config->seed : 42;
   VecEnv *vec = vecenv_new(train_arena, env, num_envs);
   vecenv_reset(vec, seed);
+  vecenv_set_threads(train_arena, vec, config->num_threads);
 
   Rng rng;
   rng_seed(&rng, seed, 1);
@@ -826,6 +827,8 @@ void train_ppo(Env *env, Net *model, const TrainCfg *config,
              (unsigned long long)episode_count, total);
     }
   }
+
+  vecenv_shutdown(vec);
 }
 
 EvalResult evaluate_seeded(Env *env, Net *model, const u64 *seeds,
@@ -963,6 +966,7 @@ void train_ppo_continuous(Env *env, Net *model, const TrainCfg *config,
   const u64 seed = config->seed != 0 ? config->seed : 42;
   VecEnv *vec = vecenv_new(train_arena, env, num_envs);
   vecenv_reset(vec, seed);
+  vecenv_set_threads(train_arena, vec, config->num_threads);
 
   Rng rng;
   rng_seed(&rng, seed, 1);
@@ -1196,6 +1200,8 @@ void train_ppo_continuous(Env *env, Net *model, const TrainCfg *config,
              (unsigned long long)episode_count, total);
     }
   }
+
+  vecenv_shutdown(vec);
 }
 
 EvalResult evaluate_continuous_seeded(Env *env, Net *model, const u64 *seeds,

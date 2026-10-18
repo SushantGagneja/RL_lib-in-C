@@ -15,16 +15,21 @@
 // watch is the mean episode return, which should climb from around -1000 to a
 // few hundred below zero and stay there.
 //
-//   ./train_ppo_continuous [seed] [updates]
+//   ./train_ppo_continuous [seed] [updates] [threads]
 //
 // The defaults (seed 42, 1200 updates) reproduce the numbers in the README:
-// -185.15 greedy after training, from -1200 or so at update 0.
+// -182.64 greedy after training, from -1200 or so at update 0. `threads` spreads
+// the per-env stepping of the rollout over worker threads (0 = serial, the
+// default); it cannot change the result, only the wall time — and on a cheap env
+// like this one it is slower, see the README's limitations.
 int main(int argc, char **argv) {
   const u64 seed = (argc > 1) ? (u64)strtoull(argv[1], NULL, 10) : 42;
   const u32 updates = (argc > 2) ? (u32)atoi(argv[2]) : 1200;
+  const u32 threads = (argc > 3) ? (u32)atoi(argv[3]) : 0;
 
-  printf("=== Continuous PPO on Pendulum-v1 (seed: %llu, updates: %u) ===\n",
-         (unsigned long long)seed, updates);
+  printf("=== Continuous PPO on Pendulum-v1 (seed: %llu, updates: %u, "
+         "threads: %u) ===\n",
+         (unsigned long long)seed, updates, threads);
 
   Arena *arena = arena_new(GiB(1));
   Net *model = net_new(arena);
@@ -64,6 +69,7 @@ int main(int argc, char **argv) {
       .batch_size = batch_size,
       // PPO-only: 8 parallel envs, 5 passes per rollout, clip range 0.2.
       .num_envs = 8,
+      .num_threads = threads,
       .ppo_epochs = 5,
       .ppo_clip = 0.2f,
   };

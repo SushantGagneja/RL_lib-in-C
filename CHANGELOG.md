@@ -135,16 +135,32 @@ independently reimplemented, and carried through the Phase 0–5 roadmap.
   smoke test, a checkpoint round trip, and `make ppo-continuous`.
 - `make ppo`, `make ppo-continuous`, `EXTRA_CFLAGS` Makefile support, and a
   scalar-backend CI job.
+- **Threaded `VecEnv`** (`vecenv_set_threads`, `vecenv_threads`,
+  `vecenv_shutdown`, `TrainCfg.num_threads`): a reusable worker pool spreads the
+  per-env steps over threads and the calling thread does a slice too. The
+  synchronisation is a barrier built from a mutex and a condition variable,
+  because `pthread_barrier_t` is optional in POSIX and absent on macOS; the pool
+  is sized for the workers that actually started, so a failed spawn degrades to
+  fewer threads instead of deadlocking on a barrier nobody reaches. Stepping is
+  bit-identical to the serial path — `tests/test_envs.c` compares every buffer
+  for 260 steps on CartPole and Pendulum, `tests/test_rl.c` compares the trained
+  weights — and it is visible end to end (`./train_ppo_continuous 42 1200 8`).
+  `-pthread` is now part of the build, `THREAD_FLAGS=` plus
+  `-DRL_LIB_NO_THREADS` removes it, and `rl_lib.pc` carries the flag.
 - `make gradcheck-double`: builds the library in f64 (`-DRL_LIB_USE_DOUBLE`, the
   `real` scalar typedef) so the gradient check runs with `h = 1e-5` and a
   `1e-6` tolerance. Input/activation gradients and an elementwise `mul` with
   both operands requiring grad are checked too.
-- `tests/test_rl.c` (71 checks): GAE against a hand-computed trajectory, a single
+- `tests/test_rl.c` (73 checks): GAE against a hand-computed trajectory, a single
   Adam step, gradient-norm clipping, actor-critic and continuous actor-critic
   construction, value-head learning, batched-vs-per-sample gradient equivalence,
   a parameter registry grown past 128 entries, rebuilding the batched graph for a
   new minibatch size, CartPole learning smoke tests for REINFORCE and PPO with
-  same-seed determinism, and a Pendulum continuous-PPO learning smoke test.
+  same-seed determinism, a Pendulum continuous-PPO learning smoke test, and
+  threaded rollouts reaching bit-identical weights in both trainers.
+- `tests/test_envs.c` (191 checks) grew threaded-vs-serial stepping, compared
+  field by field over 260 steps for a discrete and a continuous vecenv of 7 envs
+  on 3 threads.
 - `make asan` (ASAN + UBSAN) and a GitHub Actions workflow running `make test`
   with warnings as errors on gcc/clang/macOS, plus the sanitizer target.
 - `examples/train_a2c.c` and `examples/train_ppo.c`.

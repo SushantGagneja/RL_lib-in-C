@@ -31,6 +31,10 @@ typedef struct {
   u32 num_envs;     // parallel envs stepped per update (0 => 1)
   u32 ppo_epochs;   // inner optimisation passes over a rollout (0 => 10)
   real ppo_clip;    // PPO clip epsilon (<= 0 => 0.2)
+  // Worker threads used to step those envs (0 or 1 => serial, the default). It
+  // never changes the trajectories, only how fast they are produced, and it only
+  // pays off when one env step is more expensive than a barrier round-trip.
+  u32 num_threads;
 } TrainCfg;
 
 // Evaluation metrics

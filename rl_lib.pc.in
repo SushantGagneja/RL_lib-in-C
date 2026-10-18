@@ -7,4 +7,4 @@ Name: RL_lib-in-C
 Description: Compact reverse-mode autograd, neural network and reinforcement learning library in C
 Version: @VERSION@
 Cflags: -I${includedir}/rl_lib
-Libs: -L${libdir} -lrl_lib -lm
+Libs: -L${libdir} -lrl_lib -lm -pthread

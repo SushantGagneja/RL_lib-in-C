@@ -196,9 +196,9 @@ greedy episodes after 1200 updates:
 
 | Seed | Greedy eval return | Last training update (stochastic) |
 |---|---|---|
-| 42 | -185.15 | -148.05 |
-| 7 | -197.74 | -147.83 |
-| 123 | -174.63 | -130.23 |
+| 42 | -182.64 | -185.13 |
+| 7 | -180.87 | -173.87 |
+| 123 | -206.54 | -178.21 |
 
 A random policy scores about -1200, and a policy that never applies torque
 about -1000, so every seed lands in the "keep the pendulum near the bottom and
@@ -266,8 +266,8 @@ make clean
 | `test_gradcheck` (f64) | 11 suites / 260 parameters vs central differences, `h = 1e-5`, tolerance `1e-6`; includes the Gaussian PPO surrogate and its log-density against an independent double-precision formula |
 | `test_mat` | 13 checks over MatMul (NN/NT/TN/TT), SIMD-vs-scalar agreement, softmax, ReLU, add/sub, broadcast add, mul/tanh/MSE |
 | `test_gradcheck` (f32) | the same 11 suites in the default build (looser tolerance) |
-| `test_envs` | 175 checks: CartPole bounds/termination/determinism; Snake reset, grid validation, wall/self collision, tail vacate, eating; Pendulum reset, hand-computed Euler dynamics, torque clamp, speed cap, determinism, clone independence and 200-step truncation; VecEnv shape, determinism, independent clones, auto-reset terminal-observation capture, and vectorized continuous stepping with action bounds |
-| `test_rl` | 71 checks: GAE vs a hand-computed trajectory, one Adam step, grad clipping, actor-critic build, value-head learning, batched-vs-per-sample gradient equivalence, a parameter registry grown past 128 entries, rebuilding the batched graph for a new minibatch size (weights preserved, batch and single-sample inference agree), the continuous builder (per-dimension bounds, sampled `u`/squash round trip, `log_std` registered as a parameter and surviving a rebuild), CartPole learning smoke tests for REINFORCE and PPO with same-seed determinism, and a Pendulum continuous-PPO learning smoke test plus determinism |
+| `test_envs` | 191 checks: CartPole bounds/termination/determinism; Snake reset, grid validation, wall/self collision, tail vacate, eating; Pendulum reset, hand-computed Euler dynamics, torque clamp, speed cap, determinism, clone independence and 200-step truncation; VecEnv shape, determinism, independent clones, auto-reset terminal-observation capture, vectorized continuous stepping with action bounds, and threaded-vs-serial stepping compared field by field over 260 steps |
+| `test_rl` | 73 checks: GAE vs a hand-computed trajectory, one Adam step, grad clipping, actor-critic build, value-head learning, batched-vs-per-sample gradient equivalence, a parameter registry grown past 128 entries, rebuilding the batched graph for a new minibatch size (weights preserved, batch and single-sample inference agree), the continuous builder (per-dimension bounds, sampled `u`/squash round trip, `log_std` registered as a parameter and surviving a rebuild), CartPole learning smoke tests for REINFORCE and PPO with same-seed determinism, a Pendulum continuous-PPO learning smoke test plus determinism, and threaded rollouts reaching bit-identical weights in both trainers |
 | `test_checkpoint` | 61 checks: byte-exact parameter round trips, bit-exact Adam-state resume, parameter-only and optimiser-only files, a continuous model round trip including `log_std`, and rejection of missing, corrupt, truncated, wrong-width, wrongly-sized and wrongly-shaped files — each verified to leave the model untouched |
 
 `make test-double` then rebuilds the library with `-DRL_LIB_USE_DOUBLE` and runs
@@ -291,10 +291,10 @@ Parameters checked: 260/260 passed within tolerance
 Passed: 13  Failed: 0
 
 --- test_envs ---
-Passed: 175  Failed: 0
+Passed: 191  Failed: 0
 
 --- test_rl ---
-Tests: 71 passed, 0 failed
+Tests: 73 passed, 0 failed
 
 --- test_checkpoint ---
   Adam state resumes a run exactly... OK
@@ -368,18 +368,24 @@ Tests: 61 passed, 0 failed
   kernels (≈18 GFLOPS at 256², ≈25 GFLOPS at the 64×64×64 shape an RL layer
   uses), but measured against the compiler's own auto-vectorized scalar loop the
   gain is only +11% and +67% respectively — not the 4× that "SIMD" often
-  implies. There is still no threading, no k-blocking/tiling, and no fused
-  optimizer. "High performance" is not claimed.
+  implies. MatMul itself is still single-threaded, with no k-blocking/tiling and
+  no fused optimizer. "High performance" is not claimed.
 - **SIMD coverage is partial.** Only the default f32 build is vectorized; the
   f64 build uses the scalar reference. Only the NN/NT/TN kernels have a vector
   path (TT is scalar — the autograd engine never emits it). AVX2 is chosen at
   runtime behind `__builtin_cpu_supports("avx2")`; NEON is assumed on AArch64.
   Note that NT reassociates the K reduction, so it can differ from the scalar
   reference by a few ULPs (the tests bound this).
-- **Vectorized environments are synchronous and single-threaded.**
-  `vecenv_step` loops over the cloned sub-environments on one core and stops at
-  the first finished env only in the sense of auto-resetting it in place; it
-  batches the API and the state, not CPU work.
+- **Vectorized environments are synchronous, and threading them is opt-in and
+  rarely worth it.** `vecenv_step` loops over the cloned sub-environments on one
+  core; `vecenv_set_threads` spreads that loop over worker threads and is
+  bit-identical to the serial run (`tests/test_envs.c` checks 260 steps field by
+  field, `tests/test_rl.c` checks the trained weights), but the barrier
+  round-trip costs about 30 µs per step while a CartPole or Pendulum step costs
+  a fraction of a microsecond. Measured on the shipped Pendulum example, 1200
+  updates take 8.0 s serial and 13.0 s with 8 threads. It starts to pay for
+  environments whose single step costs more than that (a physics simulator, a
+  renderer, a network call), where the same pool scales as expected.
 - **Reproducibility is within a machine, not across machines.** Seeding makes
   runs deterministic for a given binary and libm, but `expf`/`logf` differ
   across libc implementations and `-O3` may reassociate, so bit-for-bit
@@ -439,6 +445,11 @@ Tests: 61 passed, 0 failed
         auto-reset, terminal-observation capture, deterministic seeding.
   - [x] PPO with the clipped surrogate objective (multi-epoch shuffled
         minibatches, gradient-checked loss, `tests/test_rl.c`, `make ppo`).
+  - [x] Optional threaded `VecEnv` (`vecenv_set_threads`, worker pool + a
+        mutex/condition-variable barrier because macOS has no
+        `pthread_barrier_t`). Verified bit-identical to the serial path at the
+        environment level and at the trained-weights level; the pendulum example
+        can exercise it with a third CLI argument.
 - [x] **Phase 6: Continuous actions**
   - [x] Squashed-Gaussian policy: mean head + learnable `log_std`, per-dimension
         action bounds, log-density from the sampled pre-squash coordinate, and a
@@ -450,11 +461,10 @@ Tests: 61 passed, 0 failed
   - [x] `train_ppo_continuous` (truncation-aware GAE bootstrap, one optimiser step
         per minibatch), `evaluate_continuous[_seeded]`, a learning smoke test in
         `test_rl`, a checkpoint round trip, and `make ppo-continuous`
-        (Pendulum -175..-200 across three seeds over 1200 updates).
+        (Pendulum -180..-207 across three seeds over 1200 updates).
 
 ### Remaining
 
-- [ ] Threaded `VecEnv` (C11 atomics barrier; macOS has no `pthread_barrier_t`).
 - [ ] SIMD completeness: f64 kernels, the TT case, k-blocking.
 - [ ] Snake parity attempt with PPO + `VecEnv`.
 - [ ] Windows/MSVC build via CMake.

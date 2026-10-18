@@ -8,6 +8,7 @@
 #include "vecenv.h"
 #include <math.h>
 #include <stdio.h>
+#include <string.h>
 
 static u32 tests_passed = 0;
 static u32 tests_failed = 0;
@@ -527,6 +528,100 @@ static void test_vecenv_continuous(Arena *arena) {
   printf("OK\n");
 }
 
+// Compares two vecenvs field by field (bitwise, so a single ULP shows up).
+static b32 vecenv_same(const VecEnv *a, const VecEnv *b) {
+  if (a->num_envs != b->num_envs || a->obs_dim != b->obs_dim ||
+      a->act_dim != b->act_dim || a->step_count != b->step_count) {
+    return false;
+  }
+  const u64 obs_total = (u64)a->num_envs * a->obs_dim;
+  return memcmp(a->obs, b->obs, sizeof(real) * obs_total) == 0 &&
+         memcmp(a->final_obs, b->final_obs, sizeof(real) * obs_total) == 0 &&
+         memcmp(a->rewards, b->rewards, sizeof(real) * a->num_envs) == 0 &&
+         memcmp(a->dones, b->dones, sizeof(b8) * a->num_envs) == 0 &&
+         memcmp(a->terminals, b->terminals, sizeof(b8) * a->num_envs) == 0 &&
+         memcmp(a->truncateds, b->truncateds, sizeof(b8) * a->num_envs) == 0;
+}
+
+// Threaded stepping must produce exactly the serial trajectories: the
+// sub-environments are independent and nothing is shared, so the pool only
+// decides who computes what. Checked long enough (260 steps, above CartPole's
+// 500-step cap crossed by random play and Pendulum's 200-step limit) to cross
+// many auto-resets.
+static void test_vecenv_threads(Arena *arena) {
+  printf("  vecenv threaded stepping == serial... ");
+
+  for (u32 kind = 0; kind < 2; kind++) {
+    Env *proto =
+        kind == 0 ? env_cartpole_create(arena) : env_pendulum_create(arena);
+    const u32 n = 7; // deliberately not a multiple of the thread count
+    VecEnv *serial = vecenv_new(arena, proto, n);
+    VecEnv *pooled = vecenv_new(arena, proto, n);
+
+    vecenv_reset(serial, 4242);
+    vecenv_reset(pooled, 4242);
+    ASSERT_TRUE(vecenv_threads(serial) == 1, "serial by default");
+    ASSERT_TRUE(vecenv_threads(pooled) == 1, "serial before set_threads");
+    vecenv_set_threads(arena, pooled, 3);
+    ASSERT_TRUE(vecenv_threads(pooled) == 3, "three threads installed");
+
+    b32 same = true;
+    for (u32 step = 0; step < 260; step++) {
+      if (kind == 0) {
+        u32 acts[7];
+        for (u32 i = 0; i < n; i++) {
+          acts[i] = (step + i * 3u) % proto->act_dim;
+        }
+        vecenv_step(serial, acts);
+        vecenv_step(pooled, acts);
+      } else {
+        real acts[7];
+        for (u32 i = 0; i < n; i++) {
+          acts[i] = real_sin((real)(step * 5u + i * 13u)) * (real)2;
+        }
+        vecenv_step_continuous(serial, acts);
+        vecenv_step_continuous(pooled, acts);
+      }
+      if (!vecenv_same(serial, pooled)) {
+        same = false;
+      }
+    }
+    ASSERT_TRUE(same, "260 steps are bit-identical to the serial run");
+    ASSERT_TRUE(serial->step_count == 260, "step count advanced");
+
+    // Switching back and shutting down must be clean as well.
+    vecenv_set_threads(arena, pooled, 1);
+    ASSERT_TRUE(vecenv_threads(pooled) == 1, "set_threads(1) restores serial");
+    vecenv_shutdown(pooled);
+    vecenv_shutdown(pooled); // idempotent
+    ASSERT_TRUE(vecenv_threads(pooled) == 1, "shutdown leaves it serial");
+
+    b32 tail = true;
+    for (u32 step = 0; step < 20; step++) {
+      if (kind == 0) {
+        u32 acts[7];
+        for (u32 i = 0; i < n; i++) {
+          acts[i] = (step + i) % proto->act_dim;
+        }
+        vecenv_step(serial, acts);
+        vecenv_step(pooled, acts);
+      } else {
+        real acts[7];
+        for (u32 i = 0; i < n; i++) {
+          acts[i] = (real)0.5f;
+        }
+        vecenv_step_continuous(serial, acts);
+        vecenv_step_continuous(pooled, acts);
+      }
+      if (!vecenv_same(serial, pooled)) {
+        tail = false;
+      }
+    }
+    ASSERT_TRUE(tail, "stepping continues to match after the pool is gone");
+  }
+  printf("OK\n");
+}
+
 int main(void) {
   Arena *arena = arena_new(MiB(16));
   printf("\n=== Environment Interface Unit Tests ===\n\n");
@@ -549,6 +644,7 @@ int main(void) {
   test_pendulum_determinism_and_clone(arena);
   test_pendulum_truncation(arena);
   test_vecenv_continuous(arena);
+  test_vecenv_threads(arena);
 
   printf("\n---\nPassed: %u  Failed: %u\n\n", tests_passed, tests_failed);
   arena_dispose(arena);
