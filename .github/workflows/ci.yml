@@ -125,13 +125,24 @@ jobs:
             'cmake_minimum_required(VERSION 3.20)' \
             'project(rl_consumer C)' \
             'find_package(RL_lib-in-C REQUIRED)' \
-            'add_executable(hello "${HELLO_SRC}")' \
-            'target_link_libraries(hello PRIVATE RL_lib-in-C::rl_lib)' > "$C/CMakeLists.txt"
+            'add_executable(hello_static "${HELLO_SRC}")' \
+            'target_link_libraries(hello_static PRIVATE RL_lib-in-C::rl_lib)' \
+            'add_executable(hello_shared "${HELLO_SRC}")' \
+            'target_link_libraries(hello_shared PRIVATE RL_lib-in-C::rl_lib_shared)' \
+            'get_target_property(_implib RL_lib-in-C::rl_lib IMPORTED_IMPLIB)' \
+            'get_target_property(_loc RL_lib-in-C::rl_lib IMPORTED_LOCATION)' \
+            'message(STATUS "RL_lib-in-C::rl_lib implib=${_implib} location=${_loc}")' \
+            > "$C/CMakeLists.txt"
           cmake -S "$C" -B "$C/build" \
             -DHELLO_SRC="$W/examples/hello_rl.c" \
             -DCMAKE_PREFIX_PATH="$T/prefix"
           cmake --build "$C/build" --config Release
-          "$C/build/Release/hello.exe"
+          # The static consumer needs nothing beside it.
+          "$C/build/Release/hello_static.exe"
+          # The shared one needs the DLL: next to the executable, or on PATH.
+          # Also checks that WINDOWS_EXPORT_ALL_SYMBOLS produced a usable .def.
+          cp "$T/prefix/bin/rl_lib.dll" "$C/build/Release/"
+          "$C/build/Release/hello_shared.exe"
 
   # Proves the packaged library works outside the source tree: install into a
   # scratch prefix, then compile and run examples/hello_rl.c against only the

@@ -354,6 +354,11 @@ Three Windows-specific notes:
   kernels, so an MSVC build selects the scalar reference; MinGW (gcc) and
   clang-cl compile the AVX2 path like any other x86-64 GCC/Clang build. On ARM64
   Windows, clang-cl gets NEON.
+- On Windows the shared build installs `bin/rl_lib.dll` with its import library
+  `lib/rl_lib_shared.lib` — deliberately not `rl_lib.lib`, which stays the static
+  archive (MSVC would otherwise have the two overwrite each other). A consumer
+  that links `RL_lib-in-C::rl_lib_shared` needs the DLL next to its executable
+  or on `PATH`; the static target needs nothing.
 
 A build with no threading backend (`RL_LIB_NO_THREADS`) reports the threaded
 comparisons in `test_envs` / `test_rl` as `SKIP (no threading backend)` instead

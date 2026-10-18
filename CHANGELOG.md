@@ -85,6 +85,12 @@ independently reimplemented, and carried through the Phase 0–7 roadmap.
   stands down, giving that target one consistent TSan-only configuration. It
   went unnoticed locally because Apple's `libclang_rt.tsan_osx_dynamic.dylib`
   also exports the `__ubsan_*` handlers (56 of them) and GCC's runtime does not.
+- **On MSVC the static archive and the shared library's import library were both
+  `rl_lib.lib`**, so one silently replaced the other in the build tree and in
+  the install prefix, and a consumer that linked the survivor needed
+  `rl_lib.dll` without being told (it fails at load time, not link time). The
+  import library is `rl_lib_shared.lib` now; the DLL keeps its name. The CI
+  Windows job builds and runs a `find_package` consumer against both targets.
 
 ### Added
 - **Checkpointing** (`checkpoint.c` / `checkpoint.h`): `net_save`, `net_load`,

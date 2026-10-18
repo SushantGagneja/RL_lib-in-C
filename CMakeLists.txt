@@ -68,6 +68,15 @@ if(RL_LIB_BUILD_SHARED)
     # No __declspec annotations in the sources: let CMake generate the .def.
     set_target_properties(rl_lib_shared PROPERTIES
       WINDOWS_EXPORT_ALL_SYMBOLS ON)
+    if(MSVC)
+      # MSVC names the static archive and an import library alike (rl_lib.lib),
+      # so in the build tree and in the prefix one would quietly overwrite the
+      # other, and a consumer that linked the survivor would need rl_lib.dll
+      # without being told. Keep the import library distinct; the DLL itself
+      # keeps its name.
+      set_target_properties(rl_lib_shared PROPERTIES
+        ARCHIVE_OUTPUT_NAME rl_lib_shared)
+    endif()
   endif()
   list(APPEND RL_LIB_LIB_TARGETS rl_lib_shared)
 endif()
