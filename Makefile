@@ -270,6 +270,25 @@ bench-snake: $(BENCH_BIN)
 bench-throughput: $(BENCH_BIN)
 	./$(BENCH_BIN) throughput
 
+# The f64 kernels are vectorised too (2-wide NEON, 4-wide AVX2), so the matmul
+# comparison is reproducible in double precision as well. This gets its own
+# object tree and stays plain -O3: a benchmark must not inherit the sanitizer
+# flags the f64 test suites build with.
+BENCH_DOUBLE_DIR = build/bench-double
+BENCH_DOUBLE_BIN = $(BENCH_DOUBLE_DIR)/rl_lib_bench
+BENCH_DOUBLE_CFLAGS = $(WARN) -Iinclude -I. -O3 -DRL_LIB_USE_DOUBLE $(THREAD_FLAGS) $(EXTRA_CFLAGS)
+BENCH_DOUBLE_OBJS = $(patsubst %.c,$(BENCH_DOUBLE_DIR)/%.o,$(LIB_SRCS)) $(BENCH_DOUBLE_DIR)/examples/bench.o
+
+$(BENCH_DOUBLE_DIR)/%.o: %.c
+	@mkdir -p $(dir $@)
+	$(CC) $(BENCH_DOUBLE_CFLAGS) -c $< -o $@
+
+$(BENCH_DOUBLE_BIN): $(BENCH_DOUBLE_OBJS)
+	$(CC) $(BENCH_DOUBLE_CFLAGS) -o $@ $^ -lm
+
+bench-double: $(BENCH_DOUBLE_BIN)
+	./$(BENCH_DOUBLE_BIN) throughput
+
 # ── Cleanup ─────────────────────────────────────────────────────────
 
 clean:

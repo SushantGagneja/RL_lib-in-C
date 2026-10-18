@@ -70,9 +70,10 @@ so there is nothing to attribute and no external license to carry.
   lockstep with per-env auto-reset, terminal-observation capture for
   bootstrapping, and deterministic seeding. Used by the PPO trainer.
 - **SIMD MatMul kernels** — hand-written NEON (AArch64) and AVX2+FMA (x86-64,
-  behind a runtime CPU probe) kernels for the NN/NT/TN cases, with the portable
-  scalar path as the reference. The default f32 build uses them; the f64 build
-  and `-DRL_SIMD_BACKEND=0` fall back to scalar.
+  behind a runtime CPU probe) kernels for all four transpose cases in both
+  precisions (4-wide f32 / 2-wide f64 on NEON, 8-wide f32 / 4-wide f64 on
+  AVX2), with the portable scalar path as the reference. The f64 build uses
+  them too; `-DRL_SIMD_BACKEND=0` forces scalar on any build.
 - **Checkpointing** — a versioned, endian-independent binary format that saves
   and restores the parameters *and* the Adam moments, so a training run can be
   stopped and resumed. Loading is all-or-nothing: a file that does not match the
@@ -164,18 +165,26 @@ kernel against a naive triple loop and against the scalar backend.
 |---|---|
 | CartPole `step()` | ≈ 25 M steps/sec |
 | Snake `step()` | ≈ 80 M steps/sec |
-| `vecenv_step` (×8 CartPole) | ≈ 34 M env-steps/sec |
-| `mat_mm` 256×256×256 (`neon`) | ≈ 18.1 GFLOPS |
-| `mat_mm` 256×256×256 (scalar) | ≈ 16.3 GFLOPS |
-| Naive triple-loop 256×256×256 | ≈ 1.67 GFLOPS |
-| `mat_mm` 64×64×64 (`neon`) | ≈ 25.4 GFLOPS |
-| `mat_mm` 64×64×64 (scalar) | ≈ 15.2 GFLOPS |
+| `vecenv_step` (×8 CartPole) | ≈ 33 M env-steps/sec |
+| `mat_mm` 256×256×256 (`neon`, f32) | ≈ 33.5 GFLOPS |
+| `mat_mm` 256×256×256 (scalar, f32) | ≈ 16.3 GFLOPS |
+| Naive triple-loop 256×256×256 | ≈ 1.7 GFLOPS |
+| `mat_mm` 64×64×64 (`neon`, f32) | ≈ 39.0 GFLOPS |
+| `mat_mm` 64×64×64 (scalar, f32) | ≈ 15.2 GFLOPS |
+| `mat_mm` 256×256×256 (`neon`, f64) | ≈ 16.6 GFLOPS |
+| `mat_mm` 256×256×256 (scalar, f64) | ≈ 8.4 GFLOPS |
+| `mat_mm` 64×64×64 (`neon`, f64) | ≈ 19.8 GFLOPS |
+| `mat_mm` 64×64×64 (scalar, f64) | ≈ 10.7 GFLOPS |
 
-The register-blocked SIMD kernel is ~11× a naive triple loop. Measured against
-the *scalar* backend, though, the honest gain is modest: +11% at 256² and +67%
-at the 64×64×64 shape an RL layer actually uses — the compiler already
-auto-vectorizes the plain scalar loop well, so this is not a 4×-from-SIMD story.
-See the roadmap and the limitations.
+The vector kernels are ~20× a naive triple loop and about 2× the *scalar*
+backend: 2.1× at 256² and 2.6× at the 64×64×64 shape an RL layer actually uses
+(2.0× and 1.8× in f64). That is the pay-off from processing two output rows at
+once — every element of B is loaded once for two rows instead of once per row,
+which roughly halves the kernel's dominant memory traffic. The scalar reference
+the comparison runs against is untouched by that change, so the 2× is the
+kernel's, not the baseline's. `make bench-double` runs the same measurement
+against the f64 build, whose kernels are vectorised too (2-wide NEON, 4-wide
+AVX2).
 
 #### Threaded `VecEnv`
 
@@ -273,6 +282,7 @@ make bench              # multi-seed benchmarks -> bench_results.md
 make bench-cartpole     # CartPole only
 make bench-snake        # Snake only
 make bench-throughput   # steps/sec and GEMM GFLOPS only
+make bench-double       # the same GEMM measurement against the f64 build
 make gradcheck-double   # reconfirm the gradient check in f64
 
 make clean
@@ -285,7 +295,7 @@ make clean
 | Suite | What it covers |
 |---|---|
 | `test_gradcheck` (f64) | 11 suites / 260 parameters vs central differences, `h = 1e-5`, tolerance `1e-6`; includes the Gaussian PPO surrogate and its log-density against an independent double-precision formula |
-| `test_mat` | 13 checks over MatMul (NN/NT/TN/TT), SIMD-vs-scalar agreement, softmax, ReLU, add/sub, broadcast add, mul/tanh/MSE |
+| `test_mat` | 13 checks over MatMul (NN/NT/TN/TT), SIMD-vs-scalar agreement across two shape sets that cross the vector and TT-tile boundaries, softmax, ReLU, add/sub, broadcast add, mul/tanh/MSE |
 | `test_gradcheck` (f32) | the same 11 suites in the default build (looser tolerance) |
 | `test_envs` | 191 checks: CartPole bounds/termination/determinism; Snake reset, grid validation, wall/self collision, tail vacate, eating; Pendulum reset, hand-computed Euler dynamics, torque clamp, speed cap, determinism, clone independence and 200-step truncation; VecEnv shape, determinism, independent clones, auto-reset terminal-observation capture, vectorized continuous stepping with action bounds, and threaded-vs-serial stepping compared field by field over 260 steps |
 | `test_rl` | 73 checks: GAE vs a hand-computed trajectory, one Adam step, grad clipping, actor-critic build, value-head learning, batched-vs-per-sample gradient equivalence, a parameter registry grown past 128 entries, rebuilding the batched graph for a new minibatch size (weights preserved, batch and single-sample inference agree), the continuous builder (per-dimension bounds, sampled `u`/squash round trip, `log_std` registered as a parameter and surviving a rebuild), CartPole learning smoke tests for REINFORCE and PPO with same-seed determinism, a Pendulum continuous-PPO learning smoke test plus determinism, and threaded rollouts reaching bit-identical weights in both trainers |
@@ -308,7 +318,7 @@ Tests: 11 passed, 0 failed
 Parameters checked: 260/260 passed within tolerance
 
 --- test_mat ---
-  SIMD path == scalar reference... (backend neon, max diff 1.43e-06) OK
+  SIMD path == scalar reference... (backend neon, max diff 2.38e-06) OK
 Passed: 13  Failed: 0
 
 --- test_envs ---
@@ -385,18 +395,22 @@ Tests: 61 passed, 0 failed
 
 ## Known limitations
 
-- **Performance is modest and honest.** MatMul now has hand-written NEON/AVX2
-  kernels (≈18 GFLOPS at 256², ≈25 GFLOPS at the 64×64×64 shape an RL layer
-  uses), but measured against the compiler's own auto-vectorized scalar loop the
-  gain is only +11% and +67% respectively — not the 4× that "SIMD" often
-  implies. MatMul itself is still single-threaded, with no k-blocking/tiling and
-  no fused optimizer. "High performance" is not claimed.
-- **SIMD coverage is partial.** Only the default f32 build is vectorized; the
-  f64 build uses the scalar reference. Only the NN/NT/TN kernels have a vector
-  path (TT is scalar — the autograd engine never emits it). AVX2 is chosen at
-  runtime behind `__builtin_cpu_supports("avx2")`; NEON is assumed on AArch64.
-  Note that NT reassociates the K reduction, so it can differ from the scalar
-  reference by a few ULPs (the tests bound this).
+- **Performance is modest and honest.** MatMul has hand-written NEON/AVX2
+  kernels (≈33 GFLOPS at 256², ≈39 GFLOPS at the 64×64×64 shape an RL layer
+  uses, f32), about 2× the compiler's own auto-vectorized scalar loop and ~20×
+  a naive triple loop. That is a real but unremarkable number next to a tuned
+  BLAS: MatMul is still single-threaded, there is no multi-level (i/j/k) cache
+  tiling and no fused optimizer. "High performance" is not claimed.
+- **SIMD coverage is complete for the supported targets, and bounded elsewhere.**
+  Both precisions are vectorised — 4-wide f32 / 2-wide f64 on NEON (f64 needs
+  AArch64; ARMv7 NEON has no double-precision arithmetic) and 8-wide f32 /
+  4-wide f64 on AVX2+FMA — and all four transpose cases have a vector path
+  (TT transposes a 32×32 tile into the TN path). Everything else, including
+  `-DRL_SIMD_BACKEND=0`, uses the scalar reference, which the tests cross-check
+  in both precisions. AVX2 is chosen at runtime behind
+  `__builtin_cpu_supports("avx2")`; NEON is assumed on AArch64. Note that the NT
+  kernel reassociates the K reduction and TT adds a transpose pass, so those two
+  can differ from the scalar reference by a few ULPs (the tests bound this).
 - **Vectorized environments are synchronous, and threading them is opt-in and
   rarely worth it.** `vecenv_step` loops over the cloned sub-environments on one
   core; `vecenv_set_threads` spreads that loop over worker threads and is
@@ -472,6 +486,12 @@ Tests: 61 passed, 0 failed
         `pthread_barrier_t`). Verified bit-identical to the serial path at the
         environment level and at the trained-weights level; the pendulum example
         can exercise it with a third CLI argument.
+  - [x] SIMD completeness: f64 kernels (2-wide NEON on AArch64, 4-wide AVX2),
+        the TT case (a 32×32 transposed tile fed through the TN path) and
+        two-row register blocking, which halved B's traffic and took the kernel
+        from +11%/+67% over the scalar loop to ~2× (~20× a naive triple loop).
+        Measured in f32 and f64 (`make bench-throughput`, `make bench-double`);
+        `test_mat` cross-checks all four transpose cases in both precisions.
 - [x] **Phase 6: Continuous actions**
   - [x] Squashed-Gaussian policy: mean head + learnable `log_std`, per-dimension
         action bounds, log-density from the sampled pre-squash coordinate, and a
@@ -487,6 +507,5 @@ Tests: 61 passed, 0 failed
 
 ### Remaining
 
-- [ ] SIMD completeness: f64 kernels, the TT case, k-blocking.
 - [ ] Snake parity attempt with PPO + `VecEnv`.
 - [ ] Windows/MSVC build via CMake.

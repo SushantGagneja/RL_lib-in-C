@@ -344,25 +344,31 @@ const char *simd_backend_name(void);  // "scalar" | "neon" | "avx2"
 b32         simd_accelerated(void);   // usable on *this* CPU?
 ```
 
-The backend is chosen at compile time:
+The backend is chosen at compile time, per precision:
 
 | Platform | Backend |
 |---|---|
-| AArch64 | `RL_SIMD_NEON` — 4-wide f32 NEON, always available on the baseline |
-| x86-64 (GCC/Clang) | `RL_SIMD_AVX2` — 8-wide f32 AVX2+FMA, per-function `target` attributes |
-| anything else, or `-DRL_LIB_USE_DOUBLE` | `RL_SIMD_NONE` — the scalar reference |
+| AArch64 | `RL_SIMD_NEON` — 4-wide f32, or 2-wide f64 |
+| x86-64 (GCC/Clang) | `RL_SIMD_AVX2` — 8-wide f32, or 4-wide f64, with per-function `target` attributes |
+| anything else | `RL_SIMD_NONE` — the scalar reference |
+
+Double precision on NEON needs AArch64: ARMv7 NEON loads 64-bit lanes but has no
+double-precision arithmetic, so it selects the scalar path (and asking for
+`RL_SIMD_NEON` there with `-DRL_LIB_USE_DOUBLE` is a compile-time `#error`).
 
 Because the AVX2 kernels are compiled with per-function target attributes,
 `simd_accelerated()` performs a cached runtime CPU probe: the binary still runs
 on a CPU without AVX2 and simply falls back. Force the scalar path with
-`-DRL_SIMD_BACKEND=0`. The f64 build always uses the scalar path — it exists for
-the gradient check, not for speed — and requesting otherwise is a compile-time
-`#error`.
+`-DRL_SIMD_BACKEND=0`.
 
-The vector kernels are used for NN/NT/TN matmuls and never for the rarely emitted
-TT case. They hold four accumulator vectors in registers; where that changes the
-reduction order (only for NT) the result can differ from the scalar path in the
-last ulp, which the tests bound rather than forbid.
+All four transpose cases have a vector path. NN and TN process two output rows at
+once, so every element of B is loaded once for two rows; each output element
+still accumulates over k in ascending order, which makes them element-wise
+identical to a single-row kernel. TT transposes a 32×32 tile of B into the TN
+form, which costs one O(N·K) pass against the O(M·N·K) multiply. NT vectorises
+the K reduction and adds the lane partials horizontally, so — like TT's extra
+pass — those two can differ from the scalar reference by a few ulps; the tests
+bound that instead of forbidding it, in both precisions.
 
 ---
 

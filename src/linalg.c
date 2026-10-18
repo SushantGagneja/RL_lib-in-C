@@ -282,15 +282,37 @@ static void mm_tt(Mat *out, const Mat *a, const Mat *b) {
 
 // ---------------------------------------------------------------------------
 // SIMD kernels. Selected by the same (transpose_a, transpose_b) flags as the
-// scalar reference. NN/TN keep the scalar reduction order (the output columns
-// are vectorised); NT vectorises the K reduction and adds the lane partials
-// horizontally, so it may differ from the scalar result by a few ULPs. TT is
-// cold (the autograd engine never emits it) and stays on the scalar path.
+// scalar reference and compiled for both precisions: 4-wide f32 / 2-wide f64 on
+// NEON, 8-wide f32 / 4-wide f64 on AVX2. NN/TN now process two output rows at
+// once (every B element is loaded once for two rows) and keep the reduction
+// order of the scalar reference, so their results are element-wise identical to
+// the single-row kernels; NT vectorises the K reduction and adds the lane
+// partials horizontally, so it may differ by a few ULPs; TT transposes a tile of
+// B and reuses the TN path.
 // ---------------------------------------------------------------------------
 
 #if RL_SIMD_BACKEND != RL_SIMD_NONE
 
 #if RL_SIMD_BACKEND == RL_SIMD_NEON
+
+#if defined(RL_LIB_USE_DOUBLE)
+
+// Double precision is AArch64-only: ARMv7 NEON loads 64-bit lanes but has no
+// double-precision arithmetic, so simd.h forces the scalar path there.
+typedef float64x2_t RlVec;
+#define RL_VEC_W 2u
+static inline RlVec rl_vload(const real *p) { return vld1q_f64(p); }
+static inline void rl_vstore(real *p, RlVec v) { vst1q_f64(p, v); }
+static inline RlVec rl_vset1(real x) { return vdupq_n_f64(x); }
+static inline RlVec rl_vfma(RlVec acc, RlVec a, RlVec b) {
+  return vfmaq_f64(acc, a, b);
+}
+static inline RlVec rl_vzero(void) { return vdupq_n_f64(0.0); }
+static inline real rl_vhsum(RlVec v) {
+  return vgetq_lane_f64(v, 0) + vgetq_lane_f64(v, 1);
+}
+
+#else // f32
 
 typedef float32x4_t RlVec;
 #define RL_VEC_W 4u
@@ -308,12 +330,48 @@ static inline real rl_vhsum(RlVec v) {
   return vget_lane_f32(vpadd_f32(s, s), 0);
 }
 
+#endif // RL_LIB_USE_DOUBLE
+
 #else // RL_SIMD_BACKEND == RL_SIMD_AVX2
 
 // Per-function target attribute: these use AVX2/FMA even though the translation
 // unit targets the baseline x86-64 ISA, so the binary still runs on CPUs
 // without AVX2 (mat_mm() probes at runtime).
 #define RL_AVX2_TARGET __attribute__((target("avx2,fma")))
+
+#if defined(RL_LIB_USE_DOUBLE)
+
+typedef __m256d RlVec;
+#define RL_VEC_W 4u
+RL_AVX2_TARGET static inline __attribute__((always_inline)) RlVec
+rl_vload(const real *p) {
+  return _mm256_loadu_pd(p);
+}
+RL_AVX2_TARGET static inline __attribute__((always_inline)) void
+rl_vstore(real *p, RlVec v) {
+  _mm256_storeu_pd(p, v);
+}
+RL_AVX2_TARGET static inline __attribute__((always_inline)) RlVec
+rl_vset1(real x) {
+  return _mm256_set1_pd(x);
+}
+RL_AVX2_TARGET static inline __attribute__((always_inline)) RlVec
+rl_vfma(RlVec acc, RlVec a, RlVec b) {
+  return _mm256_fmadd_pd(a, b, acc);
+}
+RL_AVX2_TARGET static inline __attribute__((always_inline)) RlVec
+rl_vzero(void) {
+  return _mm256_setzero_pd();
+}
+RL_AVX2_TARGET static inline __attribute__((always_inline)) real
+rl_vhsum(RlVec v) {
+  const __m128d lo = _mm256_castpd256_pd128(v);
+  const __m128d hi = _mm256_extractf128_pd(v, 1);
+  const __m128d s = _mm_add_pd(lo, hi);
+  return _mm_cvtsd_f64(_mm_add_sd(s, _mm_unpackhi_pd(s, s)));
+}
+
+#else // f32
 
 typedef __m256 RlVec;
 #define RL_VEC_W 8u
@@ -347,6 +405,8 @@ rl_vhsum(RlVec v) {
   return _mm_cvtss_f32(s);
 }
 
+#endif // RL_LIB_USE_DOUBLE
+
 // The kernels themselves are compiled with the AVX2/FMA target so the helpers
 // inline; mat_mm() only calls them after the runtime probe succeeds.
 #define RL_SIMD_KERNEL RL_AVX2_TARGET
@@ -357,34 +417,120 @@ rl_vhsum(RlVec v) {
 #define RL_SIMD_KERNEL
 #endif
 
-// Shared NN/TN micro-kernel: out += A_eff @ B, where A_eff is A (M x K,
-// row-major) when `transpose_a` is false and A^T (A stored K x M) when true.
-// Four column vectors are held in registers across the whole K reduction, so
-// `out` is loaded and stored once per row instead of once per (k, row). Each
-// output element still accumulates over k in the same order as the scalar
-// reference, so results match to floating-point tolerance.
-RL_SIMD_KERNEL static void simd_mm_columns(Mat *out, const Mat *a, const Mat *b,
-                                          b32 transpose_a) {
+// Shared NN/TN micro-kernel over a rectangle of the output:
+//
+//   out[i][j] += sum(k0 <= k < k1) a_eff[k][i] * b[k - k0][j - j0]
+//
+// for j0 <= j < j1, where a_eff is A (M x K, row-major) when `transpose_a` is
+// false and A^T (A stored K x M) when true. `b` supplies its own row stride
+// (`b->cols`), which is what lets the TT kernel below feed in a transposed
+// scratch tile. The plain NN/TN multiplies pass the whole matrix (k0 = 0,
+// k1 = K, j0 = 0, j1 = out->cols).
+//
+// Two output rows are processed at once and four column vectors are held in
+// registers per row across the whole K run: every element of B is loaded once
+// for two rows instead of once per row, and `out` is loaded and stored once per
+// row rather than once per (k, row). Each output element still accumulates over
+// k in ascending order, so the result is element-wise identical to a single-row
+// kernel and agrees with the scalar reference to floating-point tolerance.
+RL_SIMD_KERNEL static void simd_mm_columns_range(Mat *out, const Mat *a,
+                                                 const Mat *b, b32 transpose_a,
+                                                 u32 k0, u32 k1, u32 j0,
+                                                 u32 j1) {
   const u32 M = out->rows;
-  const u32 N = out->cols;
-  const u32 K = transpose_a ? a->rows : a->cols;
+  const u32 out_stride = out->cols;
+  const u32 b_stride = b->cols;
   const u32 W = RL_VEC_W;
   const u32 BLK = 4u * W;
+  const u32 width = j1 - j0;
+  // Stride from row i to row i + 1 in `a`: the K axis is contiguous for the
+  // row-major case and the M axis for the transposed one.
+  const u64 a_row_step = transpose_a ? 1u : (u64)a->cols;
 
-  for (u32 i = 0; i < M; i++) {
-    real *orow = out->data + (u64)i * N;
-    const real *arow = a->data + (u64)i * K;
-
+  u32 i = 0;
+  for (; i + 2 <= M; i += 2) {
+    real *orow0 = out->data + (u64)i * out_stride + j0;
+    real *orow1 = orow0 + out_stride;
     u32 j = 0;
-    for (; j + BLK <= N; j += BLK) {
+
+    for (; j + BLK <= width; j += BLK) {
+      RlVec v00 = rl_vload(orow0 + j);
+      RlVec v01 = rl_vload(orow0 + j + W);
+      RlVec v02 = rl_vload(orow0 + j + 2u * W);
+      RlVec v03 = rl_vload(orow0 + j + 3u * W);
+      RlVec v10 = rl_vload(orow1 + j);
+      RlVec v11 = rl_vload(orow1 + j + W);
+      RlVec v12 = rl_vload(orow1 + j + 2u * W);
+      RlVec v13 = rl_vload(orow1 + j + 3u * W);
+      for (u32 k = k0; k < k1; k++) {
+        const u64 ai0 = transpose_a ? (u64)k * M + i : (u64)i * a->cols + k;
+        const RlVec va0 = rl_vset1(a->data[ai0]);
+        const RlVec va1 = rl_vset1(a->data[ai0 + a_row_step]);
+        const real *brow = b->data + (u64)(k - k0) * b_stride + j;
+        const RlVec b0 = rl_vload(brow);
+        const RlVec b1 = rl_vload(brow + W);
+        const RlVec b2 = rl_vload(brow + 2u * W);
+        const RlVec b3 = rl_vload(brow + 3u * W);
+        v00 = rl_vfma(v00, va0, b0);
+        v01 = rl_vfma(v01, va0, b1);
+        v02 = rl_vfma(v02, va0, b2);
+        v03 = rl_vfma(v03, va0, b3);
+        v10 = rl_vfma(v10, va1, b0);
+        v11 = rl_vfma(v11, va1, b1);
+        v12 = rl_vfma(v12, va1, b2);
+        v13 = rl_vfma(v13, va1, b3);
+      }
+      rl_vstore(orow0 + j, v00);
+      rl_vstore(orow0 + j + W, v01);
+      rl_vstore(orow0 + j + 2u * W, v02);
+      rl_vstore(orow0 + j + 3u * W, v03);
+      rl_vstore(orow1 + j, v10);
+      rl_vstore(orow1 + j + W, v11);
+      rl_vstore(orow1 + j + 2u * W, v12);
+      rl_vstore(orow1 + j + 3u * W, v13);
+    }
+
+    for (; j + W <= width; j += W) {
+      RlVec v0 = rl_vload(orow0 + j);
+      RlVec v1 = rl_vload(orow1 + j);
+      for (u32 k = k0; k < k1; k++) {
+        const u64 ai0 = transpose_a ? (u64)k * M + i : (u64)i * a->cols + k;
+        const RlVec bv = rl_vload(b->data + (u64)(k - k0) * b_stride + j);
+        v0 = rl_vfma(v0, rl_vset1(a->data[ai0]), bv);
+        v1 = rl_vfma(v1, rl_vset1(a->data[ai0 + a_row_step]), bv);
+      }
+      rl_vstore(orow0 + j, v0);
+      rl_vstore(orow1 + j, v1);
+    }
+
+    for (; j < width; j++) {
+      real s0 = orow0[j];
+      real s1 = orow1[j];
+      for (u32 k = k0; k < k1; k++) {
+        const u64 ai0 = transpose_a ? (u64)k * M + i : (u64)i * a->cols + k;
+        const real bv = b->data[(u64)(k - k0) * b_stride + j];
+        s0 += a->data[ai0] * bv;
+        s1 += a->data[ai0 + a_row_step] * bv;
+      }
+      orow0[j] = s0;
+      orow1[j] = s1;
+    }
+  }
+
+  // Odd row out: the same three loops for a single row.
+  if (i < M) {
+    real *orow = out->data + (u64)i * out_stride + j0;
+    u32 j = 0;
+
+    for (; j + BLK <= width; j += BLK) {
       RlVec v0 = rl_vload(orow + j);
       RlVec v1 = rl_vload(orow + j + W);
       RlVec v2 = rl_vload(orow + j + 2u * W);
       RlVec v3 = rl_vload(orow + j + 3u * W);
-      for (u32 k = 0; k < K; k++) {
-        const real aik = transpose_a ? a->data[(u64)k * M + i] : arow[k];
-        const RlVec va = rl_vset1(aik);
-        const real *brow = b->data + (u64)k * N + j;
+      for (u32 k = k0; k < k1; k++) {
+        const u64 ai = transpose_a ? (u64)k * M + i : (u64)i * a->cols + k;
+        const RlVec va = rl_vset1(a->data[ai]);
+        const real *brow = b->data + (u64)(k - k0) * b_stride + j;
         v0 = rl_vfma(v0, va, rl_vload(brow));
         v1 = rl_vfma(v1, va, rl_vload(brow + W));
         v2 = rl_vfma(v2, va, rl_vload(brow + 2u * W));
@@ -396,20 +542,21 @@ RL_SIMD_KERNEL static void simd_mm_columns(Mat *out, const Mat *a, const Mat *b,
       rl_vstore(orow + j + 3u * W, v3);
     }
 
-    for (; j + W <= N; j += W) {
+    for (; j + W <= width; j += W) {
       RlVec acc = rl_vload(orow + j);
-      for (u32 k = 0; k < K; k++) {
-        const real aik = transpose_a ? a->data[(u64)k * M + i] : arow[k];
-        acc = rl_vfma(acc, rl_vset1(aik), rl_vload(b->data + (u64)k * N + j));
+      for (u32 k = k0; k < k1; k++) {
+        const u64 ai = transpose_a ? (u64)k * M + i : (u64)i * a->cols + k;
+        acc = rl_vfma(acc, rl_vset1(a->data[ai]),
+                      rl_vload(b->data + (u64)(k - k0) * b_stride + j));
       }
       rl_vstore(orow + j, acc);
     }
 
-    for (; j < N; j++) {
+    for (; j < width; j++) {
       real acc = orow[j];
-      for (u32 k = 0; k < K; k++) {
-        const real aik = transpose_a ? a->data[(u64)k * M + i] : arow[k];
-        acc += aik * b->data[(u64)k * N + j];
+      for (u32 k = k0; k < k1; k++) {
+        const u64 ai = transpose_a ? (u64)k * M + i : (u64)i * a->cols + k;
+        acc += a->data[ai] * b->data[(u64)(k - k0) * b_stride + j];
       }
       orow[j] = acc;
     }
@@ -417,11 +564,11 @@ RL_SIMD_KERNEL static void simd_mm_columns(Mat *out, const Mat *a, const Mat *b,
 }
 
 RL_SIMD_KERNEL static void simd_mm_nn(Mat *out, const Mat *a, const Mat *b) {
-  simd_mm_columns(out, a, b, false);
+  simd_mm_columns_range(out, a, b, false, 0, a->cols, 0, out->cols);
 }
 
 RL_SIMD_KERNEL static void simd_mm_tn(Mat *out, const Mat *a, const Mat *b) {
-  simd_mm_columns(out, a, b, true);
+  simd_mm_columns_range(out, a, b, true, 0, a->rows, 0, out->cols);
 }
 
 // out += A @ B^T, where B is stored transposed (b[j][k]). The K reduction is
@@ -448,6 +595,48 @@ RL_SIMD_KERNEL static void simd_mm_nt(Mat *out, const Mat *a, const Mat *b) {
     }
   }
 }
+
+// out += A^T @ B^T, where A is stored K x M and B stored N x K (both
+// transposed). Transposing a tile of B turns this into the TN form the kernel
+// above already handles, which is the standard treatment (BLAS does the same
+// thing): the multiply stays the vectorised one, and the transpose costs one
+// O(N*K) pass over B against an O(M*N*K) multiply. The tile keeps the scratch
+// block in L1 instead of materialising a whole K x N copy.
+#define RL_TT_TILE 32u
+
+RL_SIMD_KERNEL static void simd_mm_tt(Mat *out, const Mat *a, const Mat *b) {
+  const u32 N = out->cols;
+  const u32 K = a->rows;
+  real scratch[RL_TT_TILE * RL_TT_TILE];
+  Mat tile;
+  tile.rows = 0;
+  tile.cols = 0;
+  tile.data = scratch;
+
+  for (u32 kt = 0; kt < K; kt += RL_TT_TILE) {
+    const u32 kmax = (kt + RL_TT_TILE < K) ? kt + RL_TT_TILE : K;
+    for (u32 jt = 0; jt < N; jt += RL_TT_TILE) {
+      const u32 jmax = (jt + RL_TT_TILE < N) ? jt + RL_TT_TILE : N;
+      const u32 tw = jmax - jt;
+
+      // Transpose the tile: scratch[(k - kt) * tw + (j - jt)] = b[j][k].
+      for (u32 j = jt; j < jmax; j++) {
+        const real *brow = b->data + (u64)j * K;
+        real *dst = scratch + (j - jt);
+        for (u32 k = kt; k < kmax; k++) {
+          dst[(u64)(k - kt) * tw] = brow[k];
+        }
+      }
+
+      // out[:, jt:jmax] += A^T[:, kt:kmax] @ scratch.
+      tile.rows = kmax - kt;
+      tile.cols = tw;
+      simd_mm_columns_range(out, a, &tile, true, kt, kmax, jt, jmax);
+    }
+  }
+}
+
+#undef RL_TT_TILE
 
 #endif // RL_SIMD_BACKEND != RL_SIMD_NONE
 
@@ -522,7 +711,10 @@ b32 mat_mm(Mat *out, const Mat *a, const Mat *b, b8 zero_out, b8 transpose_a,
       simd_mm_tn(out, a, b);
       return true;
     }
-    // TT has no vector kernel; fall through to the scalar reference.
+    if (transpose_a && transpose_b) {
+      simd_mm_tt(out, a, b);
+      return true;
+    }
   }
 #endif
 

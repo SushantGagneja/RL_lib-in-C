@@ -172,37 +172,45 @@ static void test_matmul_tt(Arena *arena) {
 }
 
 // The vectorised path must agree with the portable scalar reference across all
-// transpose combinations and shapes that exercise the vector tails.
+// transpose combinations. The shapes exercise the vector tails and the odd-row
+// path, and the second one crosses the TT kernel's 32x32 transpose tile
+// boundaries in both directions.
 static void test_simd_matches_scalar(Arena *arena) {
   printf("  SIMD path == scalar reference... ");
-  const u32 M = 37, K = 41, N = 53;
-  Mat *a = mat_new(arena, M, K);
-  Mat *b = mat_new(arena, K, N);
-  Mat *at = mat_new(arena, K, M);
-  Mat *bt = mat_new(arena, N, K);
-  Mat *ref = mat_new(arena, M, N);
-  Mat *got = mat_new(arena, M, N);
-
-  rng_seed_g(31337, 9);
-  mat_rand(a, -1.0f, 1.0f);
-  mat_rand(b, -1.0f, 1.0f);
-  mat_rand(at, -1.0f, 1.0f);
-  mat_rand(bt, -1.0f, 1.0f);
+  static const u32 shapes[2][3] = {{37, 41, 53}, {65, 70, 67}};
 
   b32 ok = true;
   real worst = 0.0f;
-  for (u32 combo = 0; combo < 4; combo++) {
-    b8 ta = (b8)(combo & 1u);
-    b8 tb = (b8)((combo >> 1) & 1u);
-    const Mat *lhs = ta ? at : a;
-    const Mat *rhs = tb ? bt : b;
-    RL_LIB_CHECK(mat_mm_scalar(ref, lhs, rhs, 1, ta, tb));
-    RL_LIB_CHECK(mat_mm(got, lhs, rhs, 1, ta, tb));
-    const u64 n = (u64)M * N;
-    for (u64 i = 0; i < n; i++) {
-      real d = real_fabs(got->data[i] - ref->data[i]);
-      if (d > worst) worst = d;
-      if (d > 1e-4f) ok = false;
+  for (u32 s = 0; s < 2; s++) {
+    const u32 M = shapes[s][0];
+    const u32 K = shapes[s][1];
+    const u32 N = shapes[s][2];
+    Mat *a = mat_new(arena, M, K);
+    Mat *b = mat_new(arena, K, N);
+    Mat *at = mat_new(arena, K, M);
+    Mat *bt = mat_new(arena, N, K);
+    Mat *ref = mat_new(arena, M, N);
+    Mat *got = mat_new(arena, M, N);
+
+    rng_seed_g(31337, 9);
+    mat_rand(a, -1.0f, 1.0f);
+    mat_rand(b, -1.0f, 1.0f);
+    mat_rand(at, -1.0f, 1.0f);
+    mat_rand(bt, -1.0f, 1.0f);
+
+    for (u32 combo = 0; combo < 4; combo++) {
+      b8 ta = (b8)(combo & 1u);
+      b8 tb = (b8)((combo >> 1) & 1u);
+      const Mat *lhs = ta ? at : a;
+      const Mat *rhs = tb ? bt : b;
+      RL_LIB_CHECK(mat_mm_scalar(ref, lhs, rhs, 1, ta, tb));
+      RL_LIB_CHECK(mat_mm(got, lhs, rhs, 1, ta, tb));
+      const u64 n = (u64)M * N;
+      for (u64 i = 0; i < n; i++) {
+        real d = real_fabs(got->data[i] - ref->data[i]);
+        if (d > worst) worst = d;
+        if (d > 1e-4f) ok = false;
+      }
     }
   }
 

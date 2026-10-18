@@ -50,7 +50,9 @@ jobs:
 
   # Every suite is also run in double precision (RL_LIB_USE_DOUBLE), so f64 is
   # not only exercised by the gradient check. The tests build into their own
-  # object tree, so this does not touch the default f32 objects.
+  # object tree, so this does not touch the default f32 objects. The f64
+  # benchmark then compiles and runs the f64 AVX2 kernels, which no other job
+  # reaches.
   double-precision:
     name: f64 suites (ubuntu-latest)
     runs-on: ubuntu-latest
@@ -58,6 +60,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build and run every suite in f64
         run: make ERR=1 test-double
+      - name: f64 MatMul throughput
+        run: make ERR=1 bench-double
 
   # The threaded VecEnv pool is the only concurrent code in the library, so it
   # gets a ThreadSanitizer run of the two suites that drive it (they compare the

@@ -357,6 +357,10 @@ static double time_matmul(u32 M, u32 K, u32 N, u32 reps, b32 want_naive) {
   return flops / dt / 1e9;
 }
 
+static const char *precision_name(void) {
+  return sizeof(real) == sizeof(double) ? "f64" : "f32";
+}
+
 static void bench_matmul_throughput(void) {
   // A large square case (compute/L2 bound) and a representative RL layer
   // (64 features x 64-sample batch), where the register blocking matters most.
@@ -364,7 +368,8 @@ static void bench_matmul_throughput(void) {
   const u32 reps_lib[2] = {200, 20000};
   const u32 reps_naive[2] = {2, 200};
 
-  emit("\nMatMul (single core, -O3, `%s` backend):\n\n", simd_backend_name());
+  emit("\nMatMul (single core, -O3, `%s` backend, %s):\n\n", simd_backend_name(),
+       precision_name());
   emit("| Shape (M x K x N) | `mat_mm` GFLOPS | Naive GFLOPS |\n|---|---|---|\n");
 
   for (u32 s = 0; s < 2; s++) {

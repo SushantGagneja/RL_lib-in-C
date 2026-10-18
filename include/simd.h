@@ -5,18 +5,19 @@
 
 // Compile-time selection of the vectorised matrix-multiply backend.
 //
-//   RL_SIMD_NEON  — 4-wide f32 NEON. Baseline on AArch64, always available.
-//   RL_SIMD_AVX2  — 8-wide f32 AVX2+FMA on x86-64, guarded by a runtime
-//                   __builtin_cpu_supports() probe (the code is compiled with
-//                   per-function target attributes, so the binary still runs on
-//                   CPUs without AVX2).
+//   RL_SIMD_NEON  — NEON: 4-wide f32, or 2-wide f64 on AArch64 (ARMv7 NEON
+//                   loads 64-bit lanes but has no double-precision arithmetic).
+//   RL_SIMD_AVX2  — AVX2+FMA on x86-64: 8-wide f32 and 4-wide f64, guarded by a
+//                   runtime __builtin_cpu_supports() probe (the code is compiled
+//                   with per-function target attributes, so the binary still runs
+//                   on CPUs without AVX2).
 //   RL_SIMD_NONE  — portable scalar fallback.
 //
-// The vector kernels are written for the default f32 build only; the f64 build
-// (-DRL_LIB_USE_DOUBLE) uses the scalar reference, since it exists for the
-// gradient check rather than for speed. Define RL_SIMD_BACKEND=RL_SIMD_NONE
-// (i.e. -DRL_SIMD_BACKEND=0) to force the scalar path on any build; the test
-// suite uses mat_mm_scalar() to cross-check the two implementations.
+// The kernels cover all four (transpose_a, transpose_b) cases in both
+// precisions; mat_mm_scalar() stays the reference every vector path is
+// cross-checked against (tests/test_mat.c, in f32 and in the f64 suites).
+// Define RL_SIMD_BACKEND=RL_SIMD_NONE (i.e. -DRL_SIMD_BACKEND=0) to force the
+// scalar path on any build.
 
 #define RL_SIMD_NONE 0
 #define RL_SIMD_NEON 1
@@ -24,7 +25,14 @@
 
 #ifndef RL_SIMD_BACKEND
 #if defined(RL_LIB_USE_DOUBLE)
+#if defined(__aarch64__)
+#define RL_SIMD_BACKEND RL_SIMD_NEON
+#elif (defined(__x86_64__) || defined(__i386__)) && \
+    (defined(__GNUC__) || defined(__clang__))
+#define RL_SIMD_BACKEND RL_SIMD_AVX2
+#else
 #define RL_SIMD_BACKEND RL_SIMD_NONE
+#endif
 #elif defined(__ARM_NEON) || defined(__ARM_NEON__)
 #define RL_SIMD_BACKEND RL_SIMD_NEON
 #elif (defined(__x86_64__) || defined(__i386__)) && \
@@ -35,8 +43,9 @@
 #endif
 #endif
 
-#if RL_SIMD_BACKEND != RL_SIMD_NONE && defined(RL_LIB_USE_DOUBLE)
-#error "The SIMD kernels are f32-only; build the f64 configuration with RL_SIMD_BACKEND=RL_SIMD_NONE"
+#if RL_SIMD_BACKEND == RL_SIMD_NEON && defined(RL_LIB_USE_DOUBLE) && \
+    !defined(__aarch64__)
+#error "64-bit NEON kernels need AArch64; use RL_SIMD_BACKEND=RL_SIMD_NONE"
 #endif
 
 // Human-readable backend name ("scalar", "neon", or "avx2").

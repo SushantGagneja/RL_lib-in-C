@@ -101,12 +101,21 @@ independently reimplemented, and carried through the Phase 0–5 roadmap.
   load, evaluate), used as the packaging smoke test, plus `make hello`.
 - **`make test-double`**: builds the f64 configuration into its own object tree
   and runs *every* suite in double precision, not just the gradient check.
-- **SIMD MatMul** (`simd.c` / `simd.h` plus `linalg.c`): register-blocked NEON
-  and AVX2+FMA kernels for the NN/NT/TN cases, a portable `mat_mm_scalar`
+- **SIMD MatMul** (`simd.c` / `simd.h` plus `linalg.c`): NEON and AVX2+FMA
+  kernels for all four transpose cases in both precisions (4-wide f32 / 2-wide
+  f64 on NEON, 8-wide f32 / 4-wide f64 on AVX2), a portable `mat_mm_scalar`
   reference, a compile-time backend selector (`-DRL_SIMD_BACKEND=0` forces
-  scalar), and a runtime AVX2/FMA probe on x86-64. `test_mat` cross-checks the
-  vector path against the scalar reference, and a CI job builds the scalar
-  backend end to end.
+  scalar), and a runtime AVX2/FMA probe on x86-64. The NN/TN kernels process two
+  output rows at once and keep the scalar reduction order, so they are
+  element-wise identical to a single-row kernel while every element of B is
+  loaded once for two rows instead of once per row. That roughly doubled the
+  measured throughput: 2.1× at 256² and 2.6× at the 64×64×64 shape an RL layer
+  uses over the auto-vectorized scalar loop (≈33/39 GFLOPS f32, ≈17/20 GFLOPS
+  f64), against +11%/+67% for the single-row kernel before it. TT transposes a
+  32×32 tile into the TN path instead of falling back to scalar. `test_mat`
+  cross-checks every transpose case in both precisions, `make bench-throughput`
+  measures the f32 kernels, `make bench-double` the f64 ones, and a CI job
+  builds the scalar backend end to end.
 - **Vectorized environments** (`vecenv.c` / `vecenv.h`): `VecEnv` steps N
   cloned envs in lockstep, auto-resets finished ones in place, and preserves
   each terminal observation (`final_obs`) for correct value bootstrapping.
@@ -193,9 +202,9 @@ independently reimplemented, and carried through the Phase 0–5 roadmap.
   duplicated layer/init code paths and the weight-sharing hack.
 - The matrix-multiply kernels are `static` (`mm_nn` / `mm_nt` / `mm_tn` /
   `mm_tt`); `mat_mm` dispatches to the SIMD kernels when a backend is available.
-- The benchmark reports the active SIMD backend, two MatMul shapes (large and
-  RL-sized), `VecEnv` throughput, and the threaded `VecEnv` scaling on a
-  synthetic compute-bound env. The scalar sections keep using CPU time
+- The benchmark reports the active SIMD backend and precision, two MatMul shapes
+  (large and RL-sized), `VecEnv` throughput, and the threaded `VecEnv` scaling on
+  a synthetic compute-bound env. The scalar sections keep using CPU time
   (`clock()`); the threaded section uses a monotonic wall clock, because a
   speedup is invisible in CPU time by construction.
 
