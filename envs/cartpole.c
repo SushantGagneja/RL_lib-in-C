@@ -11,30 +11,30 @@ typedef struct {
   Rng rng; // owned by the environment, seeded in reset()
 } CartPoleState;
 
-static const real GRAVITY = 9.8f;
-static const real MASS_POLE = 0.1f;
-static const real TOTAL_MASS = 1.1f;
-static const real LENGTH_HALF = 0.5f;
-static const real POLEMASS_LENGTH = 0.05f; // MASS_POLE * LENGTH_HALF
-static const real TAU = 0.02f;
-static const real X_THRESHOLD = 2.4f;
-static const real THETA_THRESHOLD = 0.2095f; // ~12 degrees
+static const real GRAVITY = REAL_C(9.8);
+static const real MASS_POLE = REAL_C(0.1);
+static const real TOTAL_MASS = REAL_C(1.1);
+static const real LENGTH_HALF = REAL_C(0.5);
+static const real POLEMASS_LENGTH = REAL_C(0.05); // MASS_POLE * LENGTH_HALF
+static const real TAU = REAL_C(0.02);
+static const real X_THRESHOLD = REAL_C(2.4);
+static const real THETA_THRESHOLD = REAL_C(0.2095); // ~12 degrees
 static const u32 MAX_STEPS = 500;
 
 static void cartpole_reset(Env *e, u64 seed) {
   CartPoleState *s = (CartPoleState *)e->state;
   rng_seed(&s->rng, seed, 1);
-  s->x = (rng_unit(&s->rng) * 0.1f) - 0.05f;
-  s->x_dot = (rng_unit(&s->rng) * 0.1f) - 0.05f;
-  s->theta = (rng_unit(&s->rng) * 0.1f) - 0.05f;
-  s->theta_dot = (rng_unit(&s->rng) * 0.1f) - 0.05f;
+  s->x = (rng_unit(&s->rng) * REAL_C(0.1)) - REAL_C(0.05);
+  s->x_dot = (rng_unit(&s->rng) * REAL_C(0.1)) - REAL_C(0.05);
+  s->theta = (rng_unit(&s->rng) * REAL_C(0.1)) - REAL_C(0.05);
+  s->theta_dot = (rng_unit(&s->rng) * REAL_C(0.1)) - REAL_C(0.05);
   s->steps = 0;
 }
 
 static real cartpole_step(Env *e, u32 action, b32 *done, b32 *truncated) {
   CartPoleState *s = (CartPoleState *)e->state;
 
-  real force = (action == 1) ? 10.0f : -10.0f;
+  real force = (action == 1) ? REAL_C(10.0) : -REAL_C(10.0);
   real costh = real_cos(s->theta);
   real sinth = real_sin(s->theta);
 
@@ -43,7 +43,7 @@ static real cartpole_step(Env *e, u32 action, b32 *done, b32 *truncated) {
   real theta_acc =
       (GRAVITY * sinth - costh * temp) /
       (LENGTH_HALF *
-       (4.0f / 3.0f - MASS_POLE * costh * costh / TOTAL_MASS));
+       (REAL_C(4.0) / REAL_C(3.0) - MASS_POLE * costh * costh / TOTAL_MASS));
   real x_acc = temp - POLEMASS_LENGTH * theta_acc * costh / TOTAL_MASS;
 
   s->x += TAU * s->x_dot;
@@ -55,7 +55,7 @@ static real cartpole_step(Env *e, u32 action, b32 *done, b32 *truncated) {
   *done = (real_fabs(s->x) > X_THRESHOLD || real_fabs(s->theta) > THETA_THRESHOLD);
   *truncated = (s->steps >= MAX_STEPS);
 
-  return 1.0f; // +1 reward for every step balanced
+  return REAL_C(1.0); // +1 reward for every step balanced
 }
 
 static void cartpole_observe(Env *e, real *obs_out) {

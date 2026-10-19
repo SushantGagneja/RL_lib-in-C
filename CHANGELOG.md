@@ -37,6 +37,10 @@ single source of truth — it is also stamped into `rl_lib.pc`.
   transitions now bootstrap through `next_obs`, matching the truncation-aware
   GAE the policy-gradient trainers already use; `test_dqn` checks the target
   rule directly.
+- The CartPole and Pendulum physics used `f`-suffixed literals even in the f64
+  build, so constants such as 9.8 were rounded to float precision before being
+  promoted to double. They now go through `REAL_C`, which is bit-identical for
+  f32 and full precision for f64.
 - Checkpoint saves overwrote the destination in place, so a crash or a failed
   write could destroy the previous checkpoint. Saves now write `<path>.tmp`,
   flush and sync it, and rename it over the destination; a failure leaves the

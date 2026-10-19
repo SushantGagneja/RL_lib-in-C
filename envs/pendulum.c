@@ -12,24 +12,24 @@ typedef struct {
   Rng rng; // owned by the environment, seeded in reset()
 } PendulumState;
 
-static const real MAX_TORQUE = 2.0f;
-static const real MAX_SPEED = 8.0f;
-static const real DT = 0.05f;
-static const real GRAVITY = 10.0f;
-static const real MASS = 1.0f;
-static const real LENGTH = 1.0f;
-static const real PI = 3.14159265f;
-static const real TWO_PI = 6.28318531f;
+static const real MAX_TORQUE = REAL_C(2.0);
+static const real MAX_SPEED = REAL_C(8.0);
+static const real DT = REAL_C(0.05);
+static const real GRAVITY = REAL_C(10.0);
+static const real MASS = REAL_C(1.0);
+static const real LENGTH = REAL_C(1.0);
+static const real PI = REAL_C(3.14159265358979323846);
+static const real TWO_PI = REAL_C(6.28318530717958647692);
 static const u32 MAX_STEPS = 200;
 
 // Action bounds a policy clamps to. One entry per action dimension.
-static const real ACTION_MIN[1] = {-2.0f};
-static const real ACTION_MAX[1] = {2.0f};
+static const real ACTION_MIN[1] = {-REAL_C(2.0)};
+static const real ACTION_MAX[1] = {REAL_C(2.0)};
 
 // Wraps an angle into [-pi, pi).
 static real angle_normalize(real x) {
   real r = real_fmod(x + PI, TWO_PI);
-  if (r < 0.0f) {
+  if (r < REAL_C(0.0)) {
     r += TWO_PI;
   }
   return r - PI;
@@ -39,7 +39,7 @@ static void pendulum_reset(Env *e, u64 seed) {
   PendulumState *s = (PendulumState *)e->state;
   rng_seed(&s->rng, seed, 1);
   s->theta = rng_unit(&s->rng) * TWO_PI - PI;
-  s->theta_dot = rng_unit(&s->rng) * 2.0f - 1.0f; // [-1, 1]
+  s->theta_dot = rng_unit(&s->rng) * REAL_C(2.0) - REAL_C(1.0); // [-1, 1]
   s->steps = 0;
 }
 
@@ -58,13 +58,13 @@ static real pendulum_step_continuous(Env *e, const real *action, b32 *done,
   const real theta = angle_normalize(s->theta);
   const real theta_dot = s->theta_dot;
   const real reward =
-      -(theta * theta + 0.1f * theta_dot * theta_dot +
-        0.001f * torque * torque);
+      -(theta * theta + REAL_C(0.1) * theta_dot * theta_dot +
+        REAL_C(0.001) * torque * torque);
 
   real new_theta_dot =
       theta_dot +
-      (3.0f * GRAVITY / (2.0f * LENGTH) * real_sin(s->theta) +
-       3.0f / (MASS * LENGTH * LENGTH) * torque) *
+      (REAL_C(3.0) * GRAVITY / (REAL_C(2.0) * LENGTH) * real_sin(s->theta) +
+       REAL_C(3.0) / (MASS * LENGTH * LENGTH) * torque) *
           DT;
   if (new_theta_dot > MAX_SPEED) {
     new_theta_dot = MAX_SPEED;
