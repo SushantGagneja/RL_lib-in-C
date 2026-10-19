@@ -51,6 +51,23 @@ jobs:
       - name: Scalar-backend build and math tests
         run: make ERR=1 EXTRA_CFLAGS=-DRL_SIMD_BACKEND=0 test_mat && ./test_mat
 
+  # With RL_LIB_USE_BLAS the MatMul dispatcher hands the four transpose cases to
+  # CBLAS instead of the SIMD/scalar kernels. test_mat then checks BLAS against
+  # the scalar reference and every other suite exercises the BLAS path; the
+  # build links the runner's OpenBLAS, whose pkg-config file carries the
+  # version-specific include directory.
+  system-blas:
+    name: system BLAS (ubuntu-latest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install OpenBLAS
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libopenblas-dev pkg-config
+      - name: Build and test with BLAS
+        run: make ERR=1 BLAS=1 BLAS_CFLAGS="$(pkg-config --cflags openblas)" BLAS_LIBS="$(pkg-config --libs openblas)" test
+
   # Every suite is also run in double precision (RL_LIB_USE_DOUBLE), so f64 is
   # not only exercised by the gradient check. The tests build into their own
   # object tree, so this does not touch the default f32 objects. The f64
@@ -163,6 +180,8 @@ jobs:
           cc -O2 -Wall -Wextra -Werror $(pkg-config --cflags rl_lib) \
              examples/hello_rl.c $(pkg-config --libs rl_lib) -o "$RUNNER_TEMP/hello_shared"
           LD_LIBRARY_PATH="$RUNNER_TEMP/prefix/lib" "$RUNNER_TEMP/hello_shared"
+      - name: Drive the installed shared library from Python (ctypes)
+        run: python3 examples/python/ctypes_demo.py "$RUNNER_TEMP/prefix/lib/librl_lib.so"
       - name: Build and run a consumer against the static archive
         run: |
           cc -O2 -Wall -Wextra -Werror -I"$RUNNER_TEMP/prefix/include/rl_lib" \

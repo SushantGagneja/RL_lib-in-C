@@ -122,7 +122,10 @@ consumer can `find_package(RL_lib-in-C)` and link `RL_lib-in-C::rl_lib` — see
 
 The [`docs/API.md`](docs/API.md) reference documents every public function, and
 `examples/hello_rl.c` is a complete program that CI builds against the *installed*
-library to prove the packaged copy works outside the source tree.
+library to prove the packaged copy works outside the source tree. The C ABI is
+also all a foreign-function caller needs: `examples/python/ctypes_demo.py` drives
+the installed shared library from CPython with nothing but `ctypes` — it runs
+CartPole through the `Env` vtable and multiplies two matrices.
 
 ---
 
@@ -222,6 +225,18 @@ kernel's, not the baseline's. `make bench-double` runs the same measurement
 against the f64 build, whose kernels are vectorised too (2-wide NEON, 4-wide
 AVX2).
 
+The kernels above are the default. A system BLAS is one flag away: `make BLAS=1
+test` (or `-DRL_LIB_USE_BLAS` in any build) routes every `mat_mm` call through
+CBLAS — Accelerate on macOS, OpenBLAS or any CBLAS elsewhere — for all four
+transpose cases, while `mat_mm_scalar` stays the portable reference the math
+suite cross-checks against. That trades the zero-dependency default for the
+vendor kernel's cache blocking and threading when training wide layers in large
+batches is the bottleneck; the numbers in the table keep measuring the shipped
+kernels so the comparison stays apples to apples. Measured as an A/B within a
+single session, Accelerate is ≈25× the shipped f32 kernel at 256² and ≈12× at
+64³ (the gap narrows where the matrices already fit in cache) — the ratio, not
+the absolute rate, is what transfers between machines.
+
 #### Threaded `VecEnv`
 
 Those env steps are far too cheap for a worker pool: its barrier costs tens of
@@ -305,6 +320,7 @@ make release            # -O3 training binaries
 make asan               # ASAN + UBSAN build, then run all tests
 make tsan               # ThreadSanitizer over the threaded VecEnv suites
 make ERR=1 test         # the strict warning set as errors (what CI runs)
+make BLAS=1 test        # route MatMul through a system BLAS (see Throughput)
 
 make lib                # librl_lib.a + the shared library
 make install PREFIX=... # headers, libraries and pkg-config file
@@ -446,7 +462,8 @@ Tests: 61 passed, 0 failed
 │   ├── checkpoint.h         # Parameter + Adam state save/load
 │   ├── env.h                # Env interface (reset(seed), step, observe, clone)
 │   ├── vecenv.h             # Vectorized (batched) environment wrapper
-│   └── rl.h                 # Rollout buffer, REINFORCE, A2C, PPO, GAE, evaluation
+│   ├── rl.h                 # Rollout buffer, REINFORCE, A2C, PPO, GAE, evaluation
+│   └── dqn.h                # Replay buffer, epsilon schedule, DQN trainer
 ├── src/
 │   ├── memory.c
 │   ├── random.c
@@ -457,7 +474,8 @@ Tests: 61 passed, 0 failed
 │   ├── optim.c              # Parameter updates
 │   ├── checkpoint.c         # Versioned checkpoint format (LE, block-structured)
 │   ├── vecenv.c             # Synchronized env vector with auto-reset
-│   └── rl.c                 # Rollout, REINFORCE, A2C, PPO/GAE, evaluation
+│   ├── rl.c                 # Rollout, REINFORCE, A2C, PPO/GAE, evaluation
+│   └── dqn.c                # Replay ring, target sync, DQN update loop
 ├── envs/
 │   ├── snake.h / snake.c        # Grid Snake: 3-channel obs, 4 actions
 │   ├── cartpole.h / cartpole.c  # CartPole-like physics
@@ -469,14 +487,18 @@ Tests: 61 passed, 0 failed
 │   ├── train_ppo.c
 │   ├── train_ppo_continuous.c   # Pendulum-v1 with a squashed Gaussian policy
 │   ├── train_ppo_snake.c    # 6x6 Snake with PPO over VecEnv
+│   ├── train_dqn.c          # CartPole with DQN and a replay buffer
 │   ├── hello_rl.c           # Smallest end-to-end program (also used by CI)
-│   └── bench.c              # Multi-seed harness + throughput micro-benchmarks
+│   ├── bench.c              # Multi-seed harness + throughput micro-benchmarks
+│   └── python/
+│       └── ctypes_demo.py   # Drives the installed shared library from CPython
 ├── tests/
 │   ├── test_mat.c
 │   ├── test_gradcheck.c     # f32 and f64 numerical gradient checks
 │   ├── test_envs.c
 │   ├── test_rl.c
-│   └── test_checkpoint.c    # Round trips and rejection of bad files
+│   ├── test_checkpoint.c    # Round trips and rejection of bad files
+│   └── test_dqn.c           # Replay buffer, target sync, CartPole learning
 ├── docs/
 │   └── API.md               # Full API reference
 ├── .github/workflows/ci.yml # POSIX matrix + ASAN/UBSAN + TSan + serial-only + f64 + install + Windows/MSVC
@@ -498,7 +520,9 @@ Tests: 61 passed, 0 failed
   uses, f32), about 2× the compiler's own auto-vectorized scalar loop and ~20×
   a naive triple loop. That is a real but unremarkable number next to a tuned
   BLAS: MatMul is still single-threaded, there is no multi-level (i/j/k) cache
-  tiling and no fused optimizer. "High performance" is not claimed.
+  tiling and no fused optimizer. "High performance" is not claimed — building
+  with `make BLAS=1` swaps the kernels for the platform BLAS when that ceiling
+  matters.
 - **SIMD coverage is complete for the supported targets, and bounded elsewhere.**
   Both precisions are vectorised — 4-wide f32 / 2-wide f64 on NEON (f64 needs
   AArch64; ARMv7 NEON has no double-precision arithmetic) and 8-wide f32 /

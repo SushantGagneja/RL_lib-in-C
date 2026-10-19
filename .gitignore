@@ -27,6 +27,7 @@
 /test_envs
 /test_rl
 /test_checkpoint
+/test_dqn
 /checkpoint_test*.bin
 /rl_lib_bench
 /exercise/arena

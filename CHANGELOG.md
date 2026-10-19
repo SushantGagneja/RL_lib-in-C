@@ -61,6 +61,12 @@ single source of truth — it is also stamped into `rl_lib.pc`.
   `mat_*` forward and gradient kernels). The numerical gradient check grew from
   11 suites / 260 parameters to 12 suites / 280 parameters, green in f32 and
   f64.
+- **Optional system BLAS** (`RL_LIB_USE_BLAS`, the Makefile's `BLAS=1`):
+  `mat_mm` then goes through CBLAS for all four transpose cases — Accelerate on
+  macOS, OpenBLAS or any CBLAS elsewhere — replacing the SIMD and scalar paths
+  while `mat_mm_scalar` stays the reference the math suite cross-checks against.
+  CMake gains an `RL_LIB_USE_BLAS` option, and a CI job builds and runs every
+  suite against OpenBLAS.
 
 ### Changed
 - The PPO trainers now take their learning rate and entropy coefficient from
