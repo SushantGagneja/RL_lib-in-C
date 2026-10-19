@@ -30,6 +30,10 @@ typedef enum {
   OP_MM,
   OP_MSE,
   OP_REINFORCE,
+  OP_SIGMOID,
+  OP_EXP,
+  OP_LOG,
+  OP_DIV,
 } OpKind;
 
 typedef struct Tensor Tensor;
@@ -108,6 +112,10 @@ Tensor *tensor_softmax(Arena *arena, Net *model, Tensor *input);
 Tensor *tensor_add(Arena *arena, Net *model, Tensor *a, Tensor *b);
 Tensor *tensor_sub(Arena *arena, Net *model, Tensor *a, Tensor *b);
 Tensor *tensor_mul(Arena *arena, Net *model, Tensor *a, Tensor *b);
+Tensor *tensor_div(Arena *arena, Net *model, Tensor *a, Tensor *b);
+Tensor *tensor_sigmoid(Arena *arena, Net *model, Tensor *input);
+Tensor *tensor_exp(Arena *arena, Net *model, Tensor *input);
+Tensor *tensor_log(Arena *arena, Net *model, Tensor *input);
 Tensor *tensor_mm(Arena *arena, Net *model, Tensor *a, Tensor *b);
 
 Tensor *tensor_mse(Arena *arena, Net *model, Tensor *pred, Tensor *target);

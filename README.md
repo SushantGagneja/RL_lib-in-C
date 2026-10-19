@@ -380,9 +380,9 @@ of aborting; `RL_LIB_HAS_THREADS` in `vecenv.h` is the compile-time answer.
 
 | Suite | What it covers |
 |---|---|
-| `test_gradcheck` (f64) | 11 suites / 260 parameters vs central differences, `h = 1e-5`, tolerance `1e-6`; includes the Gaussian PPO surrogate and its log-density against an independent double-precision formula |
+| `test_gradcheck` (f64) | 12 suites / 280 parameters vs central differences, `h = 1e-5`, tolerance `1e-6`; includes the elementwise sigmoid/exp/log/div suite, the Gaussian PPO surrogate and its log-density against an independent double-precision formula |
 | `test_mat` | 13 checks over MatMul (NN/NT/TN/TT), SIMD-vs-scalar agreement across two shape sets that cross the vector and TT-tile boundaries, softmax, ReLU, add/sub, broadcast add, mul/tanh/MSE |
-| `test_gradcheck` (f32) | the same 11 suites in the default build (looser tolerance) |
+| `test_gradcheck` (f32) | the same 12 suites in the default build (looser tolerance) |
 | `test_envs` | 191 checks: CartPole bounds/termination/determinism; Snake reset, grid validation, wall/self collision, tail vacate, eating; Pendulum reset, hand-computed Euler dynamics, torque clamp, speed cap, determinism, clone independence and 200-step truncation; VecEnv shape, determinism, independent clones, auto-reset terminal-observation capture, vectorized continuous stepping with action bounds, and threaded-vs-serial stepping compared field by field over 260 steps |
 | `test_rl` | 103 checks: GAE vs a hand-computed trajectory, one Adam step, grad clipping, actor-critic build, value-head learning, batched-vs-per-sample gradient equivalence, a parameter registry grown past 128 entries, rebuilding the batched graph for a new minibatch size (weights preserved, batch and single-sample inference agree), the continuous builder (per-dimension bounds, sampled `u`/squash round trip, `log_std` registered as a parameter and surviving a rebuild), CartPole learning smoke tests for REINFORCE and PPO with same-seed determinism, a Pendulum continuous-PPO learning smoke test plus determinism, the LR/entropy schedules against hand-computed values, normalization statistics (Welford/posterior/clip cases), PPO recipe-knob effects (each knob changes the run; the defaults do not), normalized-training determinism, and threaded rollouts reaching bit-identical weights in both trainers |
 | `test_checkpoint` | 61 checks: byte-exact parameter round trips, bit-exact Adam-state resume, parameter-only and optimiser-only files, a continuous model round trip including `log_std`, and rejection of missing, corrupt, truncated, wrong-width, wrongly-sized and wrongly-shaped files — each verified to leave the model untouched |
@@ -402,7 +402,7 @@ Representative output:
   ...
 ---
 Tests: 11 passed, 0 failed
-Parameters checked: 260/260 passed within tolerance
+Parameters checked: 280/280 passed within tolerance
 
 --- test_mat ---
   SIMD path == scalar reference... (backend neon, max diff 2.38e-06) OK

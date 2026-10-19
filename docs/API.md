@@ -200,6 +200,10 @@ the build and the CPU support it, and otherwise calls exactly this.
 ```c
 b32 mat_relu(Mat *out, const Mat *in);
 b32 mat_tanh(Mat *out, const Mat *in);
+b32 mat_sigmoid(Mat *out, const Mat *in);
+b32 mat_exp(Mat *out, const Mat *in);
+b32 mat_log(Mat *out, const Mat *in);
+b32 mat_div(Mat *out, const Mat *a, const Mat *b);
 b32 mat_softmax(Mat *out, const Mat *in);   // per column: softmax over rows
 ```
 
@@ -237,6 +241,11 @@ b32 mat_sub_broadcast_grad(Mat *a_grad, Mat *b_grad, const Mat *grad);
 b32 mat_mul_add_grad(Mat *a_grad, Mat *b_grad, const Mat *a, const Mat *b, const Mat *grad);
 b32 mat_relu_add_grad(Mat *out, const Mat *in, const Mat *grad);
 b32 mat_tanh_add_grad(Mat *out, const Mat *tanh_out, const Mat *grad);
+b32 mat_sigmoid_add_grad(Mat *out, const Mat *sigmoid_out, const Mat *grad);
+b32 mat_exp_add_grad(Mat *out, const Mat *exp_out, const Mat *grad);
+b32 mat_log_add_grad(Mat *out, const Mat *in, const Mat *grad);
+b32 mat_div_add_grad(Mat *a_grad, Mat *b_grad, const Mat *a, const Mat *b,
+                     const Mat *grad);
 b32 mat_softmax_add_grad(Mat *out, const Mat *softmax_out, const Mat *grad);
 b32 mat_mse_add_grad(Mat *pred_grad, const Mat *pred, const Mat *target, const Mat *grad);
 b32 mat_mse_clip_add_grad(Mat *pred_grad, const Mat *pred, const Mat *old_v,
@@ -252,7 +261,10 @@ b32 mat_ppo_policy_add_grad(Mat *logits_grad, const Mat *logits, const u32 *acti
 
 `grad` is the upstream gradient (`dL/d(output)`) and is usually a `1 x 1` Mat
 holding the loss weight. `mat_tanh_add_grad` takes the *forward output* rather
-than the input, since `d tanh = 1 - tanh^2`.
+than the input, since `d tanh = 1 - tanh^2`; `mat_sigmoid_add_grad` and
+`mat_exp_add_grad` do the same. `mat_log` expects a strictly positive input
+(its gradient divides by it), and `mat_div` is elementwise `a / b` with no
+broadcasting.
 
 `mat_mse_clip_add_grad` is the clipped critic loss: the prediction is compared
 against the rollout's own value estimate, and outside the clip range only the
@@ -385,7 +397,8 @@ bound that instead of forbidding it, in both precisions.
 ```c
 typedef enum { TENSOR_PLAIN = 0, TENSOR_GRAD = 1, TENSOR_PARAM = 2 } TensorFlags;
 typedef enum { OP_NONE = 0, OP_RELU, OP_TANH, OP_SOFTMAX, OP_ADD, OP_SUB, OP_MUL,
-               OP_MM, OP_MSE, OP_REINFORCE } OpKind;
+               OP_MM, OP_MSE, OP_REINFORCE, OP_SIGMOID, OP_EXP, OP_LOG,
+               OP_DIV } OpKind;
 
 struct Tensor {
   u32 index; u32 flags; u8 arity; OpKind op;
@@ -422,10 +435,14 @@ Tensor *tensor_create(Arena *arena, Net *model, u32 rows, u32 cols, u32 flags);
 
 Tensor *tensor_relu(Arena *arena, Net *model, Tensor *input);
 Tensor *tensor_tanh(Arena *arena, Net *model, Tensor *input);
+Tensor *tensor_sigmoid(Arena *arena, Net *model, Tensor *input);
+Tensor *tensor_exp(Arena *arena, Net *model, Tensor *input);
+Tensor *tensor_log(Arena *arena, Net *model, Tensor *input);
 Tensor *tensor_softmax(Arena *arena, Net *model, Tensor *input);
 Tensor *tensor_add(Arena *arena, Net *model, Tensor *a, Tensor *b);
 Tensor *tensor_sub(Arena *arena, Net *model, Tensor *a, Tensor *b);
 Tensor *tensor_mul(Arena *arena, Net *model, Tensor *a, Tensor *b);
+Tensor *tensor_div(Arena *arena, Net *model, Tensor *a, Tensor *b);
 Tensor *tensor_mm(Arena *arena, Net *model, Tensor *a, Tensor *b);
 Tensor *tensor_mse(Arena *arena, Net *model, Tensor *pred, Tensor *target);
 Tensor *tensor_reinforce_loss(Arena *arena, Net *model, Tensor *probs, Tensor *rt);

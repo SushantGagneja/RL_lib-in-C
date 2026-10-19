@@ -887,6 +887,69 @@ static void test_gradcheck_input_and_mul(void) {
 
 // ── Main ─────────────────────────────────────────────────────────────
 
+// ── Test: sigmoid / exp / log / div ──────────────────────────────────
+
+static void test_gradcheck_elementwise_ops(void) {
+  printf("\n[gradcheck: sigmoid, exp, log, div]\n");
+
+  Arena *arena = arena_new(MiB(32));
+  Net *model = ARENA_OBJ(arena, Net);
+
+  Tensor *input = tensor_create(arena, model, 4, 1, TENSOR_PLAIN);
+  Tensor *W = tensor_create(arena, model, 4, 4, TENSOR_PARAM | TENSOR_GRAD);
+  Tensor *D = tensor_create(arena, model, 4, 1, TENSOR_PARAM | TENSOR_GRAD);
+
+  // z = W x -> sigmoid / exp paths; log(exp(z)) exercises a composed chain;
+  // the division puts both branches in the denominator.
+  Tensor *z = tensor_mm(arena, model, W, input);
+  Tensor *s = tensor_sigmoid(arena, model, z);
+  Tensor *e = tensor_exp(arena, model, z);
+  Tensor *l = tensor_log(arena, model, e);
+  Tensor *denom = tensor_add(arena, model, l, D);
+  Tensor *output = tensor_div(arena, model, s, denom);
+
+  Schedule graph = schedule_from(arena, model, output);
+  RL_LIB_ASSERT(graph.len > 0, "graph build failed");
+
+  rng_seed_g(778899, 5);
+  mat_rand(W->val, -0.3f, 0.3f);
+  mat_rand(D->val, 2.0f, 4.0f); // keep the denominator away from zero
+  mat_rand(input->val, 0.5f, 1.5f);
+
+  real h = GRAD_H;
+  real tol = GRAD_TOL;
+
+  printf("  W (4x4, 16 params)... ");
+  u32 f1 = gradcheck_param(&graph, output, W, h, tol);
+  printf("%s (%u failures)\n", f1 == 0 ? "OK" : "FAIL", f1);
+
+  printf("  D (4x1, 4 params)... ");
+  u32 f2 = gradcheck_param(&graph, output, D, h, tol);
+  printf("%s (%u failures)\n", f2 == 0 ? "OK" : "FAIL", f2);
+
+  // Hand-computed forward values for the four new kernels.
+  schedule_run(&graph);
+  const real z0 = z->val->data[0];
+  const real s_expected = (real)1.0 / ((real)1.0 + real_exp(-z0));
+  const real e_expected = real_exp(z0);
+  const real denom0 = l->val->data[0] + D->val->data[0];
+  const real out_expected = s->val->data[0] / denom0;
+  const b32 values_ok =
+      real_fabs(s->val->data[0] - s_expected) < (real)1e-5 &&
+      real_fabs(e->val->data[0] - e_expected) < (real)1e-5 &&
+      real_fabs(l->val->data[0] - z0) < (real)1e-4 &&
+      real_fabs(output->val->data[0] - out_expected) < (real)1e-5;
+  printf("  sigmoid/exp/log/div vs hand-computed values... %s\n",
+         values_ok ? "OK" : "FAIL");
+
+  if (f1 + f2 == 0 && values_ok)
+    tests_passed++;
+  else
+    tests_failed++;
+
+  arena_dispose(arena);
+}
+
 int main(void) {
   printf("\n=== Autograd gradient checks (%s) ===\n\n", GRADCHECK_NAME);
 
@@ -895,6 +958,7 @@ int main(void) {
   test_gradcheck_sub();
   test_gradcheck_broadcast_add();
   test_gradcheck_tanh_mul();
+  test_gradcheck_elementwise_ops();
   test_gradcheck_mse();
   test_gradcheck_fused_policy();
   test_gradcheck_ppo_policy();

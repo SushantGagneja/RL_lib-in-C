@@ -49,6 +49,11 @@ single source of truth — it is also stamped into `rl_lib.pc`.
   builder/rebuild, epsilon schedule, target sync, determinism, and a CartPole run
   reaching ~203 greedy return in 16000 steps), `examples/train_dqn.c` and
   `make dqn`.
+- **New graph ops**: elementwise `sigmoid`, `exp`, `log` and `div`
+  (`tensor_sigmoid`, `tensor_exp`, `tensor_log`, `tensor_div`, with matching
+  `mat_*` forward and gradient kernels). The numerical gradient check grew from
+  11 suites / 260 parameters to 12 suites / 280 parameters, green in f32 and
+  f64.
 
 ### Changed
 - The PPO trainers now take their learning rate and entropy coefficient from

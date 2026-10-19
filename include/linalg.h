@@ -31,9 +31,14 @@ b32 mat_mm(Mat *out, const Mat *a, const Mat *b, b8 zero_out,
 b32 mat_mm_scalar(Mat *out, const Mat *a, const Mat *b, b8 zero_out,
                   b8 transpose_a, b8 transpose_b);
 
-// Activations
+// Activations and elementwise maps
 b32 mat_relu(Mat *out, const Mat *in);
 b32 mat_tanh(Mat *out, const Mat *in);
+b32 mat_sigmoid(Mat *out, const Mat *in);
+b32 mat_exp(Mat *out, const Mat *in);
+// Natural log; the input must be strictly positive (the gradient divides by it).
+b32 mat_log(Mat *out, const Mat *in);
+b32 mat_div(Mat *out, const Mat *a, const Mat *b); // a / b, elementwise
 b32 mat_softmax(Mat *out, const Mat *in); // Per-column mat_softmax for batching
 
 // Loss functions
@@ -52,6 +57,11 @@ b32 mat_mul_add_grad(Mat *a_grad, Mat *b_grad, const Mat *a,
                      const Mat *b, const Mat *grad);
 b32 mat_relu_add_grad(Mat *out, const Mat *in, const Mat *grad);
 b32 mat_tanh_add_grad(Mat *out, const Mat *tanh_out, const Mat *grad);
+b32 mat_sigmoid_add_grad(Mat *out, const Mat *sigmoid_out, const Mat *grad);
+b32 mat_exp_add_grad(Mat *out, const Mat *exp_out, const Mat *grad);
+b32 mat_log_add_grad(Mat *out, const Mat *in, const Mat *grad);
+b32 mat_div_add_grad(Mat *a_grad, Mat *b_grad, const Mat *a, const Mat *b,
+                     const Mat *grad);
 b32 mat_softmax_add_grad(Mat *out, const Mat *softmax_out,
                          const Mat *grad); // Per-column mat_softmax backward
 b32 mat_mse_add_grad(Mat *pred_grad, const Mat *pred, const Mat *target,

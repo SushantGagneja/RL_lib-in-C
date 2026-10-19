@@ -788,6 +788,125 @@ b32 mat_tanh_add_grad(Mat *out, const Mat *tanh_out, const Mat *grad) {
   return true;
 }
 
+// Elementwise sigmoid, exponential, natural log and division. The forward maps
+// return false on a shape mismatch like the other kernels; the gradient kernels
+// accumulate into their output, so an upstream node can fan in from several
+// consumers.
+
+b32 mat_sigmoid(Mat *out, const Mat *in) {
+  if (out->rows != in->rows || out->cols != in->cols) {
+    return false;
+  }
+  const u64 n = mat_count(out);
+  for (u64 i = 0; i < n; i++) {
+    out->data[i] = (real)1.0 / ((real)1.0 + real_exp(-in->data[i]));
+  }
+  return true;
+}
+
+b32 mat_sigmoid_add_grad(Mat *out, const Mat *sigmoid_out, const Mat *grad) {
+  if (out->rows != sigmoid_out->rows || out->cols != sigmoid_out->cols) {
+    return false;
+  }
+  if (out->rows != grad->rows || out->cols != grad->cols) {
+    return false;
+  }
+  const u64 n = mat_count(out);
+  for (u64 i = 0; i < n; i++) {
+    const real y = sigmoid_out->data[i];
+    out->data[i] += grad->data[i] * y * ((real)1.0 - y);
+  }
+  return true;
+}
+
+b32 mat_exp(Mat *out, const Mat *in) {
+  if (out->rows != in->rows || out->cols != in->cols) {
+    return false;
+  }
+  const u64 n = mat_count(out);
+  for (u64 i = 0; i < n; i++) {
+    out->data[i] = real_exp(in->data[i]);
+  }
+  return true;
+}
+
+b32 mat_exp_add_grad(Mat *out, const Mat *exp_out, const Mat *grad) {
+  if (out->rows != exp_out->rows || out->cols != exp_out->cols) {
+    return false;
+  }
+  if (out->rows != grad->rows || out->cols != grad->cols) {
+    return false;
+  }
+  const u64 n = mat_count(out);
+  for (u64 i = 0; i < n; i++) {
+    out->data[i] += grad->data[i] * exp_out->data[i];
+  }
+  return true;
+}
+
+b32 mat_log(Mat *out, const Mat *in) {
+  if (out->rows != in->rows || out->cols != in->cols) {
+    return false;
+  }
+  const u64 n = mat_count(out);
+  for (u64 i = 0; i < n; i++) {
+    out->data[i] = real_log(in->data[i]);
+  }
+  return true;
+}
+
+b32 mat_log_add_grad(Mat *out, const Mat *in, const Mat *grad) {
+  if (out->rows != in->rows || out->cols != in->cols) {
+    return false;
+  }
+  if (out->rows != grad->rows || out->cols != grad->cols) {
+    return false;
+  }
+  const u64 n = mat_count(out);
+  for (u64 i = 0; i < n; i++) {
+    out->data[i] += grad->data[i] / in->data[i];
+  }
+  return true;
+}
+
+b32 mat_div(Mat *out, const Mat *a, const Mat *b) {
+  if (a->rows != b->rows || a->cols != b->cols) {
+    return false;
+  }
+  if (out->rows != a->rows || out->cols != a->cols) {
+    return false;
+  }
+  const u64 n = mat_count(out);
+  for (u64 i = 0; i < n; i++) {
+    out->data[i] = a->data[i] / b->data[i];
+  }
+  return true;
+}
+
+b32 mat_div_add_grad(Mat *a_grad, Mat *b_grad, const Mat *a, const Mat *b,
+                     const Mat *grad) {
+  if (a->rows != b->rows || a->cols != b->cols) {
+    return false;
+  }
+  if (grad->rows != a->rows || grad->cols != a->cols) {
+    return false;
+  }
+
+  const u64 n = mat_count(a);
+  if (a_grad != NULL) {
+    for (u64 i = 0; i < n; i++) {
+      a_grad->data[i] += grad->data[i] / b->data[i];
+    }
+  }
+  if (b_grad != NULL) {
+    for (u64 i = 0; i < n; i++) {
+      const real d = b->data[i];
+      b_grad->data[i] -= grad->data[i] * a->data[i] / (d * d);
+    }
+  }
+  return true;
+}
+
 // Per-column softmax: each column c is an independent distribution over rows.
 b32 mat_softmax(Mat *out, const Mat *in) {
   if (out->rows != in->rows || out->cols != in->cols) {

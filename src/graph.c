@@ -76,6 +76,10 @@ static ShapeRule *shape_rule(OpKind op) {
   case OP_SOFTMAX:
   case OP_MUL:
   case OP_REINFORCE:
+  case OP_SIGMOID:
+  case OP_EXP:
+  case OP_LOG:
+  case OP_DIV:
     return shape_same;
   case OP_ADD:
   case OP_SUB:
@@ -158,6 +162,22 @@ Tensor *tensor_relu(Arena *arena, Net *model, Tensor *input) {
 
 Tensor *tensor_tanh(Arena *arena, Net *model, Tensor *input) {
   return make_op(arena, model, OP_TANH, input, NULL);
+}
+
+Tensor *tensor_sigmoid(Arena *arena, Net *model, Tensor *input) {
+  return make_op(arena, model, OP_SIGMOID, input, NULL);
+}
+
+Tensor *tensor_exp(Arena *arena, Net *model, Tensor *input) {
+  return make_op(arena, model, OP_EXP, input, NULL);
+}
+
+Tensor *tensor_log(Arena *arena, Net *model, Tensor *input) {
+  return make_op(arena, model, OP_LOG, input, NULL);
+}
+
+Tensor *tensor_div(Arena *arena, Net *model, Tensor *a, Tensor *b) {
+  return make_op(arena, model, OP_DIV, a, b);
 }
 
 Tensor *tensor_softmax(Arena *arena, Net *model, Tensor *input) {
@@ -289,6 +309,18 @@ static void apply_forward(Tensor *t) {
   case OP_TANH:
     RL_LIB_CHECK(mat_tanh(t->val, t->inputs[0]->val));
     return;
+  case OP_SIGMOID:
+    RL_LIB_CHECK(mat_sigmoid(t->val, t->inputs[0]->val));
+    return;
+  case OP_EXP:
+    RL_LIB_CHECK(mat_exp(t->val, t->inputs[0]->val));
+    return;
+  case OP_LOG:
+    RL_LIB_CHECK(mat_log(t->val, t->inputs[0]->val));
+    return;
+  case OP_DIV:
+    RL_LIB_CHECK(mat_div(t->val, t->inputs[0]->val, t->inputs[1]->val));
+    return;
   case OP_SOFTMAX:
     RL_LIB_CHECK(mat_softmax(t->val, t->inputs[0]->val));
     return;
@@ -347,6 +379,26 @@ static void apply_backward(Tensor *t) {
     if (wants_grad(a)) {
       RL_LIB_CHECK(mat_tanh_add_grad(a->grad, t->val, t->grad));
     }
+    return;
+  case OP_SIGMOID:
+    if (wants_grad(a)) {
+      RL_LIB_CHECK(mat_sigmoid_add_grad(a->grad, t->val, t->grad));
+    }
+    return;
+  case OP_EXP:
+    if (wants_grad(a)) {
+      RL_LIB_CHECK(mat_exp_add_grad(a->grad, t->val, t->grad));
+    }
+    return;
+  case OP_LOG:
+    if (wants_grad(a)) {
+      RL_LIB_CHECK(mat_log_add_grad(a->grad, a->val, t->grad));
+    }
+    return;
+  case OP_DIV:
+    RL_LIB_CHECK(mat_div_add_grad(wants_grad(a) ? a->grad : NULL,
+                                  wants_grad(b) ? b->grad : NULL, a->val,
+                                  b->val, t->grad));
     return;
   case OP_SOFTMAX:
     if (wants_grad(a)) {
