@@ -6,7 +6,7 @@ All notable changes to this project are recorded here. The format follows
 breaks on a major bump. `RL_LIB_VERSION_STRING` in `include/version.h` is the
 single source of truth — it is also stamped into `rl_lib.pc`.
 
-## Unreleased
+## 1.1.0 — 2026-10-19
 
 ### Added
 - **Training recipe knobs.** `TrainCfg.lr_schedule`/`lr_end` decay the learning

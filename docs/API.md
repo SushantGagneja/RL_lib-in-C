@@ -77,9 +77,9 @@ RL_LIB_CHECK(expr);        // aborts when a b32-returning call fails
 
 ```c
 #define RL_LIB_VERSION_MAJOR 1
-#define RL_LIB_VERSION_MINOR 0
+#define RL_LIB_VERSION_MINOR 1
 #define RL_LIB_VERSION_PATCH 0
-#define RL_LIB_VERSION_STRING "1.0.0"
+#define RL_LIB_VERSION_STRING "1.1.0"
 ```
 
 `RL_LIB_VERSION_STRING` is also what the Makefile stamps into `rl_lib.pc`, so a
