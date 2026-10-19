@@ -60,14 +60,6 @@ Tensor *mlp_new(Arena *arena, Net *model, Rng *rng, Tensor *in,
   return cur;
 }
 
-typedef enum {
-  NET_ARCH_NONE = 0,
-  NET_ARCH_ACTOR,
-  NET_ARCH_ACTOR_CRITIC,
-  NET_ARCH_CONTINUOUS,
-  NET_ARCH_Q,
-} NetArchKind;
-
 // The architecture a builder used, kept so the batched training subgraph can be
 // rebuilt for a different minibatch size without re-creating the parameters.
 // Private to this file: graph.h only knows the opaque `NetArchSpec`.
@@ -175,6 +167,19 @@ u32 net_batch_size(const Net *model) {
   return (model != NULL && model->batch_input != NULL)
              ? model->batch_input->val->cols
              : 0u;
+}
+
+b32 net_arch_info(const Net *model, NetArchInfo *out) {
+  if (model == NULL || out == NULL || model->arch == NULL) {
+    return false;
+  }
+  out->kind = model->arch->kind;
+  out->obs_dim = model->arch->obs_dim;
+  out->act_dim = model->arch->act_dim;
+  out->num_hidden = model->arch->num_hidden;
+  out->hidden_dims = model->arch->hidden_dims;
+  out->batch_size = model->arch->batch_size;
+  return true;
 }
 
 void actor_build(Arena *arena, Net *model, Rng *rng, u32 obs_dim,

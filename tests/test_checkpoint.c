@@ -320,18 +320,35 @@ static void test_failure_modes(void) {
   // Wrong format version.
   f = fopen(JUNK_PATH, "wb");
   if (f != NULL) {
-    fwrite("RLLIBCK3", 1, 8, f);
+    fwrite("RLLIBCK4", 1, 8, f);
     put_u32_le(f, 99u);
     fclose(f);
     seal_junk_file(JUNK_PATH);
     ASSERT_TRUE(!net_load(model, JUNK_PATH), "an unknown version is rejected");
+    ASSERT_TRUE(strstr(checkpoint_last_error(), "version") != NULL,
+                "the error names the version");
+  }
+
+  // A format-3 file from an earlier release is rejected with a message that
+  // says so, before any block is parsed.
+  f = fopen(JUNK_PATH, "wb");
+  if (f != NULL) {
+    fwrite("RLLIBCK3", 1, 8, f);
+    put_u32_le(f, 3u);
+    fclose(f);
+    seal_junk_file(JUNK_PATH);
+    ASSERT_TRUE(!net_load(model, JUNK_PATH), "a format-3 file is rejected");
+    ASSERT_TRUE(strstr(checkpoint_last_error(), "format") != NULL,
+                "the error names the format change");
+    ASSERT_TRUE(param_checksum(model) == before,
+                "a v3 file leaves the model untouched");
   }
 
   // Truncated: a parameter block header that promises far more than it delivers.
   f = fopen(JUNK_PATH, "wb");
   if (f != NULL) {
-    fwrite("RLLIBCK3", 1, 8, f);
-    put_u32_le(f, 3u);
+    fwrite("RLLIBCK4", 1, 8, f);
+    put_u32_le(f, 4u);
     put_u32_le(f, 1u);    // BLOCK_PARAMS
     put_u32_le(f, 1000u); // payload bytes that are not there
     fclose(f);
@@ -343,8 +360,8 @@ static void test_failure_modes(void) {
   // A payload sized for a different model.
   f = fopen(JUNK_PATH, "wb");
   if (f != NULL) {
-    fwrite("RLLIBCK3", 1, 8, f);
-    put_u32_le(f, 3u);
+    fwrite("RLLIBCK4", 1, 8, f);
+    put_u32_le(f, 4u);
     put_u32_le(f, 1u); // BLOCK_PARAMS
     put_u32_le(f, 8u);
     put_u32_le(f, (u32)sizeof(real));
@@ -371,8 +388,8 @@ static void test_failure_modes(void) {
         (u32)(8u + 8u * (u64)model->n_params + n_scalars * sizeof(real));
     f = fopen(JUNK_PATH, "wb");
     if (f != NULL) {
-      fwrite("RLLIBCK3", 1, 8, f);
-      put_u32_le(f, 3u);
+      fwrite("RLLIBCK4", 1, 8, f);
+      put_u32_le(f, 4u);
       put_u32_le(f, 1u);
       put_u32_le(f, payload);
       put_u32_le(f, wrong_width);
@@ -400,8 +417,8 @@ static void test_failure_modes(void) {
   ASSERT_TRUE(net_save(wide, SAVE_PATH), "save a differently shaped model");
   ASSERT_TRUE(!net_load(model, SAVE_PATH),
               "a checkpoint from another architecture is rejected");
-  ASSERT_TRUE(strstr(checkpoint_last_error(), "size") != NULL,
-              "the error names the size mismatch");
+  ASSERT_TRUE(strstr(checkpoint_last_error(), "architecture") != NULL,
+              "the error names the architecture mismatch");
   ASSERT_TRUE(param_checksum(model) == before, "model untouched");
 
   // The shape table itself: hand-craft a file whose payload size is exactly
@@ -416,8 +433,8 @@ static void test_failure_modes(void) {
         (u32)(8u + 8u * (u64)model->n_params + n_scalars * sizeof(real));
     f = fopen(JUNK_PATH, "wb");
     if (f != NULL) {
-      fwrite("RLLIBCK3", 1, 8, f);
-      put_u32_le(f, 3u);
+      fwrite("RLLIBCK4", 1, 8, f);
+      put_u32_le(f, 4u);
       put_u32_le(f, 1u);
       put_u32_le(f, payload);
       put_u32_le(f, (u32)sizeof(real));
@@ -713,6 +730,140 @@ static void test_continuous_round_trip(void) {
   printf("OK\n");
 }
 
+// ── Architecture metadata ────────────────────────────────────────────
+
+static void test_arch_validation(void) {
+  printf("  Architecture metadata gates loads... ");
+
+  Arena *a1 = arena_new(MiB(8));
+  Rng rng;
+  rng_seed(&rng, 31, 1);
+  const u32 hidden[2] = {8, 8};
+  Net *actor = net_new(a1);
+  actor_build(a1, actor, &rng, 4, hidden, 2, 2, 4);
+  ASSERT_TRUE(net_save(actor, SAVE_PATH), "save a builder-made actor");
+
+  // The same shapes from a different builder: the recorded kind must match too.
+  Arena *a2 = arena_new(MiB(8));
+  Rng rng2;
+  rng_seed(&rng2, 32, 2);
+  Net *critic = net_new(a2);
+  actor_critic_build(a2, critic, &rng2, 4, hidden, 2, 2, 4);
+  ASSERT_TRUE(!net_load(critic, SAVE_PATH),
+              "an actor-critic cannot load an actor file");
+  ASSERT_TRUE(strstr(checkpoint_last_error(), "kind") != NULL,
+              "the error names the kind mismatch");
+
+  // Same builder and head widths, different hidden widths.
+  Arena *a3 = arena_new(MiB(8));
+  Rng rng3;
+  rng_seed(&rng3, 33, 3);
+  const u32 other_hidden[2] = {8, 4};
+  Net *narrow = net_new(a3);
+  actor_build(a3, narrow, &rng3, 4, other_hidden, 2, 2, 4);
+  ASSERT_TRUE(!net_load(narrow, SAVE_PATH),
+              "a different hidden width is rejected");
+  ASSERT_TRUE(strstr(checkpoint_last_error(), "hidden") != NULL,
+              "the error names the hidden layers");
+
+  // A hand-built graph has no architecture record to match.
+  Arena *a4 = arena_new(MiB(8));
+  Net *manual = net_new(a4);
+  ASSERT_TRUE(!net_load(manual, SAVE_PATH),
+              "a hand-built graph cannot load a builder file");
+  ASSERT_TRUE(strstr(checkpoint_last_error(), "hand-built") != NULL,
+              "the error explains the missing record");
+
+  // The right architecture loads, byte for byte.
+  Arena *a5 = arena_new(MiB(8));
+  Rng rng5;
+  rng_seed(&rng5, 34, 5);
+  Net *restored = net_new(a5);
+  actor_build(a5, restored, &rng5, 4, hidden, 2, 2, 4);
+  ASSERT_TRUE(net_load(restored, SAVE_PATH), "a matching architecture loads");
+  ASSERT_TRUE(params_identical(actor, restored), "parameters restored exactly");
+
+  remove(SAVE_PATH);
+  arena_dispose(a1);
+  arena_dispose(a2);
+  arena_dispose(a3);
+  arena_dispose(a4);
+  arena_dispose(a5);
+  printf("OK\n");
+}
+
+// ── Normalisation statistics ─────────────────────────────────────────
+
+static b32 norm_identical(const NormStats *a, const NormStats *b) {
+  if (a->obs_dim != b->obs_dim || a->count != b->count ||
+      a->ret_count != b->ret_count || a->mean == NULL || b->mean == NULL ||
+      a->m2 == NULL || b->m2 == NULL) {
+    return false;
+  }
+  if (memcmp(&a->eps, &b->eps, sizeof(real)) != 0 ||
+      memcmp(&a->clip_obs, &b->clip_obs, sizeof(real)) != 0 ||
+      memcmp(&a->ret_mean, &b->ret_mean, sizeof(real)) != 0 ||
+      memcmp(&a->ret_m2, &b->ret_m2, sizeof(real)) != 0 ||
+      memcmp(&a->gamma, &b->gamma, sizeof(real)) != 0) {
+    return false;
+  }
+  return memcmp(a->mean, b->mean, (size_t)a->obs_dim * sizeof(real)) == 0 &&
+         memcmp(a->m2, b->m2, (size_t)a->obs_dim * sizeof(real)) == 0;
+}
+
+static void test_norm_round_trip(void) {
+  printf("  Normalisation statistics round-trip... ");
+
+  Arena *a1 = arena_new(MiB(8));
+  Arena *a2 = arena_new(MiB(8));
+  Rng rng;
+  rng_seed(&rng, 41, 1);
+  Net *src = build_model(a1, &rng, 2, 4);
+  Rng rng2;
+  rng_seed(&rng2, 42, 2);
+  Net *dst = build_model(a2, &rng2, 2, 4);
+  Adam *adam = adam_new(a1, src, REAL_C(0.01));
+  NormStats *stats = norm_stats_new(a1, 4);
+  NormStats *restored = norm_stats_new(a2, 4);
+
+  for (u32 i = 0; i < 64u; i++) {
+    const real obs[4] = {(real)i, (real)i * REAL_C(0.5), -(real)i,
+                         REAL_C(1.0) + (real)i * REAL_C(0.125)};
+    norm_stats_fold_obs(stats, obs);
+    norm_stats_fold_return(stats, (real)i * REAL_C(0.25) - REAL_C(2.0));
+  }
+
+  ASSERT_TRUE(checkpoint_save_ex(src, adam, stats, SAVE_PATH),
+              "save with normalisation statistics");
+  ASSERT_TRUE(checkpoint_load_ex(dst, adam, restored, SAVE_PATH),
+              "load with normalisation statistics");
+  ASSERT_TRUE(params_identical(src, dst), "parameters still match");
+  ASSERT_TRUE(norm_identical(stats, restored),
+              "every statistic round-trips bit for bit");
+
+  // A plain load skips the block and still restores the parameters.
+  Arena *a3 = arena_new(MiB(8));
+  Rng rng3;
+  rng_seed(&rng3, 43, 3);
+  Net *plain = build_model(a3, &rng3, 2, 4);
+  ASSERT_TRUE(checkpoint_load(plain, NULL, SAVE_PATH),
+              "a plain load accepts a file with statistics");
+  ASSERT_TRUE(params_identical(src, plain), "parameters restored without stats");
+
+  // A destination whose observation width disagrees is rejected up front.
+  NormStats *mismatch = norm_stats_new(a3, 3);
+  ASSERT_TRUE(!checkpoint_load_ex(plain, NULL, mismatch, SAVE_PATH),
+              "a different statistics width is rejected");
+  ASSERT_TRUE(strstr(checkpoint_last_error(), "normalisation") != NULL,
+              "the error names the normalisation block");
+
+  remove(SAVE_PATH);
+  arena_dispose(a1);
+  arena_dispose(a2);
+  arena_dispose(a3);
+  printf("OK\n");
+}
+
 int main(void) {
   printf("\n=== Checkpoint tests ===\n\n");
 
@@ -725,6 +876,8 @@ int main(void) {
   test_fuzzed_inputs();
   test_null_args();
   test_continuous_round_trip();
+  test_arch_validation();
+  test_norm_round_trip();
 
   printf("\n---\nTests: %u passed, %u failed\n\n", tests_passed, tests_failed);
   return tests_failed > 0 ? 1 : 0;

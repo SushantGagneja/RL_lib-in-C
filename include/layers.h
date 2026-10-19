@@ -85,4 +85,31 @@ b32 net_set_batch_size(Arena *arena, Net *model, u32 batch_size);
 // the model has no batched graph.
 u32 net_batch_size(const Net *model);
 
+// The kind of model a builder produced. Recorded in the graph so the batched
+// subgraph can be rebuilt (net_set_batch_size) and so a checkpoint can prove it
+// was written for the same kind of model.
+typedef enum {
+  NET_ARCH_NONE = 0,
+  NET_ARCH_ACTOR,
+  NET_ARCH_ACTOR_CRITIC,
+  NET_ARCH_CONTINUOUS,
+  NET_ARCH_Q,
+} NetArchKind;
+
+// A read-only view of the architecture a builder recorded for `model`.
+// `hidden_dims` points at `num_hidden` arena-owned widths; `batch_size` is the
+// size the batched graph was last built for (0 before net_set_batch_size or
+// when the builder was called with batch_size 0). Hand-built graphs have no
+// record, and net_arch_info returns false for them.
+typedef struct {
+  NetArchKind kind;
+  u32 obs_dim;
+  u32 act_dim;
+  u32 num_hidden;
+  const u32 *hidden_dims;
+  u32 batch_size;
+} NetArchInfo;
+
+b32 net_arch_info(const Net *model, NetArchInfo *out);
+
 #endif // LAYERS_H

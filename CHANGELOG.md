@@ -9,14 +9,23 @@ single source of truth — it is also stamped into `rl_lib.pc`.
 ## Unreleased
 
 ### Added
+- **Checkpoint format 4.** Builder-made models now record their architecture —
+  kind, observation/action dimensions and hidden widths — in an ARCH block, and
+  `checkpoint_save_ex` / `checkpoint_load_ex` carry a run's running
+  observation-normalisation and reward-scaling statistics in a NORM block, so a
+  normalised PPO run resumes with the statistics it trained with instead of
+  restarting them. Loads validate the architecture and the statistics width
+  before touching a parameter, so a mismatched model, a hand-built graph, or a
+  file from v1–v3 is rejected with a clear message. The plain
+  `checkpoint_save` / `checkpoint_load` pair is unchanged.
 - **Checkpoint checksums.** Every file now ends in a CRC-32 trailer that is
   verified before parsing, so bit rot and half-written files are reported as
   corruption instead of turning into a confusing block-size error or silently
-  wrong parameters. The format number moved to 3; older files are rejected up
+  wrong parameters. The format number moved to 4; older files are rejected up
   front, as with every earlier format change.
 - **Transactional loads.** The reader walks a file twice — validate, then apply
   — so a load that fails *after* a block parsed cleanly can no longer leave the
-  model half-updated. `test_checkpoint` grew from 61 to 587 checks (default
+  model half-updated. `test_checkpoint` grew from 61 to 616 checks (default
   build) with a 300-case mutation fuzz pass (bit flips, truncations, overwritten
   runs, a third of them with a recomputed checksum) asserting the no-crash and
   no-half-load invariants; the sanitizer job runs it under ASAN/UBSAN.

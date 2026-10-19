@@ -1,33 +1,41 @@
-// checkpoint.c — versioned, endian-independent save/load for parameters and
-// Adam state.
+// checkpoint.c — versioned, endian-independent save/load for parameters, Adam
+// state and observation-normalisation statistics.
 //
 // File layout (little-endian throughout, so a checkpoint moves between
 // machines):
 //
-//   char magic[8]  "RLLIBCK3"
-//   u32  version   3
+//   char magic[8]  "RLLIBCK4"
+//   u32  version   4
 //   block*
 //   u32  crc32     checksum of every preceding byte
 //
 //   block := u32 kind | u32 payload_bytes | payload
+//     ARCH(4):   u32 kind | u32 obs_dim | u32 act_dim | u32 num_hidden
+//                | u32 hidden[num_hidden]      (builder-made models only)
 //     PARAMS(1): u32 scalar_bytes | u32 n_params | u32 rows[n] | u32 cols[n]
 //                | data[n_params][rows*cols]
 //     ADAM(2):   u32 scalar_bytes | u32 n_params | u32 rows[n] | u32 cols[n]
 //                | u64 step | f64 lr | f64 beta1 | f64 beta2 | f64 eps
 //                | m1[...] | m2[...]
+//     NORM(3):   u32 obs_dim | u64 count | u64 ret_count | f64 eps
+//                | f64 clip_obs | f64 ret_mean | f64 ret_m2 | f64 gamma
+//                | f64 mean[obs_dim] | f64 m2[obs_dim]
 //     END(0):    empty
 //
 // The trailing CRC-32 (reflected, poly 0xEDB88320) is checked before a single
 // block is parsed, so bit rot is reported as such rather than turning into a
-// confusing block-size error or silently wrong parameters. Format 3 is format 2
-// plus that trailer; like every earlier format change, older files are rejected
-// up front rather than migrated.
+// confusing block-size error or silently wrong parameters. Format 4 is format 3
+// plus the ARCH and NORM blocks; like every earlier format change, older files
+// are rejected up front rather than migrated.
 //
 // `payload_bytes` lets a reader skip blocks it does not understand, so new block
 // kinds can be appended without breaking older readers that only need the
 // blocks they know. `scalar_bytes` records sizeof(real) at save time, which is
 // how an f32/f64 mismatch is caught before values get reinterpreted: floating
 // point bit patterns are endian-independent here, but not width-independent.
+// NORM values travel as f64, which represents both widths exactly, so the
+// statistics alone do not pin a file to one precision - the parameter blocks
+// still do.
 //
 // Reads validate the whole file before touching the model - payloads are
 // staged, and the stream is walked twice (validate, then apply) - so a
@@ -36,6 +44,7 @@
 // synced, and renamed over <path>, so a crash or a failed write cannot destroy
 // the previously saved checkpoint.
 #include "checkpoint.h"
+#include "layers.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -48,18 +57,25 @@
 #include <unistd.h>
 #endif
 
-#define CHECKPOINT_FORMAT 3u
+#define CHECKPOINT_FORMAT 4u
 
 enum {
   BLOCK_END = 0,
   BLOCK_PARAMS = 1,
   BLOCK_ADAM = 2,
+  BLOCK_NORM = 3,
+  BLOCK_ARCH = 4,
 };
 
 #define ADAM_HYPER_BYTES 8u  // one u64 step
 #define ADAM_HYPER_F64 4u    // lr, beta1, beta2, eps
 
-static const char CHECKPOINT_MAGIC[8] = {'R', 'L', 'L', 'I', 'B', 'C', 'K', '3'};
+// Sanity caps for untrusted files: a block that promises more than this is
+// rejected before it can turn into a huge allocation.
+#define MAX_NORM_OBS_DIM (1u << 20) // observation components in NORM
+#define MAX_ARCH_HIDDEN 1024u       // hidden layers named in ARCH
+
+static const char CHECKPOINT_MAGIC[8] = {'R', 'L', 'L', 'I', 'B', 'C', 'K', '4'};
 
 static const char *g_last_error = "";
 
@@ -435,6 +451,67 @@ static b32 write_adam_block(FILE *f, const Adam *adam, const Net *model) {
   return ok;
 }
 
+// Builder-made models record the architecture they were built with; a
+// hand-built graph has no record, so it writes no block and loading is gated
+// by the shape table alone.
+static b32 write_arch_block(FILE *f, const Net *model) {
+  NetArchInfo info;
+  if (!net_arch_info(model, &info)) {
+    return true;
+  }
+  if (info.num_hidden > MAX_ARCH_HIDDEN) {
+    set_error("architecture names too many hidden layers to record");
+    return false;
+  }
+  const u64 payload = 16u + 4u * (u64)info.num_hidden;
+  if (!put_u32(f, BLOCK_ARCH) || !put_u32(f, (u32)payload) ||
+      !put_u32(f, (u32)info.kind) || !put_u32(f, info.obs_dim) ||
+      !put_u32(f, info.act_dim) || !put_u32(f, info.num_hidden)) {
+    return false;
+  }
+  for (u32 i = 0; i < info.num_hidden; i++) {
+    if (!put_u32(f, info.hidden_dims[i])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+static u64 norm_payload_bytes(const NormStats *norm) {
+  // obs_dim | count | ret_count | eps | clip_obs | ret_mean | ret_m2 | gamma
+  // | mean[obs_dim] | m2[obs_dim]
+  return 4u + 8u + 8u + 5u * 8u + 16u * (u64)norm->obs_dim;
+}
+
+// The running statistics of a normalised run. Scalars and arrays travel as f64
+// so a value never changes width in transit; the f32/f64 anchor stays in the
+// parameter blocks' scalar_bytes.
+static b32 write_norm_block(FILE *f, const NormStats *norm) {
+  if (norm->obs_dim > MAX_NORM_OBS_DIM) {
+    set_error("normalisation width is unreasonably large");
+    return false;
+  }
+  const u64 payload = norm_payload_bytes(norm);
+  if (!put_u32(f, BLOCK_NORM) || !put_u32(f, (u32)payload) ||
+      !put_u32(f, norm->obs_dim) || !put_u64(f, norm->count) ||
+      !put_u64(f, norm->ret_count) || !put_f64(f, (f64)norm->eps) ||
+      !put_f64(f, (f64)norm->clip_obs) || !put_f64(f, (f64)norm->ret_mean) ||
+      !put_f64(f, (f64)norm->ret_m2) || !put_f64(f, (f64)norm->gamma)) {
+    return false;
+  }
+  for (u32 i = 0; i < norm->obs_dim; i++) {
+    if (!put_f64(f, (f64)norm->mean[i])) {
+      return false;
+    }
+  }
+  for (u32 i = 0; i < norm->obs_dim; i++) {
+    if (!put_f64(f, (f64)norm->m2[i])) {
+      return false;
+    }
+  }
+  return true;
+}
+
 // ── Block readers ────────────────────────────────────────────────────
 
 // Payload bytes a correctly sized parameter block must have for this model.
@@ -539,11 +616,138 @@ static b32 read_adam_block(FILE *f, u32 bytes, Adam *adam, const Net *model,
   return true;
 }
 
+// The ARCH block is informational on the way out and a gate on the way in: a
+// file that records an architecture must match the target model's record
+// exactly (kind, dimensions, hidden widths), and a hand-built target has no
+// record to match, so it is rejected rather than guessed at. The payload's own
+// size fixes num_hidden, so a hostile file cannot ask for a huge compare.
+static b32 read_arch_block(FILE *f, u32 bytes, const Net *model, b32 dry) {
+  if (bytes < 16u || (bytes - 16u) % 4u != 0u) {
+    set_error("malformed architecture block");
+    return false;
+  }
+  const u32 num_hidden = (bytes - 16u) / 4u;
+  if (num_hidden > MAX_ARCH_HIDDEN) {
+    set_error("architecture block names too many hidden layers");
+    return false;
+  }
+  if (!dry) {
+    return skip_block(f, bytes); // fully checked in the validating pass
+  }
+
+  u32 kind = 0;
+  u32 obs_dim = 0;
+  u32 act_dim = 0;
+  u32 hidden_count = 0;
+  if (!get_u32(f, &kind) || !get_u32(f, &obs_dim) || !get_u32(f, &act_dim) ||
+      !get_u32(f, &hidden_count)) {
+    set_error("truncated architecture block");
+    return false;
+  }
+
+  NetArchInfo info;
+  if (!net_arch_info(model, &info)) {
+    set_error("checkpoint records an architecture; the model is hand-built");
+    return false;
+  }
+  if (kind != (u32)info.kind) {
+    set_error("checkpoint architecture kind differs from this model");
+    return false;
+  }
+  if (obs_dim != info.obs_dim || act_dim != info.act_dim) {
+    set_error("checkpoint architecture dimensions differ from this model");
+    return false;
+  }
+  if (hidden_count != num_hidden || hidden_count != info.num_hidden) {
+    set_error("checkpoint hidden-layer count differs from this model");
+    return false;
+  }
+  for (u32 i = 0; i < num_hidden; i++) {
+    u32 width = 0;
+    if (!get_u32(f, &width)) {
+      set_error("truncated architecture block");
+      return false;
+    }
+    if (width != info.hidden_dims[i]) {
+      set_error("checkpoint hidden-layer widths differ from this model");
+      return false;
+    }
+  }
+  return true;
+}
+
+// The NORM block's destination fixes the expected shape, so a file whose width
+// disagrees is rejected before anything is allocated. Values are read into a
+// temporary and copied only once the whole payload is in hand, keeping the
+// all-or-nothing contract even if the stream somehow changes between passes.
+static b32 read_norm_block(FILE *f, u32 bytes, NormStats *norm,
+                           const Net *model, b32 dry) {
+  if (norm->obs_dim > MAX_NORM_OBS_DIM ||
+      (u64)bytes != norm_payload_bytes(norm)) {
+    set_error("normalisation block size does not match the NormStats");
+    return false;
+  }
+
+  u32 obs_dim = 0;
+  u64 count = 0;
+  u64 ret_count = 0;
+  f64 scalars[5] = {0, 0, 0, 0, 0}; // eps, clip_obs, ret_mean, ret_m2, gamma
+  if (!get_u32(f, &obs_dim) || !get_u64(f, &count) || !get_u64(f, &ret_count)) {
+    set_error("truncated normalisation block");
+    return false;
+  }
+  for (u32 i = 0; i < 5u; i++) {
+    if (!get_f64(f, &scalars[i])) {
+      set_error("truncated normalisation block");
+      return false;
+    }
+  }
+  if (obs_dim != norm->obs_dim) {
+    set_error("checkpoint normalisation width differs from the NormStats");
+    return false;
+  }
+  if (model->input != NULL && obs_dim != model->input->val->rows) {
+    set_error("checkpoint normalisation width differs from the model input");
+    return false;
+  }
+
+  if (dry) {
+    return skip_block(f, 16u * obs_dim);
+  }
+
+  f64 *vals = (f64 *)malloc((size_t)(2u * obs_dim) * sizeof(f64));
+  if (vals == NULL) {
+    set_error("out of memory for normalisation data");
+    return false;
+  }
+  for (u32 i = 0; i < 2u * obs_dim; i++) {
+    if (!get_f64(f, &vals[i])) {
+      free(vals);
+      set_error("truncated normalisation data");
+      return false;
+    }
+  }
+  for (u32 i = 0; i < obs_dim; i++) {
+    norm->mean[i] = (real)vals[i];
+    norm->m2[i] = (real)vals[obs_dim + i];
+  }
+  free(vals);
+  norm->count = count;
+  norm->ret_count = ret_count;
+  norm->eps = (real)scalars[0];
+  norm->clip_obs = (real)scalars[1];
+  norm->ret_mean = (real)scalars[2];
+  norm->ret_m2 = (real)scalars[3];
+  norm->gamma = (real)scalars[4];
+  return true;
+}
+
 // ── Stream driver ────────────────────────────────────────────────────
 
 typedef struct {
   Net *model;
-  Adam *adam; // optional: an ADAM block is skipped when NULL
+  Adam *adam;      // optional: an ADAM block is skipped when NULL
+  NormStats *norm; // optional: a NORM block is skipped when NULL
   b32 saw_params;
   b32 saw_adam;
   b32 dry; // validate without applying anything
@@ -552,8 +756,19 @@ typedef struct {
 static b32 load_stream(FILE *f, LoadState *st) {
   char magic[8];
   u32 version = 0;
-  if (fread(magic, 1, 8, f) != 8 || memcmp(magic, CHECKPOINT_MAGIC, 8) != 0) {
-    set_error("not a checkpoint file (bad magic)");
+  if (fread(magic, 1, 8, f) != 8) {
+    set_error("truncated header");
+    return false;
+  }
+  if (memcmp(magic, CHECKPOINT_MAGIC, 8) != 0) {
+    if (memcmp(magic, "RLLIBCK", 7) == 0 && magic[7] >= '1' &&
+        magic[7] <= '3') {
+      set_error("older checkpoint format; this library writes format 4");
+    } else if (memcmp(magic, "RLLIBCK", 7) == 0) {
+      set_error("unsupported checkpoint format");
+    } else {
+      set_error("not a checkpoint file (bad magic)");
+    }
     return false;
   }
   if (!get_u32(f, &version)) {
@@ -593,6 +808,22 @@ static b32 load_stream(FILE *f, LoadState *st) {
       st->saw_adam = true;
       continue;
     }
+    if (kind == BLOCK_NORM) {
+      if (st->norm != NULL) {
+        if (!read_norm_block(f, bytes, st->norm, st->model, st->dry)) {
+          return false;
+        }
+      } else if (!skip_block(f, bytes)) {
+        return false;
+      }
+      continue;
+    }
+    if (kind == BLOCK_ARCH) {
+      if (!read_arch_block(f, bytes, st->model, st->dry)) {
+        return false;
+      }
+      continue;
+    }
     if (!skip_block(f, bytes)) { // unknown kind: forward compatible
       return false;
     }
@@ -601,9 +832,10 @@ static b32 load_stream(FILE *f, LoadState *st) {
 
 // Opens `path`, applies every block it can, and insists on the blocks the
 // caller asked for. `model` supplies the shapes every block is validated
-// against; `adam` is optional and only receives an ADAM block when non-NULL.
+// against; `adam` and `norm` are optional and only receive their block when
+// non-NULL.
 static b32 load_from_path(const char *path, Net *model, Adam *adam,
-                          b32 need_params, b32 need_adam) {
+                          NormStats *norm, b32 need_params, b32 need_adam) {
   g_last_error = "";
   if (model == NULL || path == NULL) {
     set_error("null model or path");
@@ -618,6 +850,7 @@ static b32 load_from_path(const char *path, Net *model, Adam *adam,
   LoadState st;
   st.model = model;
   st.adam = adam;
+  st.norm = norm;
   st.saw_params = false;
   st.saw_adam = false;
   st.dry = true;
@@ -728,7 +961,8 @@ b32 net_save(const Net *model, const char *path) {
     free(tmp);
     return false;
   }
-  b32 ok = write_header(f) && write_params_block(f, model) && write_end_block(f);
+  b32 ok = write_header(f) && write_arch_block(f, model) &&
+           write_params_block(f, model) && write_end_block(f);
   if (ok) {
     ok = write_crc_trailer(f, tmp);
   }
@@ -736,7 +970,7 @@ b32 net_save(const Net *model, const char *path) {
 }
 
 b32 net_load(Net *model, const char *path) {
-  return load_from_path(path, model, NULL, true, false);
+  return load_from_path(path, model, NULL, NULL, true, false);
 }
 
 b32 adam_save(const Adam *adam, const Net *model, const char *path) {
@@ -759,8 +993,8 @@ b32 adam_save(const Adam *adam, const Net *model, const char *path) {
     free(tmp);
     return false;
   }
-  b32 ok = write_header(f) && write_adam_block(f, adam, model) &&
-           write_end_block(f);
+  b32 ok = write_header(f) && write_arch_block(f, model) &&
+           write_adam_block(f, adam, model) && write_end_block(f);
   if (ok) {
     ok = write_crc_trailer(f, tmp);
   }
@@ -768,10 +1002,15 @@ b32 adam_save(const Adam *adam, const Net *model, const char *path) {
 }
 
 b32 adam_load(Adam *adam, Net *model, const char *path) {
-  return load_from_path(path, model, adam, false, true);
+  return load_from_path(path, model, adam, NULL, false, true);
 }
 
 b32 checkpoint_save(const Net *model, const Adam *adam, const char *path) {
+  return checkpoint_save_ex(model, adam, NULL, path);
+}
+
+b32 checkpoint_save_ex(const Net *model, const Adam *adam,
+                       const NormStats *norm, const char *path) {
   g_last_error = "";
   if (model == NULL || path == NULL) {
     set_error("null model or path");
@@ -779,6 +1018,11 @@ b32 checkpoint_save(const Net *model, const Adam *adam, const char *path) {
   }
   if (adam != NULL && adam->n_params != model->n_params) {
     set_error("optimiser state does not match this model");
+    return false;
+  }
+  if (norm != NULL && model->input != NULL &&
+      norm->obs_dim != model->input->val->rows) {
+    set_error("normalisation width does not match the model input");
     return false;
   }
   char *tmp = temp_path_for(path);
@@ -791,8 +1035,10 @@ b32 checkpoint_save(const Net *model, const Adam *adam, const char *path) {
     free(tmp);
     return false;
   }
-  b32 ok = write_header(f) && write_params_block(f, model);
+  b32 ok = write_header(f) && write_arch_block(f, model) &&
+           write_params_block(f, model);
   ok = ok && (adam == NULL || write_adam_block(f, adam, model));
+  ok = ok && (norm == NULL || write_norm_block(f, norm));
   ok = ok && write_end_block(f);
   if (ok) {
     ok = write_crc_trailer(f, tmp);
@@ -801,5 +1047,10 @@ b32 checkpoint_save(const Net *model, const Adam *adam, const char *path) {
 }
 
 b32 checkpoint_load(Net *model, Adam *adam, const char *path) {
-  return load_from_path(path, model, adam, true, adam != NULL);
+  return checkpoint_load_ex(model, adam, NULL, path);
+}
+
+b32 checkpoint_load_ex(Net *model, Adam *adam, NormStats *norm,
+                       const char *path) {
+  return load_from_path(path, model, adam, norm, true, adam != NULL);
 }

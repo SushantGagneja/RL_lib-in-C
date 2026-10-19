@@ -23,7 +23,7 @@ program has to initialise: one arena, one random generator, and you are running.
 | [`graph.h`](#graphh) | `Tensor`, `Net`, reverse-mode autograd |
 | [`layers.h`](#layersh) | `Dense`, `mlp_new`, `actor_build`, `actor_critic_build`, `continuous_actor_critic_build`, `q_net_build` |
 | [`optim.h`](#optimh) | `zero_grad`, `sgd_step`, `Adam`, `clip_grad_norm` |
-| [`checkpoint.h`](#checkpointh) | `net_save` / `net_load` / `checkpoint_save` / `checkpoint_load` |
+| [`checkpoint.h`](#checkpointh) | `net_save` / `net_load` / `checkpoint_save` / `checkpoint_load`, `_ex` variants that carry `NormStats` |
 | [`env.h`](#envh) | the `Env` interface every environment implements, discrete and continuous |
 | [`vecenv.h`](#vecenvh) | `VecEnv`, synchronised parallel environments |
 | [`rl.h`](#rlh) | `TrainCfg`, `Rollout`, `train_reinforce`, `train_a2c`, `train_ppo`, `train_ppo_continuous`, `evaluate`, `evaluate_continuous` |
@@ -581,6 +581,27 @@ matches. Pointers into
 `batch_input` / `batch_logits` / `batch_value` / `batch_mean` are invalidated by
 a rebuild.
 
+The recorded architecture is also readable:
+
+```c
+typedef struct {
+  NetArchKind kind;        // NET_ARCH_ACTOR, _ACTOR_CRITIC, _CONTINUOUS, _Q
+  u32 obs_dim;
+  u32 act_dim;
+  u32 num_hidden;
+  const u32 *hidden_dims;  // num_hidden arena-owned widths
+  u32 batch_size;          // size of the batched graph, 0 if none
+} NetArchInfo;
+
+b32 net_arch_info(const Net *model, NetArchInfo *out);
+```
+
+`net_arch_info` returns `false` for hand-built graphs, which have no recorded
+architecture. The checkpoint writer uses the same record to stamp an ARCH block
+into every file saved from a builder-made model, so a checkpoint cannot be
+loaded into a different kind of model or a different shape even when the
+parameter counts happen to match.
+
 ---
 
 ### Q-networks (DQN)
@@ -638,15 +659,33 @@ b32 adam_save(const Adam *adam, const Net *model, const char *path);
 b32 adam_load(Adam *adam, Net *model, const char *path);
 b32 checkpoint_save(const Net *model, const Adam *adam, const char *path);
 b32 checkpoint_load(Net *model, Adam *adam, const char *path);
+b32 checkpoint_save_ex(const Net *model, const Adam *adam,
+                       const NormStats *norm, const char *path);
+b32 checkpoint_load_ex(Net *model, Adam *adam, NormStats *norm,
+                       const char *path);
 const char *checkpoint_last_error(void);
 ```
 
-A checkpoint is a small self-describing binary file (magic `RLLIBCK3`, little
+A checkpoint is a small self-describing binary file (magic `RLLIBCK4`, little
 endian, block-structured so unknown blocks can be skipped, closed by a CRC-32 of
 every preceding byte). `checkpoint_save` writes the parameters plus the Adam
 moments; `checkpoint_load` restores both and needs the model only for shape
 validation. Passing `adam = NULL` to either function reduces it to parameters
 only.
+
+The `_ex` variants carry a NORM block with the running observation-normalization
+and reward-scaling statistics of a `NormStats` (the state `TrainCfg.norm` folds
+while a normalized run trains). Saving with `norm != NULL` records them; loading
+with `norm != NULL` restores them when the block is present and leaves the
+statistics untouched when it is not. A plain `checkpoint_load` on a file that
+does contain statistics still restores parameters and Adam state and simply skips
+the block.
+
+Files written for a model built by `actor_build` / `actor_critic_build` /
+`continuous_actor_critic_build` / `q_net_build` also carry an ARCH block: the
+builder kind, observation and action dimensions, and hidden widths. Loading such
+a file into a different architecture — or into a hand-built graph — is rejected
+before any parameter is written, even when the parameter counts happen to match.
 
 Saves are atomic: the image is written to `<path>.tmp`, synced to disk, and
 renamed over `path`, so a crash or a failed save leaves the previous checkpoint
@@ -657,10 +696,11 @@ the model exactly as it was.
 Resuming a run:
 
 ```c
-RL_LIB_CHECK(checkpoint_save(model, adam, "run.ckpt"));
+RL_LIB_CHECK(checkpoint_save_ex(model, adam, stats, "run.ckpt"));
 /* ... later, in a fresh process ... */
 Adam *adam = adam_new(arena, model, lr);
-RL_LIB_CHECK(checkpoint_load(model, adam, "run.ckpt"));
+NormStats *stats = norm_stats_new(arena, env->obs_dim);
+RL_LIB_CHECK(checkpoint_load_ex(model, adam, stats, "run.ckpt"));
 ```
 
 Every function returns `false` instead of aborting, and the load is
@@ -668,13 +708,17 @@ all-or-nothing: the checksum is verified first, the file is then walked once to
 validate every block and once more to apply it, so a rejected file leaves the
 model exactly as it was. Failure reasons:
 
-* bad magic or an unknown format version (format 3 files only; older ones are
-  rejected rather than migrated);
+* bad magic or an unknown format version (this library writes format 4; v1–v3
+  files are rejected with a message that says so, rather than migrated);
 * a checksum mismatch, which is how bit rot and half-written files are caught;
 * a scalar width that does not match this build (an f32 checkpoint cannot be
   loaded into an f64 build — the values would be silently reinterpreted);
+* an architecture block that does not match the target model's recorded kind,
+  dimensions, or hidden widths, or a builder file loaded into a hand-built graph;
+* a normalisation block whose width disagrees with the `NormStats` or the model
+  input;
 * a parameter count, payload size, or parameter shape that does not match the
-  model (this is how a checkpoint from another architecture is caught);
+  model;
 * a truncated file, or an I/O error.
 
 `checkpoint_last_error()` returns a human-readable reason for the most recent

@@ -434,7 +434,7 @@ of aborting; `RL_LIB_HAS_THREADS` in `vecenv.h` is the compile-time answer.
 | `test_gradcheck` (f32) | the same 12 suites in the default build (looser tolerance) |
 | `test_envs` | 191 checks: CartPole bounds/termination/determinism; Snake reset, grid validation, wall/self collision, tail vacate, eating; Pendulum reset, hand-computed Euler dynamics, torque clamp, speed cap, determinism, clone independence and 200-step truncation; VecEnv shape, determinism, independent clones, auto-reset terminal-observation capture, vectorized continuous stepping with action bounds, and threaded-vs-serial stepping compared field by field over 260 steps |
 | `test_rl` | 103 checks: GAE vs a hand-computed trajectory, one Adam step, grad clipping, actor-critic build, value-head learning, batched-vs-per-sample gradient equivalence, a parameter registry grown past 128 entries, rebuilding the batched graph for a new minibatch size (weights preserved, batch and single-sample inference agree), the continuous builder (per-dimension bounds, sampled `u`/squash round trip, `log_std` registered as a parameter and surviving a rebuild), CartPole learning smoke tests for REINFORCE and PPO with same-seed determinism, a Pendulum continuous-PPO learning smoke test plus determinism, the LR/entropy schedules against hand-computed values, normalization statistics (Welford/posterior/clip cases), PPO recipe-knob effects (each knob changes the run; the defaults do not), normalized-training determinism, and threaded rollouts reaching bit-identical weights in both trainers |
-| `test_checkpoint` | 587 checks: byte-exact parameter round trips, bit-exact Adam-state resume, parameter-only and optimiser-only files, atomic replacement (no `.tmp` is left behind, and a save that cannot start leaves the previous checkpoint byte-identical and loadable), a continuous model round trip including `log_std`, a flipped byte caught by the CRC before the parser runs, a 300-case mutation fuzz pass (bit flips, truncations, overwritten runs, one third of them with a recomputed checksum), and rejection of missing, corrupt, truncated, wrong-width, wrongly-sized and wrongly-shaped files — each verified to leave the model untouched |
+| `test_checkpoint` | 616 checks: byte-exact parameter round trips, bit-exact Adam-state resume, parameter-only and optimiser-only files, atomic replacement (no `.tmp` is left behind, and a save that cannot start leaves the previous checkpoint byte-identical and loadable), a continuous model round trip including `log_std`, bit-exact round trips of `NormStats` through `checkpoint_save_ex` / `checkpoint_load_ex`, architecture gating (an actor file cannot be loaded into an actor-critic, a different hidden width, or a hand-built graph, all before a parameter changes), a flipped byte caught by the CRC before the parser runs, a 300-case mutation fuzz pass (bit flips, truncations, overwritten runs, one third of them with a recomputed checksum), and rejection of missing, corrupt, truncated, wrong-width, wrongly-sized, wrongly-shaped and format-3 files — each verified to leave the model untouched |
 | `test_dqn` | 38 checks: replay-ring overwrite order (with terminal and truncated flags stored separately), the Q-network builder's rollout and batched views (including a rebuild that shares parameters), the epsilon schedule against hand-computed values, the one-step TD target (a terminal transition drops the bootstrap, a truncation keeps it), target-network sync (copies every parameter; untouched before its interval), same-seed determinism across two complete training runs, and a CartPole training run whose greedy evaluation clears 100 — it reaches ~140 in the sanitizer test build (~200 at `-O2`), against a random policy's ~22 |
 
 `make test-double` then rebuilds the library with `-DRL_LIB_USE_DOUBLE` and runs
@@ -471,7 +471,7 @@ Tests: 103 passed, 0 failed
   Adam state resumes a run exactly... OK
   Atomic save (temp file + rename)... OK
   continuous model round-trip (log_std included)... OK
-Tests: 587 passed, 0 failed
+Tests: 616 passed, 0 failed
 
 --- test_dqn ---
 Tests: 38 passed, 0 failed
@@ -706,7 +706,7 @@ Tests: 38 passed, 0 failed
   - [x] v1.1.0 tagged (recipe, DQN, new graph ops, optional system BLAS, ctypes
         demo): `version.h`, `docs/API.md` and the changelog move together, and
         the pkg-config stamp follows from `version.h`.
-  - [x] Checkpoints carry a CRC-32 trailer (format 3), saves are atomic
+  - [x] Checkpoints carry a CRC-32 trailer, architecture metadata, and optional normalisation statistics (format 4), saves are atomic
         (`<path>.tmp` + fsync + rename, so a failed save cannot clobber the
         previous file), and loads are transactional, with a 300-case mutation
         fuzz pass in the suite and under the sanitizers.
