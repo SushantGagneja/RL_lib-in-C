@@ -8,6 +8,11 @@
 *.out
 *.dSYM/
 
+# Coverage artifacts from `make COVERAGE=1` (gcov)
+*.gcda
+*.gcno
+*.gcov
+
 # Local compiled binaries
 /main
 /mat
@@ -51,3 +56,7 @@
 
 # Local compiled binaries (Snake PPO example)
 /train_ppo_snake
+
+# Python bytecode from the Conan recipes
+__pycache__/
+*.pyc

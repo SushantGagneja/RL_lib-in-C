@@ -31,6 +31,11 @@ single source of truth — it is also stamped into `rl_lib.pc`.
 - A rejected `net_load`/`adam_load`/`checkpoint_load` could previously leave a
   model half-updated when the failure came from a block *after* the parameter
   block; loads are now validated end-to-end before anything is applied.
+- The repository no longer tracks coverage instrumentation produced by a local
+  `make COVERAGE=1 test` run. Those stale `.gcda` files broke the coverage CI
+  job (a fresh GCC checkout refuses to merge counters written by Apple/LLVM
+  clang, and `gcovr` then fails), so `.gitignore` now covers `*.gcda`/`*.gcno`
+  output along with Python bytecode.
 
 ## 1.1.0 — 2026-10-19
 
