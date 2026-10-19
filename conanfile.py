@@ -89,6 +89,11 @@ class RlLibInCRecipe(ConanFile):
 
     def package_info(self):
         self.cpp_info.libs = ["rl_lib"]
+        # Headers are installed flat under include/rl_lib, the same layout the
+        # Makefile install and the CMake project produce (and what rl_lib.pc's
+        # Cflags point at), so advertise that as the include directory; the
+        # default would be the bare include/, one level too high.
+        self.cpp_info.includedirs = ["include/rl_lib"]
         # The names a downstream CMake or pkg-config consumer should use.
         self.cpp_info.set_property("cmake_file_name", "RL_lib-in-C")
         self.cpp_info.set_property("cmake_target_name", "RL_lib-in-C::rl_lib")
