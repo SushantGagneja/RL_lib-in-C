@@ -35,9 +35,11 @@ Three conventions run through the whole API and are worth reading first:
 * **Ownership.** Anything that allocates takes an `Arena *`. Objects live until
   the arena is disposed; nothing needs an individual `free`.
 * **Errors.** Shape mistakes and out-of-memory conditions call
-  `RL_LIB_ASSERT`, which prints `[RL_lib-in-C FATAL] ...` and aborts. Functions
-  returning `b32` fail *softly* (`false`) for conditions a caller can legitimately
-  handle — chiefly file I/O in `checkpoint.h`.
+  `RL_LIB_ASSERT`, which formats a `[RL_lib-in-C FATAL] ...` line and hands it to
+  the installed fatal handler (default: print to stderr and abort; replace it
+  with `rl_lib_set_fatal_handler` to log and `longjmp` instead). Functions
+  returning `b32` fail *softly* (`false`) for conditions a caller can
+  legitimately handle — chiefly file I/O in `checkpoint.h`.
 * **Precision.** `real` is `float` by default and `double` with
   `-DRL_LIB_USE_DOUBLE`. Use the `real_*` wrappers (`real_sqrt`, `real_exp`, …)
   and `REAL_C(x)` for literals instead of the libm float/double variants.
@@ -67,9 +69,20 @@ exactly-representable literal for the current mode) and `REAL_EPS`.
 #define MIN(a, b) ...             // also MAX(a, b)
 #define ALIGN_UP_POW2(x, align) ...
 
-RL_LIB_ASSERT(expr, msg);  // prints file/line and aborts when expr is false
-RL_LIB_CHECK(expr);        // aborts when a b32-returning call fails
+typedef void (*rl_fatal_fn)(const char *msg);
+rl_fatal_fn rl_lib_set_fatal_handler(rl_fatal_fn handler); // NULL restores default
+void rl_lib_fatal(const char *msg);
+
+RL_LIB_ASSERT(expr, msg);  // formats file/line and dispatches when expr is false
+RL_LIB_CHECK(expr);        // dispatches when a b32-returning call fails
 ```
+
+The macros build a one-line message and call `rl_lib_fatal`, which invokes the
+installed handler. The default prints it to stderr and aborts. Install your own
+with `rl_lib_set_fatal_handler` (before starting worker threads — the pointer is
+plain global state); the handler receives the formatted message and must not
+return (`longjmp`/`exit`) — `rl_lib_fatal` aborts if it does. `NULL` restores
+the default and returns the previous handler.
 
 ---
 

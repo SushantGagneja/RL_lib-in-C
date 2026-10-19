@@ -34,7 +34,7 @@ EXTRA_CFLAGS += --coverage
 endif
 CFLAGS = $(WARN) -Iinclude -I. $(THREAD_FLAGS) $(EXTRA_CFLAGS)
 
-LIB_SRCS = src/memory.c src/random.c src/simd.c src/linalg.c src/graph.c src/layers.c src/optim.c src/checkpoint.c src/rl.c src/dqn.c src/vecenv.c envs/snake.c envs/cartpole.c envs/pendulum.c
+LIB_SRCS = src/base.c src/memory.c src/random.c src/simd.c src/linalg.c src/graph.c src/layers.c src/optim.c src/checkpoint.c src/rl.c src/dqn.c src/vecenv.c envs/snake.c envs/cartpole.c envs/pendulum.c
 LIB_OBJS = $(LIB_SRCS:.c=.o)
 
 TARGET_SNAKE = train_snake
@@ -102,9 +102,10 @@ examples: $(TARGET_SNAKE) $(TARGET_CARTPOLE) $(TARGET_A2C) $(TARGET_PPO) $(TARGE
 
 # AddressSanitizer + UndefinedBehaviorSanitizer build of everything.
 asan: CFLAGS += -g -O1 -fsanitize=address,undefined -fno-omit-frame-pointer
-asan: clean $(TARGET_SNAKE) $(TARGET_CARTPOLE) $(TARGET_A2C) $(TARGET_PPO) $(TARGET_PPO_CONT) $(TARGET_PPO_SNAKE) $(TARGET_DQN) test_mat test_gradcheck test_envs test_rl test_checkpoint test_dqn
+asan: clean $(TARGET_SNAKE) $(TARGET_CARTPOLE) $(TARGET_A2C) $(TARGET_PPO) $(TARGET_PPO_CONT) $(TARGET_PPO_SNAKE) $(TARGET_DQN) test_base test_mat test_gradcheck test_envs test_rl test_checkpoint test_dqn
 	@echo ""
 	@echo "=== ASAN/UBSAN: running all tests ==="
+	./test_base
 	./test_mat
 	./test_gradcheck
 	./test_envs
@@ -209,7 +210,8 @@ TEST_ENVS_BIN = test_envs
 TEST_RL_BIN = test_rl
 TEST_CKPT_BIN = test_checkpoint
 TEST_DQN_BIN = test_dqn
-TEST_BINS = $(TEST_MAT_BIN) $(TEST_GRAD_BIN) $(TEST_ENVS_BIN) $(TEST_RL_BIN) $(TEST_CKPT_BIN) $(TEST_DQN_BIN)
+TEST_BASE_BIN = test_base
+TEST_BINS = $(TEST_MAT_BIN) $(TEST_GRAD_BIN) $(TEST_ENVS_BIN) $(TEST_RL_BIN) $(TEST_CKPT_BIN) $(TEST_DQN_BIN) $(TEST_BASE_BIN)
 
 # The suites are also run under UndefinedBehaviorSanitizer. This is a variable
 # because target-specific CFLAGS reach the shared library objects as well, so a
@@ -241,6 +243,10 @@ $(TEST_CKPT_BIN): $(LIB_OBJS) tests/test_checkpoint.c
 $(TEST_DQN_BIN): CFLAGS += $(UBSAN_FLAGS)
 $(TEST_DQN_BIN): $(LIB_OBJS) tests/test_dqn.c
 	$(CC) $(CFLAGS) -o $@ $(LIB_OBJS) tests/test_dqn.c -lm $(BLAS_LIBS)
+
+$(TEST_BASE_BIN): CFLAGS += $(UBSAN_FLAGS)
+$(TEST_BASE_BIN): $(LIB_OBJS) tests/test_base.c
+	$(CC) $(CFLAGS) -o $@ $(LIB_OBJS) tests/test_base.c -lm $(BLAS_LIBS)
 
 # ── Double-precision builds ─────────────────────────────────────────
 # Builds the whole library in f64 (RL_LIB_USE_DOUBLE) into its own object tree so
@@ -279,6 +285,8 @@ test-double: $(DOUBLE_TEST_BINS)
 
 test: $(TEST_BINS) gradcheck-double
 	@echo ""
+	@echo "=== Running test_base ==="
+	./$(TEST_BASE_BIN)
 	@echo "=== Running test_mat ==="
 	./$(TEST_MAT_BIN)
 	@echo "=== Running test_gradcheck ==="

@@ -28,6 +28,7 @@
 /train_dqn
 /hello_rl
 /hello_rl.ckpt
+/test_base
 /test_mat
 /test_gradcheck
 /test_gradcheck_double

@@ -85,6 +85,10 @@ so there is nothing to attribute and no external license to carry.
   before touching a parameter), and saving is atomic: the image is written to
   `<path>.tmp`, synced, and renamed over the destination, so a crash or a failed
   save leaves the previous checkpoint intact.
+- **Hookable fatal errors** — `RL_LIB_ASSERT` / `RL_LIB_CHECK` route through a
+  settable fatal handler (default: print and abort), so an embedder can log the
+  message and `longjmp` out instead of losing the process. Recoverable failures
+  never come through the hook; those APIs return `false` and explain themselves.
 - **Installable and packageable** — `make install` puts the headers in
   `include/rl_lib/`, builds `librl_lib.a` plus a versioned shared library, and
   writes a `rl_lib.pc` pkg-config file; the CMake project installs the same
@@ -424,6 +428,7 @@ of aborting; `RL_LIB_HAS_THREADS` in `vecenv.h` is the compile-time answer.
 
 | Suite | What it covers |
 |---|---|
+| `test_base` | 13 checks: KiB/MiB/GiB, MIN/MAX, ALIGN_UP_POW2 (multiples and crossing), and the fatal-error hook — an installed handler captures the formatted message via `longjmp`, the assert/check paths carry the caller's text, expression and source location, and `NULL` restores the default |
 | `test_gradcheck` (f64) | 12 suites / 280 parameters vs central differences, `h = 1e-5`, tolerance `1e-6`; includes the elementwise sigmoid/exp/log/div suite, the Gaussian PPO surrogate and its log-density against an independent double-precision formula |
 | `test_mat` | 13 checks over MatMul (NN/NT/TN/TT), SIMD-vs-scalar agreement across two shape sets that cross the vector and TT-tile boundaries, softmax, ReLU, add/sub, broadcast add, mul/tanh/MSE |
 | `test_gradcheck` (f32) | the same 12 suites in the default build (looser tolerance) |
@@ -439,6 +444,10 @@ gradient check.
 Representative output:
 
 ```
+=== base.h tests ===
+  ...
+Tests: 13 passed, 0 failed
+
 === Autograd gradient checks (f64) ===
   ...
   [gradcheck: Gaussian PPO surrogate (B=4, act_dim=2)]

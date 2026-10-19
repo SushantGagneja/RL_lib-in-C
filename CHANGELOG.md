@@ -30,6 +30,12 @@ single source of truth — it is also stamped into `rl_lib.pc`.
   truncated steps separately, and `dqn_td_target` exposes the one-step target
   rule for tests and custom off-policy code. `replay_add` keeps its original
   signature as the terminal-only shorthand.
+- **Overridable fatal-error handler.** `RL_LIB_ASSERT`/`RL_LIB_CHECK` now format
+  a one-line message and hand it to `rl_lib_fatal`, whose handler is settable
+  with `rl_lib_set_fatal_handler` (default: print to stderr and abort). An
+  embedder can log and `longjmp` instead of losing the process; recoverable
+  failures still return `false`. `test_base` covers the hook and the base
+  helpers.
 
 ### Fixed
 - DQN treated a time-limit truncation as a terminal transition, so the bootstrap
