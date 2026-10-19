@@ -22,6 +22,11 @@
 // the taken action, with no gather/scatter op needed. Parameter updates are
 // accumulated by the graph's reverse sweep and applied by the configured
 // optimizer (SGD or Adam), with the optional global gradient-norm clip.
+//
+// Terminals and time-limit truncations are tracked separately: a terminal
+// transition drops the bootstrap, while a truncated one still bootstraps
+// through `next_obs` because the underlying MDP did not end. (This is the same
+// distinction the policy-gradient trainers make for GAE.)
 
 // A fixed-capacity ring buffer of transitions, stored as flat arrays (one per
 // field) so a sampled batch gathers by copying a column per field. Once full it
@@ -36,17 +41,30 @@ typedef struct {
   real *next_obs; // capacity * obs_dim
   real *rewards;  // capacity
   u32 *actions;   // capacity
-  u8 *dones;      // capacity, 0/1: terminal *or* truncated
+  u8 *dones;      // capacity, 0/1: the episode ended here (no bootstrap)
+  u8 *truncated;  // capacity, 0/1: cut by a time limit (still bootstraps)
 } ReplayBuf;
 
 // Allocates an empty buffer. Both arguments must be non-zero.
 ReplayBuf *replay_new(Arena *arena, u32 capacity, u32 obs_dim);
 
 // Stores one transition, overwriting the oldest once the buffer is full.
-// `done` must be true for terminal and truncated steps alike: neither
-// bootstraps through the next state.
+// `done` means the episode truly ended; use replay_add_ex when the caller knows
+// whether the step was terminal or merely cut by a time limit.
 void replay_add(ReplayBuf *buf, const real *obs, u32 action, real reward,
                 const real *next_obs, b32 done);
+
+// Stores one transition with terminal and truncated recorded separately. The
+// distinction matters for the bootstrap: a truncated transition still uses the
+// next state's value, a terminal one does not. At most one should be set; if
+// both are, `terminal` wins.
+void replay_add_ex(ReplayBuf *buf, const real *obs, u32 action, real reward,
+                   const real *next_obs, b32 terminal, b32 truncated);
+
+// One-step TD target used by the trainer: reward + gamma * q_max, except for a
+// terminal transition, where the bootstrap is dropped. Exposed so tests and
+// custom off-policy code can share the exact rule train_dqn uses.
+real dqn_td_target(real reward, real q_max, real gamma, b32 terminal);
 
 // Copies every parameter tensor of `src` into `dst`. Both must come from the
 // same builder with the same architecture (creation order defines the pairing).

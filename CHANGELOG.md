@@ -16,18 +16,33 @@ single source of truth — it is also stamped into `rl_lib.pc`.
   front, as with every earlier format change.
 - **Transactional loads.** The reader walks a file twice — validate, then apply
   — so a load that fails *after* a block parsed cleanly can no longer leave the
-  model half-updated. `test_checkpoint` grew from 61 to ~570 checks with a
-  300-case mutation fuzz pass (bit flips, truncations, overwritten runs, a third
-  of them with a recomputed checksum) asserting the no-crash and no-half-load
-  invariants; the sanitizer job runs it under ASAN/UBSAN.
+  model half-updated. `test_checkpoint` grew from 61 to 587 checks (default
+  build) with a 300-case mutation fuzz pass (bit flips, truncations, overwritten
+  runs, a third of them with a recomputed checksum) asserting the no-crash and
+  no-half-load invariants; the sanitizer job runs it under ASAN/UBSAN.
 - **CI coverage and benchmark jobs.** The suites are also built with gcov
   (`make COVERAGE=1 test`) and summarised by `gcovr`, and a benchmark job runs
   the full multi-seed harness and uploads `bench_results.md` as an artifact.
 - **Package-manager recipes.** A Conan 2 `conanfile.py` with a `test_package/`
   that consumes the freshly built package through `find_package(RL_lib-in-C)`
   (checked by a CI job), and a vcpkg reference port in `packaging/vcpkg/`.
+- **Truncation-aware DQN transitions.** `replay_add_ex` records terminal and
+  truncated steps separately, and `dqn_td_target` exposes the one-step target
+  rule for tests and custom off-policy code. `replay_add` keeps its original
+  signature as the terminal-only shorthand.
 
 ### Fixed
+- DQN treated a time-limit truncation as a terminal transition, so the bootstrap
+  was dropped exactly when CartPole reached its 500-step cap. Truncated
+  transitions now bootstrap through `next_obs`, matching the truncation-aware
+  GAE the policy-gradient trainers already use; `test_dqn` checks the target
+  rule directly.
+- Checkpoint saves overwrote the destination in place, so a crash or a failed
+  write could destroy the previous checkpoint. Saves now write `<path>.tmp`,
+  flush and sync it, and rename it over the destination; a failure leaves the
+  old checkpoint untouched and removes the temporary.
+- `make clean` did not remove `train_dqn` or its object file, and `.gitignore`
+  did not cover the binary.
 - A rejected `net_load`/`adam_load`/`checkpoint_load` could previously leave a
   model half-updated when the failure came from a block *after* the parameter
   block; loads are now validated end-to-end before anything is applied.

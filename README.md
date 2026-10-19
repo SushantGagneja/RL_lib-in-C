@@ -4,9 +4,10 @@ A small, readable C library for reverse-mode autograd, neural networks, and
 reinforcement learning. No third-party dependencies — only the C standard
 library, `libm`, and either POSIX `make` or CMake.
 
-It is a learning project: the code is meant to be read in one sitting, and the
-benchmarks below are reported with their real weaknesses rather than tuned to
-flatter the algorithms.
+It is a learning project: the library sources are small enough to read end to
+end (the tests and examples are the long tail), and the benchmarks below are
+reported with their real weaknesses rather than tuned to flatter the
+algorithms.
 
 ---
 
@@ -80,10 +81,10 @@ so there is nothing to attribute and no external license to carry.
 - **Checkpointing** — a versioned, endian-independent binary format that saves
   and restores the parameters *and* the Adam moments, so a training run can be
   stopped and resumed. Every file ends in a CRC-32 trailer that is verified
-  before parsing, and loading is all-or-nothing: a file that is corrupted,
-  truncated or does not match the model's shapes or scalar width is rejected
-  without mutating anything (the reader validates the whole file first and only
-  then applies it).
+  before parsing, loading is all-or-nothing (the reader validates the whole file
+  before touching a parameter), and saving is atomic: the image is written to
+  `<path>.tmp`, synced, and renamed over the destination, so a crash or a failed
+  save leaves the previous checkpoint intact.
 - **Installable and packageable** — `make install` puts the headers in
   `include/rl_lib/`, builds `librl_lib.a` plus a versioned shared library, and
   writes a `rl_lib.pc` pkg-config file; the CMake project installs the same
@@ -208,25 +209,28 @@ potential-based shaping wrapper (Manhattan distance to the food,
 `r' = r + c(γΦ' − Φ)`, Ng et al. 1999) is still available; at this budget it no
 longer changes the outcome, so the default remains the raw sparse reward.
 
-### Throughput (single core, one machine)
+### Throughput (single core, Apple M4, NEON)
 
 `make bench-throughput` measures `Env.step()` (random policy, excludes
 `observe()`), the vectorized `vecenv_step` over 8 CartPoles, and the MatMul
-kernel against a naive triple loop and against the scalar backend.
+kernel against a naive triple loop and against the scalar backend. The MatMul
+rows are the NEON path on this machine; the CI x86-64 job publishes its own
+AVX2 `bench_results.md`, so compare kernels within a row, not absolute GFLOPS
+across CPUs.
 
 | Benchmark | Result |
 |---|---|
-| CartPole `step()` | ≈ 25 M steps/sec |
-| Snake `step()` | ≈ 80 M steps/sec |
-| `vecenv_step` (×8 CartPole) | ≈ 33 M env-steps/sec |
-| `mat_mm` 256×256×256 (`neon`, f32) | ≈ 33.5 GFLOPS |
+| CartPole `step()` | ≈ 24.8 M steps/sec |
+| Snake `step()` | ≈ 83.7 M steps/sec |
+| `vecenv_step` (×8 CartPole) | ≈ 35.6 M env-steps/sec |
+| `mat_mm` 256×256×256 (`neon`, f32) | ≈ 33.1 GFLOPS |
 | `mat_mm` 256×256×256 (scalar, f32) | ≈ 16.3 GFLOPS |
 | Naive triple-loop 256×256×256 | ≈ 1.7 GFLOPS |
-| `mat_mm` 64×64×64 (`neon`, f32) | ≈ 39.0 GFLOPS |
+| `mat_mm` 64×64×64 (`neon`, f32) | ≈ 39.2 GFLOPS |
 | `mat_mm` 64×64×64 (scalar, f32) | ≈ 15.2 GFLOPS |
-| `mat_mm` 256×256×256 (`neon`, f64) | ≈ 16.6 GFLOPS |
+| `mat_mm` 256×256×256 (`neon`, f64) | ≈ 16.7 GFLOPS |
 | `mat_mm` 256×256×256 (scalar, f64) | ≈ 8.4 GFLOPS |
-| `mat_mm` 64×64×64 (`neon`, f64) | ≈ 19.8 GFLOPS |
+| `mat_mm` 64×64×64 (`neon`, f64) | ≈ 19.6 GFLOPS |
 | `mat_mm` 64×64×64 (scalar, f64) | ≈ 10.7 GFLOPS |
 
 The vector kernels are ~20× a naive triple loop and about 2× the *scalar*
@@ -296,9 +300,12 @@ greedy episodes after 1200 updates:
 | 123 | -206.54 | -178.21 |
 
 A random policy scores about -1200, and a policy that never applies torque
-about -1000, so every seed lands in the "keep the pendulum near the bottom and
-damp it" regime rather than a perfect swing-up and balance. Read this as
-"stable and clearly learned", not "solved".
+about -1000, so these are not "keep the pendulum near the bottom" scores. The
+cost is θ² against upright, which makes a motionless hanging pendulum worth
+about -1970 per episode; at -180..-207 (-0.9..-1.0 per step) every seed is
+swinging up and balancing near the classic optimum for this task (reference
+implementations report roughly -150..-250), just not at it. Read this as "nearly
+solved", not "solved" — and definitely not as a hanging policy.
 
 Two knobs decide whether this reproduces:
 
@@ -422,8 +429,8 @@ of aborting; `RL_LIB_HAS_THREADS` in `vecenv.h` is the compile-time answer.
 | `test_gradcheck` (f32) | the same 12 suites in the default build (looser tolerance) |
 | `test_envs` | 191 checks: CartPole bounds/termination/determinism; Snake reset, grid validation, wall/self collision, tail vacate, eating; Pendulum reset, hand-computed Euler dynamics, torque clamp, speed cap, determinism, clone independence and 200-step truncation; VecEnv shape, determinism, independent clones, auto-reset terminal-observation capture, vectorized continuous stepping with action bounds, and threaded-vs-serial stepping compared field by field over 260 steps |
 | `test_rl` | 103 checks: GAE vs a hand-computed trajectory, one Adam step, grad clipping, actor-critic build, value-head learning, batched-vs-per-sample gradient equivalence, a parameter registry grown past 128 entries, rebuilding the batched graph for a new minibatch size (weights preserved, batch and single-sample inference agree), the continuous builder (per-dimension bounds, sampled `u`/squash round trip, `log_std` registered as a parameter and surviving a rebuild), CartPole learning smoke tests for REINFORCE and PPO with same-seed determinism, a Pendulum continuous-PPO learning smoke test plus determinism, the LR/entropy schedules against hand-computed values, normalization statistics (Welford/posterior/clip cases), PPO recipe-knob effects (each knob changes the run; the defaults do not), normalized-training determinism, and threaded rollouts reaching bit-identical weights in both trainers |
-| `test_checkpoint` | ~570 checks: byte-exact parameter round trips, bit-exact Adam-state resume, parameter-only and optimiser-only files, a continuous model round trip including `log_std`, a flipped byte caught by the CRC before the parser runs, a 300-case mutation fuzz pass (bit flips, truncations, overwritten runs, one third of them with a recomputed checksum), and rejection of missing, corrupt, truncated, wrong-width, wrongly-sized and wrongly-shaped files — each verified to leave the model untouched |
-| `test_dqn` | 33 checks: replay-ring overwrite order, the Q-network builder's rollout and batched views (including a rebuild that shares parameters), the epsilon schedule against hand-computed values, target-network sync (copies every parameter; untouched before its interval), same-seed determinism across two complete training runs, and a CartPole training run whose greedy evaluation reaches ~203 (a random policy scores ~22) |
+| `test_checkpoint` | 587 checks: byte-exact parameter round trips, bit-exact Adam-state resume, parameter-only and optimiser-only files, atomic replacement (no `.tmp` is left behind, and a save that cannot start leaves the previous checkpoint byte-identical and loadable), a continuous model round trip including `log_std`, a flipped byte caught by the CRC before the parser runs, a 300-case mutation fuzz pass (bit flips, truncations, overwritten runs, one third of them with a recomputed checksum), and rejection of missing, corrupt, truncated, wrong-width, wrongly-sized and wrongly-shaped files — each verified to leave the model untouched |
+| `test_dqn` | 38 checks: replay-ring overwrite order (with terminal and truncated flags stored separately), the Q-network builder's rollout and batched views (including a rebuild that shares parameters), the epsilon schedule against hand-computed values, the one-step TD target (a terminal transition drops the bootstrap, a truncation keeps it), target-network sync (copies every parameter; untouched before its interval), same-seed determinism across two complete training runs, and a CartPole training run whose greedy evaluation clears 100 — it reaches ~140 in the sanitizer test build (~200 at `-O2`), against a random policy's ~22 |
 
 `make test-double` then rebuilds the library with `-DRL_LIB_USE_DOUBLE` and runs
 every one of those suites in f64, so the f64 path is not only exercised by the
@@ -438,7 +445,7 @@ Representative output:
   log-density vs textbook form (4 columns)... OK (0 bad)
   ...
 ---
-Tests: 11 passed, 0 failed
+Tests: 12 passed, 0 failed
 Parameters checked: 280/280 passed within tolerance
 
 --- test_mat ---
@@ -449,12 +456,16 @@ Passed: 13  Failed: 0
 Passed: 191  Failed: 0
 
 --- test_rl ---
-Tests: 73 passed, 0 failed
+Tests: 103 passed, 0 failed
 
 --- test_checkpoint ---
   Adam state resumes a run exactly... OK
+  Atomic save (temp file + rename)... OK
   continuous model round-trip (log_std included)... OK
-Tests: 61 passed, 0 failed
+Tests: 587 passed, 0 failed
+
+--- test_dqn ---
+Tests: 38 passed, 0 failed
 ```
 
 ---
@@ -577,13 +588,16 @@ Tests: 61 passed, 0 failed
   against the BFS planner's ~299 — within 11%, and with no late-run collapse;
   the original recipe scores 87.9 ± 19.2 at the same budget. REINFORCE + Adam
   plateaus at ~40. The numbers and the recipe are in the Snake section.
-- **Continuous PPO is stable, not solved.** Pendulum converges to -130..-240
-  (a random policy is about -1200), and the configuration is sensitive to the
-  learning rate — see the Pendulum section. The squashed-Gaussian policy also
-  clamps the mean to ±5 and `log_std` to [-6, 2] on read (documented constants in
-  `linalg.h`), which the textbook construction does not do, and the entropy bonus
-  uses the *pre-squash* Gaussian entropy because the squashed density's entropy
-  has no closed form.
+- **Continuous PPO is close to, but not at, the Pendulum optimum.** Runs
+  converge to -130..-240 per 200-step episode, overlapping the band reference
+  implementations report (roughly -150..-250), so these are genuine
+  swing-up-and-balance policies (a random policy is about -1200, and hanging
+  still is about -1970). The configuration is sensitive to the learning rate —
+  see the Pendulum section. The squashed-Gaussian policy also clamps the mean
+  to ±5 and `log_std` to [-6, 2] on read (documented constants in `linalg.h`),
+  which the textbook construction does not do, and the entropy bonus uses the
+  *pre-squash* Gaussian entropy because the squashed density's entropy has no
+  closed form.
 - **The arena is bump-only.** Nothing is reused within a run except through the
   `arena_mark`/`arena_rewind` temp scopes, and rebuilding a batched graph leaves
   its predecessor in the arena. `MAX_ARITY` is 2 because every operation in the
@@ -656,11 +670,12 @@ Tests: 61 passed, 0 failed
         (Pendulum -180..-207 across three seeds over 1200 updates).
 
 - [x] **Phase 7: Parity attempt & adoption**
-  - [x] Snake with PPO over `VecEnv`: 2.2× the REINFORCE baseline (87.9 ± 19.2
-        greedy over five seeds vs 39.7) and 3.4× short of the BFS planner, with
-        long runs collapsing instead of closing the gap. Numbers, budget check
-        and shaping control in the Snake section;
-        `examples/train_ppo_snake.c`, `make ppo-snake`.
+  - [x] Snake with PPO over `VecEnv` (first recipe): 2.2× the REINFORCE
+        baseline (87.9 ± 19.2 greedy over five seeds vs 39.7) but still 3.4×
+        short of the BFS planner, with long runs collapsing instead of closing
+        the gap. Kept as the baseline the Phase 8 recipe supersedes; the
+        comparison is in the Snake section. `examples/train_ppo_snake.c`,
+        `make ppo-snake`.
 
 - [x] **Phase 8: Recipes, off-policy and ops**
   - [x] Full PPO training recipe (`TrainCfg`): linear/cosine LR decay, entropy
@@ -670,10 +685,10 @@ Tests: 61 passed, 0 failed
         10.12 greedy vs 87.90 ± 19.18 with the original recipe** (reproduced
         exactly by `recipe 0`), 10.7% below the BFS planner, and no collapse at
         6000 updates (266.6).
-  - [x] DQN (`dqn.h`): ring replay, target network, epsilon schedule, and the
-        masked-MSE regression on the existing autograd engine; `make dqn`
-        reaches ~203 greedy on CartPole in 16000 steps; `test_dqn` covers it
-        (33 checks).
+  - [x] DQN (`dqn.h`): ring replay with separate terminal/truncated flags,
+        target network, epsilon schedule, and the masked-MSE regression on the
+        existing autograd engine; `make dqn` reaches ~194 greedy on CartPole in
+        16000 steps (seed 42, 100 episodes); `test_dqn` covers it (38 checks).
   - [x] Graph ops: elementwise `sigmoid`, `exp`, `log` and `div` with matching
         kernels and numerical gradient-check coverage (12 suites / 280
         parameters, f32 + f64).
@@ -682,9 +697,10 @@ Tests: 61 passed, 0 failed
   - [x] v1.1.0 tagged (recipe, DQN, new graph ops, optional system BLAS, ctypes
         demo): `version.h`, `docs/API.md` and the changelog move together, and
         the pkg-config stamp follows from `version.h`.
-  - [x] Checkpoints carry a CRC-32 trailer (format 3) and loads are
-        transactional, with a 300-case mutation fuzz pass in the suite and under
-        the sanitizers.
+  - [x] Checkpoints carry a CRC-32 trailer (format 3), saves are atomic
+        (`<path>.tmp` + fsync + rename, so a failed save cannot clobber the
+        previous file), and loads are transactional, with a 300-case mutation
+        fuzz pass in the suite and under the sanitizers.
   - [x] CI also reports coverage (`make COVERAGE=1 test` + `gcovr`) and
         publishes the benchmark artifact.
   - [x] Packaging: a Conan 2 recipe with a `test_package/` (verified by a CI

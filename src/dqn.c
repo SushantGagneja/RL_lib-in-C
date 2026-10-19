@@ -29,11 +29,17 @@ ReplayBuf *replay_new(Arena *arena, u32 capacity, u32 obs_dim) {
   buf->rewards = ARENA_ARR(arena, real, capacity);
   buf->actions = ARENA_ARR(arena, u32, capacity);
   buf->dones = ARENA_ARR(arena, u8, capacity);
+  buf->truncated = ARENA_ARR(arena, u8, capacity);
   return buf;
 }
 
 void replay_add(ReplayBuf *buf, const real *obs, u32 action, real reward,
                 const real *next_obs, b32 done) {
+  replay_add_ex(buf, obs, action, reward, next_obs, done, false);
+}
+
+void replay_add_ex(ReplayBuf *buf, const real *obs, u32 action, real reward,
+                   const real *next_obs, b32 terminal, b32 truncated) {
   RL_LIB_ASSERT(buf != NULL && obs != NULL && next_obs != NULL,
                 "replay_add: NULL argument");
 
@@ -46,12 +52,17 @@ void replay_add(ReplayBuf *buf, const real *obs, u32 action, real reward,
   }
   buf->rewards[slot] = reward;
   buf->actions[slot] = action;
-  buf->dones[slot] = done ? 1u : 0u;
+  buf->dones[slot] = terminal ? 1u : 0u;
+  buf->truncated[slot] = truncated ? 1u : 0u;
 
   buf->head = (slot + 1u == buf->capacity) ? 0u : slot + 1u;
   if (buf->size < buf->capacity) {
     buf->size += 1u;
   }
+}
+
+real dqn_td_target(real reward, real q_max, real gamma, b32 terminal) {
+  return terminal ? reward : reward + gamma * q_max;
 }
 
 void dqn_sync_target(const Net *src, Net *dst) {
@@ -156,13 +167,13 @@ static void dqn_grad_step(Net *q_model, Net *q_target, const ReplayBuf *buf,
     }
 
     // Masked regression: untaken actions keep the network's own value (zero
-    // error, zero gradient), the taken action gets the bootstrap target.
+    // error, zero gradient), the taken action gets the bootstrap target. A
+    // truncated transition bootstraps normally; only a real terminal drops it.
     for (u32 a = 0; a < act_dim; a++) {
       target->data[a * batch_size + b] = q->data[a * batch_size + b];
     }
-    const real bootstrap = buf->dones[slot] ? 0.0f : config->gamma * q_max;
-    target->data[buf->actions[slot] * batch_size + b] =
-        buf->rewards[slot] + bootstrap;
+    target->data[buf->actions[slot] * batch_size + b] = dqn_td_target(
+        buf->rewards[slot], q_max, config->gamma, buf->dones[slot] != 0u);
   }
 
   schedule_grad_from(&q_model->loss_plan, q_model->cost, true);
@@ -263,7 +274,7 @@ void train_dqn(Env *env, Net *q_model, Net *q_target, const TrainCfg *config,
       const real reward = env->step(env, action, &done, &truncated);
 
       env->observe(env, next_obs);
-      replay_add(buf, obs, action, reward, next_obs, done || truncated);
+      replay_add_ex(buf, obs, action, reward, next_obs, done, truncated);
 
       episode_return += reward;
       env_steps += 1u;

@@ -23,6 +23,10 @@
 // written, so a rejected file leaves the model exactly as it was.
 // checkpoint_last_error() describes the most recent failure.
 //
+// Saves are atomic: the new image is written to "<path>.tmp", synced, and
+// renamed over <path>, so a crash or a failed write leaves the previous
+// checkpoint intact instead of truncating it.
+//
 // Not saved: the RNG state and the rollout buffer. A resumed run re-derives its
 // RNG from TrainCfg.seed, so it continues from the saved parameters — it just is
 // not bit-identical to a run that was never interrupted.

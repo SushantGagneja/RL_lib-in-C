@@ -1,4 +1,4 @@
-// test_mat.c — Unit tests for mat.c operations
+// test_mat.c — Unit tests for the matrix operations in linalg.c
 // Phase 0.2: Prove the math layer is correct.
 #include "memory.h"
 #include "base.h"
@@ -417,7 +417,7 @@ int main(void) {
   Arena *arena = arena_new(MiB(16));
   RL_LIB_ASSERT(arena != NULL, "arena_new failed");
 
-  printf("\n=== mat.c unit tests ===\n\n");
+  printf("\n=== linalg.c unit tests ===\n\n");
   printf("[mat_mm variants]\n");
   test_matmul_nn(arena);
   test_matmul_nt(arena);

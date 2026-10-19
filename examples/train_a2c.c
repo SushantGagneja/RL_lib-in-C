@@ -6,7 +6,7 @@
 #include <stdlib.h>
 
 // Trains CartPole-v1 with A2C (advantage actor-critic) + GAE.
-// Previously this path could not run at all; see the P0 fixes in rl.c/nn.c.
+// Previously this path could not run at all; see the P0 fixes in rl.c.
 int main(int argc, char **argv) {
   u64 seed = (argc > 1) ? (u64)strtoull(argv[1], NULL, 10) : 42;
   u32 epochs = (argc > 2) ? (u32)atoi(argv[2]) : 200;

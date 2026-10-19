@@ -32,12 +32,21 @@
 // Reads validate the whole file before touching the model - payloads are
 // staged, and the stream is walked twice (validate, then apply) - so a
 // truncated, mismatched or corrupted file is rejected without mutating
-// anything.
+// anything. Saves are the mirror image: the image is written to "<path>.tmp",
+// synced, and renamed over <path>, so a crash or a failed write cannot destroy
+// the previously saved checkpoint.
 #include "checkpoint.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#if defined(_WIN32)
+#include <io.h>
+#include <windows.h>
+#else
+#include <unistd.h>
+#endif
 
 #define CHECKPOINT_FORMAT 3u
 
@@ -643,6 +652,64 @@ static b32 load_from_path(const char *path, Net *model, Adam *adam,
   return ok;
 }
 
+// ── Atomic replacement ───────────────────────────────────────────────
+//
+// Every save writes "<path>.tmp" and renames it over "<path>" once the bytes
+// are on disk. The rename is atomic on POSIX and uses MoveFileEx on Windows, so
+// at any instant the destination is either the old checkpoint or the complete
+// new one - never a partially written file. A failure removes the temporary and
+// leaves the old checkpoint in place.
+
+static char *temp_path_for(const char *path) {
+  const size_t n = strlen(path);
+  char *tmp = (char *)malloc(n + 5u); // ".tmp" plus the terminator
+  if (tmp == NULL) {
+    set_error("out of memory for the temporary checkpoint path");
+    return NULL;
+  }
+  memcpy(tmp, path, n);
+  memcpy(tmp + n, ".tmp", 5u);
+  return tmp;
+}
+
+static b32 finish_save(FILE *f, char *tmp, const char *path, b32 ok) {
+  if (ok && fflush(f) != 0) {
+    set_error("failed to flush checkpoint");
+    ok = false;
+  }
+#if defined(_WIN32)
+  if (ok && _commit(_fileno(f)) != 0) {
+    set_error("failed to sync checkpoint to disk");
+    ok = false;
+  }
+#else
+  if (ok && fsync(fileno(f)) != 0) {
+    set_error("failed to sync checkpoint to disk");
+    ok = false;
+  }
+#endif
+  if (fclose(f) != 0 && ok) {
+    set_error("failed to close checkpoint");
+    ok = false;
+  }
+  if (ok) {
+#if defined(_WIN32)
+    ok = MoveFileExA(tmp, path,
+                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+#else
+    ok = rename(tmp, path) == 0;
+#endif
+    if (!ok) {
+      set_error("cannot replace checkpoint (rename failed)");
+    }
+  }
+  if (!ok) {
+    remove(tmp);
+  }
+  free(tmp);
+  return ok;
+}
+
 // ── Public API ───────────────────────────────────────────────────────
 
 b32 net_save(const Net *model, const char *path) {
@@ -651,20 +718,21 @@ b32 net_save(const Net *model, const char *path) {
     set_error("null model or path");
     return false;
   }
-  FILE *f = fopen(path, "wb");
+  char *tmp = temp_path_for(path);
+  if (tmp == NULL) {
+    return false;
+  }
+  FILE *f = fopen(tmp, "wb");
   if (f == NULL) {
     set_error("cannot open checkpoint for writing");
+    free(tmp);
     return false;
   }
   b32 ok = write_header(f) && write_params_block(f, model) && write_end_block(f);
   if (ok) {
-    ok = write_crc_trailer(f, path);
+    ok = write_crc_trailer(f, tmp);
   }
-  if (fclose(f) != 0) {
-    set_error("failed to flush checkpoint");
-    ok = false;
-  }
-  return ok;
+  return finish_save(f, tmp, path, ok);
 }
 
 b32 net_load(Net *model, const char *path) {
@@ -681,21 +749,22 @@ b32 adam_save(const Adam *adam, const Net *model, const char *path) {
     set_error("optimiser state does not match this model");
     return false;
   }
-  FILE *f = fopen(path, "wb");
+  char *tmp = temp_path_for(path);
+  if (tmp == NULL) {
+    return false;
+  }
+  FILE *f = fopen(tmp, "wb");
   if (f == NULL) {
     set_error("cannot open checkpoint for writing");
+    free(tmp);
     return false;
   }
   b32 ok = write_header(f) && write_adam_block(f, adam, model) &&
            write_end_block(f);
   if (ok) {
-    ok = write_crc_trailer(f, path);
+    ok = write_crc_trailer(f, tmp);
   }
-  if (fclose(f) != 0) {
-    set_error("failed to flush checkpoint");
-    ok = false;
-  }
-  return ok;
+  return finish_save(f, tmp, path, ok);
 }
 
 b32 adam_load(Adam *adam, Net *model, const char *path) {
@@ -712,22 +781,23 @@ b32 checkpoint_save(const Net *model, const Adam *adam, const char *path) {
     set_error("optimiser state does not match this model");
     return false;
   }
-  FILE *f = fopen(path, "wb");
+  char *tmp = temp_path_for(path);
+  if (tmp == NULL) {
+    return false;
+  }
+  FILE *f = fopen(tmp, "wb");
   if (f == NULL) {
     set_error("cannot open checkpoint for writing");
+    free(tmp);
     return false;
   }
   b32 ok = write_header(f) && write_params_block(f, model);
   ok = ok && (adam == NULL || write_adam_block(f, adam, model));
   ok = ok && write_end_block(f);
   if (ok) {
-    ok = write_crc_trailer(f, path);
+    ok = write_crc_trailer(f, tmp);
   }
-  if (fclose(f) != 0) {
-    set_error("failed to flush checkpoint");
-    ok = false;
-  }
-  return ok;
+  return finish_save(f, tmp, path, ok);
 }
 
 b32 checkpoint_load(Net *model, Adam *adam, const char *path) {

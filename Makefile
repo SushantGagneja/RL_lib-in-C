@@ -359,10 +359,11 @@ bench-double: $(BENCH_DOUBLE_BIN)
 # ── Cleanup ─────────────────────────────────────────────────────────
 
 clean:
-	rm -f $(LIB_OBJS) examples/train_snake.o examples/train_cartpole.o examples/train_a2c.o examples/train_ppo.o examples/train_ppo_continuous.o examples/train_ppo_snake.o examples/hello_rl.o examples/bench.o
-	rm -f $(TARGET_SNAKE) $(TARGET_CARTPOLE) $(TARGET_A2C) $(TARGET_PPO) $(TARGET_PPO_CONT) $(TARGET_PPO_SNAKE) $(TARGET_HELLO) $(TEST_BINS) $(BENCH_BIN)
+	rm -f $(LIB_OBJS) examples/train_snake.o examples/train_cartpole.o examples/train_a2c.o examples/train_ppo.o examples/train_ppo_continuous.o examples/train_ppo_snake.o examples/train_dqn.o examples/hello_rl.o examples/bench.o
+	rm -f $(TARGET_SNAKE) $(TARGET_CARTPOLE) $(TARGET_A2C) $(TARGET_PPO) $(TARGET_PPO_CONT) $(TARGET_PPO_SNAKE) $(TARGET_DQN) $(TARGET_HELLO) $(TEST_BINS) $(BENCH_BIN)
 	rm -f $(TEST_GRAD_DOUBLE_BIN) $(LIB_STATIC) $(SHARED_REAL) $(SHARED_LINK) $(SHARED_EXTRA_LINKS) rl_lib.pc
 	rm -rf build
 
 .PHONY: all release debug examples asan test test-double gradcheck-double clean lib install uninstall \
-        snake cartpole a2c ppo ppo-continuous hello bench bench-cartpole bench-snake bench-throughput
+        snake cartpole a2c ppo ppo-continuous dqn hello bench bench-cartpole bench-snake bench-throughput \
+        bench-double

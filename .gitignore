@@ -24,6 +24,8 @@
 /train_a2c
 /train_ppo
 /train_ppo_continuous
+/train_ppo_snake
+/train_dqn
 /hello_rl
 /hello_rl.ckpt
 /test_mat
@@ -33,7 +35,7 @@
 /test_rl
 /test_checkpoint
 /test_dqn
-/checkpoint_test*.bin
+/checkpoint_test*
 /rl_lib_bench
 /exercise/arena
 /exercise/autograd

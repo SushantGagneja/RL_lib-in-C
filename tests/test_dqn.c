@@ -74,7 +74,7 @@ static void test_replay_ring(void) {
   for (u32 i = 0; i < 6; i++) {
     const real o[2] = {(real)i, (real)i * 10.0f};
     const real n[2] = {(real)i + 100.0f, (real)i * 10.0f + 1.0f};
-    replay_add(buf, o, i % 2u, (real)i, n, (i % 2u) == 1u);
+    replay_add_ex(buf, o, i % 2u, (real)i, n, (i % 2u) == 1u, i == 4u);
   }
 
   ASSERT_TRUE(buf->size == 4u, "size caps at the capacity");
@@ -87,7 +87,16 @@ static void test_replay_ring(void) {
               "next observation copied");
   ASSERT_TRUE(buf->actions[1] == 1u, "action stored (i = 5 -> slot 1)");
   ASSERT_TRUE(buf->dones[1] == 1u && buf->dones[0] == 0u,
-              "done flags stored (i = 5 -> slot 1, i = 4 -> slot 0)");
+              "terminal flags stored (i = 5 -> slot 1, i = 4 -> slot 0)");
+  ASSERT_TRUE(buf->truncated[1] == 0u && buf->truncated[0] == 1u,
+              "truncated flags stored separately (i = 4 -> slot 0)");
+
+  // The original entry point still marks a plain terminal transition.
+  const real o[2] = {9.0f, 9.0f};
+  const real n[2] = {10.0f, 10.0f};
+  replay_add(buf, o, 0u, 1.0f, n, true);
+  ASSERT_TRUE(buf->dones[2] == 1u && buf->truncated[2] == 0u,
+              "replay_add marks terminal and leaves truncated clear");
 
   arena_dispose(arena);
   printf("OK\n");
@@ -169,6 +178,19 @@ static void test_dqn_epsilon(void) {
 }
 
 // ── Target sync and training effect ──────────────────────────────────
+
+static void test_td_target(void) {
+  printf("  One-step TD target and truncation... ");
+
+  ASSERT_NEAR(dqn_td_target(1.0f, 2.0f, 0.5f, false), 2.0f, 1e-6f,
+              "continuing transition bootstraps");
+  ASSERT_NEAR(dqn_td_target(1.0f, 2.0f, 0.5f, true), 1.0f, 1e-6f,
+              "terminal transition drops the bootstrap");
+  ASSERT_NEAR(dqn_td_target(-1.0f, 100.0f, 0.99f, false), 98.0f, 1e-5f,
+              "truncation keeps the same bootstrap as a continuing step");
+
+  printf("OK\n");
+}
 
 static void test_dqn_sync_and_training(void) {
   printf("  Target sync and training effect... ");
@@ -329,6 +351,7 @@ int main(void) {
   test_replay_ring();
   test_q_net_build();
   test_dqn_epsilon();
+  test_td_target();
   test_dqn_sync_and_training();
   test_dqn_determinism();
   test_dqn_learning();

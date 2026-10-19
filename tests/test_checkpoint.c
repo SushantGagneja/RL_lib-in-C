@@ -12,6 +12,13 @@
 #include <stdio.h>
 #include <string.h>
 
+#if defined(_WIN32)
+#include <direct.h>
+#else
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
+
 static u32 tests_passed = 0;
 static u32 tests_failed = 0;
 
@@ -27,6 +34,7 @@ static u32 tests_failed = 0;
 
 static const char *SAVE_PATH = "checkpoint_test.bin";
 static const char *JUNK_PATH = "checkpoint_test_junk.bin";
+static const char *TMP_PATH = "checkpoint_test.bin.tmp";
 
 static Net *build_model(Arena *arena, Rng *rng, u32 act_dim, u32 batch_size) {
   Net *model = net_new(arena);
@@ -62,6 +70,15 @@ static b32 params_identical(const Net *a, const Net *b) {
       return false;
     }
   }
+  return true;
+}
+
+static b32 file_exists(const char *path) {
+  FILE *f = fopen(path, "rb");
+  if (f == NULL) {
+    return false;
+  }
+  fclose(f);
   return true;
 }
 
@@ -576,6 +593,63 @@ static void test_fuzzed_inputs(void) {
   printf("OK\n");
 }
 
+// ── Atomic saves ─────────────────────────────────────────────────────
+
+static void test_save_atomicity(void) {
+  printf("  Atomic save (temp file + rename)... ");
+
+  Arena *a1 = arena_new(MiB(8));
+  Rng rng;
+  rng_seed(&rng, 77, 4);
+  Net *src = build_model(a1, &rng, 2, 4);
+
+  Arena *a2 = arena_new(MiB(8));
+  Rng rng2;
+  rng_seed(&rng2, 123, 5);
+  Net *restored = build_model(a2, &rng2, 2, 4);
+
+  ASSERT_TRUE(net_save(src, SAVE_PATH), "save succeeds");
+  ASSERT_TRUE(!file_exists(TMP_PATH), "no temporary file is left behind");
+
+  // Saving over an existing checkpoint replaces it.
+  src->params[0]->val->data[0] += REAL_C(1.0);
+  ASSERT_TRUE(net_save(src, SAVE_PATH), "overwriting save succeeds");
+  ASSERT_TRUE(net_load(restored, SAVE_PATH), "the replacement loads");
+  ASSERT_TRUE(params_identical(restored, src),
+              "the replacement holds the new image");
+
+  // Make the temporary path unusable: the save must fail, report why, and
+  // leave the previous checkpoint byte-identical and loadable.
+  const real old_value = src->params[0]->val->data[0];
+  src->params[0]->val->data[0] += REAL_C(5.0);
+#if defined(_WIN32)
+  ASSERT_TRUE(_mkdir(TMP_PATH) == 0, "blocked the temporary path");
+#else
+  ASSERT_TRUE(mkdir(TMP_PATH, 0700) == 0, "blocked the temporary path");
+#endif
+  ASSERT_TRUE(!net_save(src, SAVE_PATH), "save reports failure");
+  ASSERT_TRUE(checkpoint_last_error()[0] != '\0', "the failure is reported");
+  ASSERT_TRUE(file_exists(SAVE_PATH), "the previous checkpoint still exists");
+  ASSERT_TRUE(net_load(restored, SAVE_PATH),
+              "the previous checkpoint still loads");
+  ASSERT_TRUE(restored->params[0]->val->data[0] == old_value,
+              "the failed save did not touch the old checkpoint");
+#if defined(_WIN32)
+  ASSERT_TRUE(_rmdir(TMP_PATH) == 0, "removed the obstacle");
+#else
+  ASSERT_TRUE(rmdir(TMP_PATH) == 0, "removed the obstacle");
+#endif
+  ASSERT_TRUE(net_save(src, SAVE_PATH), "save succeeds once the path is clear");
+  ASSERT_TRUE(!file_exists(TMP_PATH), "no temporary file after the retry");
+  ASSERT_TRUE(net_load(restored, SAVE_PATH), "the retry loads");
+  ASSERT_TRUE(params_identical(restored, src), "the retry wrote the new image");
+
+  remove(SAVE_PATH);
+  arena_dispose(a1);
+  arena_dispose(a2);
+  printf("OK\n");
+}
+
 // ── Null handling ────────────────────────────────────────────────────
 
 static void test_null_args(void) {
@@ -645,6 +719,7 @@ int main(void) {
   test_param_round_trip();
   test_adam_resume();
   test_partial_files();
+  test_save_atomicity();
   test_failure_modes();
   test_crc_detects_bit_rot();
   test_fuzzed_inputs();

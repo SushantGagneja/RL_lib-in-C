@@ -27,7 +27,7 @@ program has to initialise: one arena, one random generator, and you are running.
 | [`env.h`](#envh) | the `Env` interface every environment implements, discrete and continuous |
 | [`vecenv.h`](#vecenvh) | `VecEnv`, synchronised parallel environments |
 | [`rl.h`](#rlh) | `TrainCfg`, `Rollout`, `train_reinforce`, `train_a2c`, `train_ppo`, `train_ppo_continuous`, `evaluate`, `evaluate_continuous` |
-| [`dqn.h`](#dqnh) | `ReplayBuf`, `replay_new`, `replay_add`, `dqn_sync_target`, `dqn_epsilon_at`, `train_dqn` |
+| [`dqn.h`](#dqnh) | `ReplayBuf`, `replay_new`, `replay_add`, `replay_add_ex`, `dqn_td_target`, `dqn_sync_target`, `dqn_epsilon_at`, `train_dqn` |
 | [`envs/`](#environments) | CartPole, Grid Snake, Pendulum-v1 |
 
 Three conventions run through the whole API and are worth reading first:
@@ -634,6 +634,12 @@ moments; `checkpoint_load` restores both and needs the model only for shape
 validation. Passing `adam = NULL` to either function reduces it to parameters
 only.
 
+Saves are atomic: the image is written to `<path>.tmp`, synced to disk, and
+renamed over `path`, so a crash or a failed save leaves the previous checkpoint
+intact rather than truncating it. Loads are the mirror image — the file is
+validated and staged before any parameter is written, so a rejected file leaves
+the model exactly as it was.
+
 Resuming a run:
 
 ```c
@@ -1038,12 +1044,16 @@ typedef struct {
   real *next_obs; // capacity * obs_dim
   real *rewards;  // capacity
   u32 *actions;   // capacity
-  u8 *dones;      // capacity, 0/1: terminal *or* truncated
+  u8 *dones;      // capacity, 0/1: the episode ended here (no bootstrap)
+  u8 *truncated;  // capacity, 0/1: cut by a time limit (still bootstraps)
 } ReplayBuf;
 
 ReplayBuf *replay_new(Arena *arena, u32 capacity, u32 obs_dim);
 void replay_add(ReplayBuf *buf, const real *obs, u32 action, real reward,
                 const real *next_obs, b32 done);
+void replay_add_ex(ReplayBuf *buf, const real *obs, u32 action, real reward,
+                   const real *next_obs, b32 terminal, b32 truncated);
+real dqn_td_target(real reward, real q_max, real gamma, b32 terminal);
 void dqn_sync_target(const Net *src, Net *dst);
 real dqn_epsilon_at(const TrainCfg *config, u32 env_steps);
 void train_dqn(Env *env, Net *q_model, Net *q_target, const TrainCfg *config,
@@ -1066,12 +1076,13 @@ the rollout graph, the batched graph and the regression target tensor.
 
 The loss is the DQN regression in *masked* form: each target column holds the
 one-step bootstrap value `r + gamma * max_a' Q_target(s', a')` for the action
-that was taken (`0` bootstrap for terminal and truncated steps alike), and a
-copy of the network's own current Q value for every other action. Because the
-MSE backpropagates into its prediction operand only, the copied entries have
-exactly zero error and contribute no gradient — the update is a one-hot squared
-error on the taken action, with no gather/scatter op needed. This is plain DQN:
-no double-Q, no dueling head.
+that was taken, and a copy of the network's own current Q value for every other
+action. A time-limit truncation keeps that bootstrap (the MDP did not end); a
+genuine terminal drops it. `dqn_td_target` is the public form of that rule.
+Because the MSE backpropagates into its prediction operand only, the copied
+entries have exactly zero error and contribute no gradient — the update is a
+one-hot squared error on the taken action, with no gather/scatter op needed.
+This is plain DQN: no double-Q, no dueling head.
 
 `config->epochs` updates of `config->rollout_size` environment steps (0 => 32)
 are collected with epsilon-greedy actions from the rollout graph; one gradient
