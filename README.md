@@ -157,32 +157,39 @@ evaluation flatters a policy trained with only 50 updates. The physics run in
 | Greedy (BFS to food, avoids body/walls) | 298.66 ± 3.83 | 305.40 | 296.30 |
 | REINFORCE + Adam, greedy eval | 39.68 ± 7.33 | 50.70 | 30.90 |
 | REINFORCE + Adam, stochastic eval | 41.96 ± 7.24 | 54.60 | 36.80 |
-| PPO + `VecEnv`, greedy eval | 87.90 ± 19.18 | 110.60 | 60.50 |
-| PPO + `VecEnv`, stochastic eval | 108.16 ± 13.62 | 122.50 | 85.70 |
+| PPO + `VecEnv`, original recipe, greedy eval | 87.90 ± 19.18 | 110.60 | 60.50 |
+| PPO + `VecEnv`, original recipe, stochastic eval | 108.16 ± 13.62 | 122.50 | 85.70 |
+| **PPO + `VecEnv`, full recipe, greedy eval** | **266.72 ± 10.12** | 281.70 | 253.30 |
+| **PPO + `VecEnv`, full recipe, stochastic eval** | **264.24 ± 12.83** | 284.20 | 249.10 |
 
-**The trained policy loses badly to the baseline.** A BFS planner that knows
-the rules scores ~299; REINFORCE + Adam from scratch reaches only ~40 after 200
-epochs, and improving slowly. The earlier "beats greedy by 63%" claim used a
-greedy agent that ignored walls and its own body — a strawman. With a real
-baseline, the honest conclusion is that this Snake setup is not solved.
+**The full training recipe closed most of the gap to the planner.** The two
+recipe rows are a re-run of the identical protocol — same five seeds, same 1500
+updates, same evaluation seed list, same binary — with `recipe 1`, which turns
+on the standard PPO recipe: cosine learning-rate decay 3e-4 → 3e-5, value
+clipping (0.2), approximate-KL early stop (0.03), entropy annealing
+0.01 → 0.001, and running observation normalization plus reward scaling.
+Evaluation applies the frozen observation statistics and reports raw rewards
+(reward scaling is a training transform). The same budget now reaches
+266.72 ± 10.12 greedy — **3.0× the original recipe** (87.90 ± 19.18, the
+published rows, reproduced exactly by `recipe 0` on the current binary) — and
+lands within 11% of the BFS planner: about 13 foods per episode against the
+planner's ~15, versus 4-5 before. A planner that knows the rules still wins;
+REINFORCE + Adam from scratch still reaches only ~40 after 200 epochs.
 
-PPO over 8 vectorized environments (the last two rows; `make ppo-snake`, 1500
-updates × 5 seeds, evaluated on the benchmark harness's seed list) reaches 2.2×
-the REINFORCE baseline in both evaluation modes and *still* falls 3.4× short of
-the planner: roughly 4-5 foods per episode against the planner's ~15.
+**No more late-run collapse.** Seed 42 run to 6000 updates (4× the rows above)
+with the full recipe evaluates at 266.6 greedy / 266.8 stochastic — flat
+against its 1500-update result instead of falling apart. With the original
+recipe the same run peaked near 170 mid-training and then collapsed to
+54.1/71.9: that was the fixed learning rate and the missing normalization/KL
+stop showing through, and the recipe is what fixes it — not more compute.
 
-The gap is not a budget problem. Seed 42 run to 6000 updates (4× the rows
-above) climbed to ~170 mean training return by update 5650, then its last ~300
-updates collapsed to 55 and its final weights evaluated at 54.1/71.9 — *below*
-its own 1500-update result. That is a late-run policy collapse (nothing in this
-configuration pins the policy open: `entropy_coef = 0.01`, no early stopping,
-no KL cap), and the practical answer is best-checkpoint selection with
-`checkpoint_save`/`checkpoint_load`, not more compute. The example's optional
+`examples/train_ppo_snake.c` takes a `recipe` argument; `make ppo-snake` uses
+recipe 1. Recipe 0 keeps the original numbers reachable bit for bit (verified
+by diffing the full training output against the pre-recipe binary), which is
+how the two sets of rows above were produced on one binary. The optional
 potential-based shaping wrapper (Manhattan distance to the food,
-`r' = r + c(γΦ' − Φ)`, Ng et al. 1999) kept its equivalent 6000-update run
-alive to the end (~157) — but at 1500 updates shaping changed nothing measurable
-(107.4 vs 100.7 greedy on identical seeds), so it buys late-run stability here,
-not parity. The default is therefore the raw sparse reward.
+`r' = r + c(γΦ' − Φ)`, Ng et al. 1999) is still available; at this budget it no
+longer changes the outcome, so the default remains the raw sparse reward.
 
 ### Throughput (single core, one machine)
 
@@ -245,8 +252,8 @@ still sets the ceiling.
 PPO reaches the 500-step cap on CartPole well inside 300 updates — it is much
 more sample-efficient than the REINFORCE baseline above, which is the expected
 result of on-policy data reuse. On Snake the same trainer is wired up too (see
-the Snake section): PPO there reaches ~2.2× its REINFORCE baseline and no
-parity, and the section documents why.
+the Snake section): with the full recipe it reaches 3.0× its REINFORCE
+baseline and sits within 11% of a BFS planner, and the section has the numbers.
 
 ### Pendulum-v1 (continuous PPO, 8 envs × 128 steps, 1200 updates)
 
@@ -523,11 +530,11 @@ Tests: 61 passed, 0 failed
 - **Precision is f32 by default.** The `real` typedef switches the whole
   library to f64 with `-DRL_LIB_USE_DOUBLE`; the gradient check uses this, and
   `make test-double` now runs every suite in f64 as well.
-- **Snake is not solved.** REINFORCE + Adam plateaus at ~40 and PPO over 8
-  vectorized environments at ~90-110 (greedy, five seeds), both against a BFS
-  planner's ~299 — and the PPO configuration can collapse late in a long run, so
-  more updates are not the missing ingredient. The numbers and the failure mode
-  are in the Snake section.
+- **Snake is close to, but still short of, its planner.** With the full recipe
+  PPO over 8 vectorized environments reaches 266.7 ± 10.1 greedy (five seeds)
+  against the BFS planner's ~299 — within 11%, and with no late-run collapse;
+  the original recipe scores 87.9 ± 19.2 at the same budget. REINFORCE + Adam
+  plateaus at ~40. The numbers and the recipe are in the Snake section.
 - **Continuous PPO is stable, not solved.** Pendulum converges to -130..-240
   (a random policy is about -1200), and the configuration is sensitive to the
   learning rate — see the Pendulum section. The squashed-Gaussian policy also
@@ -612,6 +619,22 @@ Tests: 61 passed, 0 failed
         long runs collapsing instead of closing the gap. Numbers, budget check
         and shaping control in the Snake section;
         `examples/train_ppo_snake.c`, `make ppo-snake`.
+
+- [x] **Phase 8: Recipes, off-policy and ops**
+  - [x] Full PPO training recipe (`TrainCfg`): linear/cosine LR decay, entropy
+        annealing, value clipping, approximate-KL early stop, running
+        observation normalization and reward scaling with `*_normed`
+        evaluation. Five-seed Snake re-run on the same protocol: **266.72 ±
+        10.12 greedy vs 87.90 ± 19.18 with the original recipe** (reproduced
+        exactly by `recipe 0`), 10.7% below the BFS planner, and no collapse at
+        6000 updates (266.6).
+  - [x] DQN (`dqn.h`): ring replay, target network, epsilon schedule, and the
+        masked-MSE regression on the existing autograd engine; `make dqn`
+        reaches ~203 greedy on CartPole in 16000 steps; `test_dqn` covers it
+        (33 checks).
+  - [x] Graph ops: elementwise `sigmoid`, `exp`, `log` and `div` with matching
+        kernels and numerical gradient-check coverage (12 suites / 280
+        parameters, f32 + f64).
 
 ### Remaining
 

@@ -29,6 +29,13 @@ single source of truth — it is also stamped into `rl_lib.pc`.
   raw environment returns.
 - `train_lr_at`/`train_entropy_coef_at` expose the trainers' schedules so logs
   and user code cannot drift from what the optimiser actually uses.
+- **The five-seed Snake PPO protocol was re-run on the same binary** with the
+  full recipe: **266.72 ± 10.12 greedy** (264.24 ± 12.83 stochastic) against
+  87.90 ± 19.18 / 108.16 ± 13.62 for the original recipe, which `recipe 0`
+  reproduces exactly — a 3.0x improvement, within 11% of the BFS planner, and
+  no late-run collapse (seed 42 at 6000 updates: 266.6, where the original
+  recipe fell to 54.1). README's Snake section carries the updated table and
+  prose.
 - `tests/test_rl.c`: schedule values, normalization statistics
   (hand-computed Welford/posterior/clip cases), knob-effect checks, and an
   end-to-end normalized-training suite (73 -> 103 checks).
