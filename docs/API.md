@@ -153,7 +153,8 @@ SIMD kernels intentionally use different accumulation orders (see
 [`simd.h`](#simdh)), so bit-exact cross-machine equality is not a goal.
 
 The `*_g` variants touch a process-global generator. They exist for convenience
-in tests and throwaway scripts; library code always takes an `Rng *`.
+in tests and throwaway scripts; library code always takes an `Rng *`, and the
+global generator is not thread-safe.
 
 ---
 

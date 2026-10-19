@@ -14,6 +14,9 @@ typedef struct {
 Mat *mat_new(Arena *arena, u32 rows, u32 cols);
 void mat_zero(Mat *mat);
 void mat_fill(Mat *mat, real x);
+// Uniform fill: mat_rand() uses the module-wide generator (rng_seed_g() must
+// have been called; not thread-safe), mat_rand_r() uses the caller's Rng and is
+// what every layer builder uses.
 void mat_rand(Mat *mat, real lower, real upper);
 void mat_rand_r(Mat *mat, Rng *rng, real lower, real upper);
 void mat_scale(Mat *mat, real scale_factor);

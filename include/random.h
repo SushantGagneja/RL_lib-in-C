@@ -10,6 +10,12 @@
 // Rng holds 256 bits of state and must not be all-zero. Use rng_seed() to
 // initialise it from a 64-bit seed plus an independent 64-bit stream tag
 // (so several Rng instances can share a seed and still diverge).
+//
+// The *_g functions are a global-state convenience mirror of the explicit-Rng
+// API: rng_seed_g() seeds one module-wide generator and every subsequent *_g
+// call draws from it. That generator is not thread-safe, and the library's
+// trainers/builders never use it internally (they keep their own Rng per run);
+// threaded code should do the same and call the explicit-Rng functions.
 
 typedef struct {
   u64 lane[4];
