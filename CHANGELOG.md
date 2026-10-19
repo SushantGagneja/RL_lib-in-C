@@ -6,6 +6,43 @@ All notable changes to this project are recorded here. The format follows
 breaks on a major bump. `RL_LIB_VERSION_STRING` in `include/version.h` is the
 single source of truth — it is also stamped into `rl_lib.pc`.
 
+## Unreleased
+
+### Added
+- **Training recipe knobs.** `TrainCfg.lr_schedule`/`lr_end` decay the learning
+  rate from `learning_rate` to `lr_end` over the run (linear or cosine), and
+  `anneal_entropy`/`entropy_coef_end` do the same for the entropy bonus; every
+  trainer honours them and refreshes Adam's stored rate each update. The PPO
+  trainers additionally take `vf_clip` (clipped value loss against the
+  rollout's own value estimate, `mat_mse_clip_add_grad`) and `target_kl`
+  (trust-region early stop once the mean approximate KL — the k3 estimator —
+  exceeds 1.5x it).
+- **Observation normalization and reward scaling** for the PPO trainers
+  (`TrainCfg.norm_obs`, `norm_reward`, `norm_clip`, `norm_reward_clip`,
+  `norm`). The statistics are Welford-updated from the trainers' own rollout
+  stream — folding happens in the serial collection loop, so worker threads
+  never touch them and threaded stepping stays bit-identical to serial. Both
+  transforms start from a standard-normal prior, so the first observations and
+  returns pass through nearly unchanged. `NormStats` survives the run for
+  evaluation: the new `evaluate_normed`/`evaluate_seeded_normed` (and their
+  `_continuous` twins) apply the frozen observation transform and still report
+  raw environment returns.
+- `train_lr_at`/`train_entropy_coef_at` expose the trainers' schedules so logs
+  and user code cannot drift from what the optimiser actually uses.
+- `tests/test_rl.c`: schedule values, normalization statistics
+  (hand-computed Welford/posterior/clip cases), knob-effect checks, and an
+  end-to-end normalized-training suite (73 -> 103 checks).
+- `examples/train_ppo_snake.c`: a `recipe` argument. Recipe 0 reproduces the
+  1.0.0 Snake numbers bit for bit (verified against the previous binary);
+  recipe 1 (the new default) enables the full recipe: cosine LR 3e-4 -> 3e-5,
+  value clip 0.2, KL early stop 0.03, entropy 0.01 -> 0.001, observation
+  normalization and reward scaling.
+
+### Changed
+- The PPO trainers now take their learning rate and entropy coefficient from
+  the schedules on every update. The defaults are constant, so pre-existing
+  configurations train bit-identically to 1.0.0.
+
 ## 1.0.0 — 2026-10-18
 
 First release. Everything below landed while preparing it, so this entry is the

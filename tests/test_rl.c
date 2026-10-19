@@ -926,6 +926,261 @@ static void test_batch_size_rebuild(void) {
   printf("OK\n");
 }
 
+// ── Training schedules, normalization statistics, recipe knobs ───────
+
+static void test_train_schedules(void) {
+  printf("  LR and entropy schedules... ");
+  TrainCfg cfg = {
+      .epochs = 11,
+      .learning_rate = 1e-3f,
+      .lr_end = 1e-4f,
+      .lr_schedule = LR_LINEAR,
+      .entropy_coef = 0.01f,
+      .entropy_coef_end = 0.001f,
+      .anneal_entropy = true,
+  };
+
+  ASSERT_NEAR(train_lr_at(&cfg, cfg.learning_rate, 0), 1e-3f, 1e-6f,
+              "linear LR starts at learning_rate");
+  ASSERT_NEAR(train_lr_at(&cfg, cfg.learning_rate, 5), 5.5e-4f, 1e-6f,
+              "linear LR at the midpoint");
+  ASSERT_NEAR(train_lr_at(&cfg, cfg.learning_rate, 10), 1e-4f, 1e-6f,
+              "linear LR ends at lr_end");
+
+  cfg.lr_schedule = LR_COSINE;
+  ASSERT_NEAR(train_lr_at(&cfg, cfg.learning_rate, 0), 1e-3f, 1e-6f,
+              "cosine LR starts at learning_rate");
+  ASSERT_NEAR(train_lr_at(&cfg, cfg.learning_rate, 2), 9.14058e-4f, 1e-6f,
+              "cosine LR at 20% of the run");
+  ASSERT_NEAR(train_lr_at(&cfg, cfg.learning_rate, 10), 1e-4f, 1e-6f,
+              "cosine LR ends at lr_end");
+
+  cfg.lr_schedule = LR_CONSTANT;
+  ASSERT_NEAR(train_lr_at(&cfg, cfg.learning_rate, 10), 1e-3f, 1e-9f,
+              "LR_CONSTANT ignores lr_end");
+
+  TrainCfg single = {
+      .epochs = 1,
+      .learning_rate = 1e-3f,
+      .lr_end = 0.0f,
+      .lr_schedule = LR_LINEAR,
+  };
+  ASSERT_NEAR(train_lr_at(&single, single.learning_rate, 0), 1e-3f, 1e-9f,
+              "a single update stays at the start value");
+
+  ASSERT_NEAR(train_entropy_coef_at(&cfg, 0), 0.01f, 1e-6f,
+              "entropy annealing starts at entropy_coef");
+  ASSERT_NEAR(train_entropy_coef_at(&cfg, 5), 0.0055f, 1e-6f,
+              "entropy annealing at the midpoint");
+  ASSERT_NEAR(train_entropy_coef_at(&cfg, 10), 0.001f, 1e-6f,
+              "entropy annealing ends at entropy_coef_end");
+  cfg.anneal_entropy = false;
+  ASSERT_NEAR(train_entropy_coef_at(&cfg, 10), 0.01f, 1e-9f,
+              "entropy stays constant when annealing is off");
+  printf("OK\n");
+}
+
+static void test_norm_stats(void) {
+  printf("  running normalization statistics... ");
+  Arena *arena = arena_new(GiB(1));
+  NormStats *stats = norm_stats_new(arena, 2);
+  ASSERT_TRUE(stats->obs_dim == 2 && stats->count == 0, "fresh statistics");
+
+  real out[2];
+  norm_stats_obs(stats, (const real[]){1.0f, 2.0f}, out);
+  ASSERT_NEAR(out[0], 1.0f, 1e-5f, "identity before any fold (x)");
+  ASSERT_NEAR(out[1], 2.0f, 1e-5f, "identity before any fold (y)");
+
+  norm_stats_fold_obs(stats, (const real[]){1.0f, 2.0f});
+  norm_stats_fold_obs(stats, (const real[]){3.0f, 4.0f});
+  ASSERT_TRUE(stats->count == 2, "two observations folded");
+  ASSERT_NEAR(stats->mean[0], 2.0f, 1e-6f, "Welford mean");
+  ASSERT_NEAR(stats->m2[0], 2.0f, 1e-6f, "Welford m2");
+
+  norm_stats_obs(stats, (const real[]){1.0f, 2.0f}, out);
+  ASSERT_NEAR(out[0], -1.0f / 3.0f, 1e-5f, "posterior normalization");
+  ASSERT_NEAR(out[1], 0.0f, 1e-5f, "posterior normalization (y)");
+
+  // A tight distribution clips an outlier.
+  NormStats *clipped = norm_stats_new(arena, 1);
+  for (u32 i = 0; i < 200; i++) {
+    norm_stats_fold_obs(clipped, (const real[]){0.0f});
+  }
+  clipped->clip_obs = 2.0f;
+  norm_stats_obs(clipped, (const real[]){5.0f}, out);
+  ASSERT_NEAR(out[0], 2.0f, 1e-6f, "outlier clipped to clip_obs");
+
+  // Reward scaling starts at ~1 and follows the return spread.
+  NormStats *ret = norm_stats_new(arena, 1);
+  ASSERT_NEAR(norm_reward_factor(ret), 1.0f, 1e-5f,
+              "reward factor starts at 1");
+  norm_stats_fold_return(ret, 100.0f);
+  ASSERT_NEAR(norm_reward_factor(ret), 1.4142136f, 1e-4f,
+              "reward factor after one completion");
+
+  arena_dispose(arena);
+  printf("OK\n");
+}
+
+// The recipe knobs must change the optimizer's trajectory: with every update
+// clipped (vf_clip tiny) and with the trust-region stop firing immediately
+// (target_kl tiny), the trained weights cannot match the default run.
+static void test_ppo_recipe_knobs(void) {
+  printf("  vf_clip and target_kl change the update... ");
+  real checksum[3];
+
+  for (u32 run = 0; run < 3; run++) {
+    Arena *arena = arena_new(GiB(1));
+    Net *model = net_new(arena);
+    Env *env = env_cartpole_create(arena);
+    Rng rng;
+    rng_seed(&rng, 11, 1);
+
+    const u32 hidden[] = {32, 32};
+    actor_critic_build(arena, model, &rng, env->obs_dim, hidden, 2,
+                       env->act_dim, 64);
+
+    TrainCfg cfg = {
+        .epochs = 10,
+        .rollout_size = 128,
+        .max_steps = env->max_steps,
+        .learning_rate = 3e-4f,
+        .gamma = 0.99f,
+        .lambda = 0.95f,
+        .vf_coef = 0.5f,
+        .entropy_coef = 0.01f,
+        .seed = 11,
+        .optim = OPT_ADAM,
+        .max_grad_norm = 0.5f,
+        .batch_size = 64,
+        .num_envs = 8,
+        .ppo_epochs = 10,
+        .ppo_clip = 0.2f,
+    };
+    if (run == 1) {
+      cfg.vf_clip = 1e-9f;
+    }
+    if (run == 2) {
+      cfg.target_kl = 1e-9f;
+    }
+    train_ppo(env, model, &cfg, arena);
+    checksum[run] = param_checksum(model);
+    arena_dispose(arena);
+  }
+
+  ASSERT_TRUE(checksum[0] != checksum[1], "vf_clip changes the trajectory");
+  ASSERT_TRUE(checksum[0] != checksum[2],
+              "target_kl early stop changes the trajectory");
+  printf("OK\n");
+}
+
+static void test_ppo_normed_determinism(void) {
+  printf("  normed PPO same seed => identical weights... ");
+  real checksum[2];
+
+  for (u32 run = 0; run < 2; run++) {
+    Arena *arena = arena_new(GiB(1));
+    Net *model = net_new(arena);
+    Env *env = env_cartpole_create(arena);
+    Rng rng;
+    rng_seed(&rng, 55, 1);
+
+    const u32 hidden[] = {32, 32};
+    actor_critic_build(arena, model, &rng, env->obs_dim, hidden, 2,
+                       env->act_dim, 64);
+
+    NormStats *stats = norm_stats_new(arena, env->obs_dim);
+    TrainCfg cfg = {
+        .epochs = 5,
+        .rollout_size = 128,
+        .max_steps = env->max_steps,
+        .learning_rate = 3e-4f,
+        .lr_schedule = LR_COSINE,
+        .lr_end = 3e-5f,
+        .gamma = 0.99f,
+        .lambda = 0.95f,
+        .vf_coef = 0.5f,
+        .vf_clip = 0.2f,
+        .entropy_coef = 0.01f,
+        .anneal_entropy = true,
+        .entropy_coef_end = 0.001f,
+        .target_kl = 0.05f,
+        .seed = 55,
+        .optim = OPT_ADAM,
+        .max_grad_norm = 0.5f,
+        .batch_size = 64,
+        .num_envs = 8,
+        .ppo_epochs = 10,
+        .ppo_clip = 0.2f,
+        .norm_obs = true,
+        .norm_reward = true,
+        .norm = stats,
+    };
+    train_ppo(env, model, &cfg, arena);
+    checksum[run] = param_checksum(model);
+    arena_dispose(arena);
+  }
+
+  ASSERT_TRUE(checksum[0] == checksum[1], "weights identical across runs");
+  printf("OK\n");
+}
+
+static void test_ppo_normed_training(void) {
+  printf("  PPO with normalization + recipe knobs learns (50 updates)... ");
+  Arena *arena = arena_new(GiB(1));
+  Net *model = net_new(arena);
+  Env *env = env_cartpole_create(arena);
+  Rng rng;
+  rng_seed(&rng, 42, 1);
+
+  const u32 hidden[] = {64, 64};
+  actor_critic_build(arena, model, &rng, env->obs_dim, hidden, 2, env->act_dim,
+                     64);
+
+  NormStats *stats = norm_stats_new(arena, env->obs_dim);
+  TrainCfg cfg = {
+      .epochs = 50,
+      .rollout_size = 128,
+      .max_steps = env->max_steps,
+      .learning_rate = 3e-4f,
+      .lr_schedule = LR_LINEAR,
+      .lr_end = 3e-5f,
+      .gamma = 0.99f,
+      .lambda = 0.95f,
+      .vf_coef = 0.5f,
+      .vf_clip = 0.2f,
+      .entropy_coef = 0.01f,
+      .anneal_entropy = true,
+      .entropy_coef_end = 0.001f,
+      .target_kl = 0.05f,
+      .seed = 42,
+      .optim = OPT_ADAM,
+      .max_grad_norm = 0.5f,
+      .batch_size = 64,
+      .num_envs = 8,
+      .ppo_epochs = 10,
+      .ppo_clip = 0.2f,
+      .norm_obs = true,
+      .norm_reward = true,
+      .norm = stats,
+  };
+  train_ppo(env, model, &cfg, arena);
+
+  ASSERT_TRUE(stats->count > 0, "observations folded during training");
+  ASSERT_TRUE(stats->ret_count > 0, "returns folded during training");
+  ASSERT_TRUE(real_fabs(stats->mean[0]) < 1e4f, "statistics stayed finite");
+
+  Rng eval_rng;
+  rng_seed(&eval_rng, 999, 1);
+  EvalResult res = evaluate_normed(env, model, stats, &eval_rng, 30, true);
+  printf("(greedy return %.1f) ", res.avg_return);
+  ASSERT_TRUE(res.avg_return > 150.0f,
+              "normalized PPO beats random by a wide margin");
+
+  arena_dispose(arena);
+  printf("OK\n");
+}
+
 int main(void) {
   printf("\n=== RL / optim / builder tests ===\n\n");
 
@@ -945,6 +1200,11 @@ int main(void) {
   test_threaded_training_determinism();
   test_param_registry_growth();
   test_batch_size_rebuild();
+  test_train_schedules();
+  test_norm_stats();
+  test_ppo_recipe_knobs();
+  test_ppo_normed_determinism();
+  test_ppo_normed_training();
 
   printf("\n---\nTests: %u passed, %u failed\n\n", tests_passed, tests_failed);
   return tests_failed > 0 ? 1 : 0;

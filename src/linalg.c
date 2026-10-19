@@ -882,6 +882,44 @@ b32 mat_mse_add_grad(Mat *pred_grad, const Mat *pred, const Mat *target,
   return true;
 }
 
+b32 mat_mse_clip_add_grad(Mat *pred_grad, const Mat *pred, const Mat *old_v,
+                          const Mat *target, real clip, const Mat *grad) {
+  if (pred->rows != target->rows || pred->cols != target->cols) {
+    return false;
+  }
+  if (old_v->rows != pred->rows || old_v->cols != pred->cols) {
+    return false;
+  }
+  if (pred_grad->rows != pred->rows || pred_grad->cols != pred->cols) {
+    return false;
+  }
+  if (clip <= (real)0) {
+    return false;
+  }
+  const u64 n = mat_count(pred);
+  const real scale = (2.0f / (real)n) * grad->data[0];
+  for (u64 i = 0; i < n; i++) {
+    const real v = pred->data[i];
+    const real old = old_v->data[i];
+    const real t = target->data[i];
+    const real dv = v - old;
+    if (dv > clip || dv < -clip) {
+      // The clipped branch is (old +- clip - t)^2, a constant in v: it only
+      // contributes a gradient while the unclipped branch is still the worse
+      // (larger) of the two. Choosing the max branch is what makes this the
+      // clipped value loss rather than just "no gradient outside the region".
+      const real clipped = old + (dv > clip ? clip : -clip);
+      const real e_clip = clipped - t;
+      const real e_raw = v - t;
+      if (e_raw * e_raw < e_clip * e_clip) {
+        continue;
+      }
+    }
+    pred_grad->data[i] += scale * (v - t);
+  }
+  return true;
+}
+
 b32 mat_reinforce_loss(Mat *out, const Mat *probs, const Mat *advantages) {
   if (probs->rows != advantages->rows || probs->cols != advantages->cols) {
     return false;

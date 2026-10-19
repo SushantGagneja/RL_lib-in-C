@@ -238,6 +238,8 @@ b32 mat_relu_add_grad(Mat *out, const Mat *in, const Mat *grad);
 b32 mat_tanh_add_grad(Mat *out, const Mat *tanh_out, const Mat *grad);
 b32 mat_softmax_add_grad(Mat *out, const Mat *softmax_out, const Mat *grad);
 b32 mat_mse_add_grad(Mat *pred_grad, const Mat *pred, const Mat *target, const Mat *grad);
+b32 mat_mse_clip_add_grad(Mat *pred_grad, const Mat *pred, const Mat *old_v,
+                          const Mat *target, real clip, const Mat *grad);
 b32 mat_reinforce_add_grad(Mat *prob_grads, const Mat *probs, const Mat *rt, const Mat *grad);
 b32 mat_fused_policy_add_grad(Mat *logits_grad, const Mat *logits, const u32 *actions,
                               const real *advantages, u32 batch_size, const Mat *grad);
@@ -250,6 +252,11 @@ b32 mat_ppo_policy_add_grad(Mat *logits_grad, const Mat *logits, const u32 *acti
 `grad` is the upstream gradient (`dL/d(output)`) and is usually a `1 x 1` Mat
 holding the loss weight. `mat_tanh_add_grad` takes the *forward output* rather
 than the input, since `d tanh = 1 - tanh^2`.
+
+`mat_mse_clip_add_grad` is the clipped critic loss: the prediction is compared
+against the rollout's own value estimate, and outside the clip range only the
+branch (clipped or unclipped) whose squared error is the larger one contributes
+gradient — so a critic that has moved too far can still be pulled back.
 
 The loss-specific entries are exact rather than numerically differentiated: their
 gradients are cross-checked against finite differences in `tests/test_gradcheck.c`,
@@ -762,6 +769,17 @@ comparisons as skipped rather than failing in that configuration.
 
 ```c
 typedef enum { OPT_SGD = 0, OPT_ADAM = 1 } OptimKind;
+typedef enum { LR_CONSTANT = 0, LR_LINEAR = 1, LR_COSINE = 2 } LrSchedule;
+
+typedef struct {
+  u32 obs_dim;
+  u64 count;      // observations folded in
+  real *mean, *m2; // Welford state, [obs_dim]
+  real eps, clip_obs;
+  u64 ret_count;  // discounted returns folded in
+  real ret_mean, ret_m2;
+  real gamma;     // discount of the reward-scale return estimate
+} NormStats;
 
 typedef struct {
   u32 epochs, rollout_size, max_steps;
@@ -776,6 +794,18 @@ typedef struct {
   u32 ppo_epochs;  // inner optimisation passes per rollout (0 => 10)
   real ppo_clip;   // PPO clip epsilon (<= 0 => 0.2)
   u32 num_threads; // worker threads for the vecenv (0 or 1 => serial)
+
+  LrSchedule lr_schedule; // LR decay over the run (0 => constant)
+  real lr_end;            // final LR of the decaying schedules
+  real vf_clip;           // critic clip vs rollout values (<= 0 => off)
+  real target_kl;         // early stop past 1.5x this mean KL (<= 0 => off)
+  b32 anneal_entropy;     // linearly decay the entropy bonus over the run
+  real entropy_coef_end;  // final entropy bonus when annealing
+  b32 norm_obs;           // running observation normalization (PPO only)
+  b32 norm_reward;        // running reward scaling (PPO only)
+  real norm_clip;         // observation clip (<= 0 => 10)
+  real norm_reward_clip;  // scaled-reward clip (<= 0 => 10)
+  NormStats *norm;        // required when norm_obs/norm_reward is set
 } TrainCfg;
 
 typedef struct { real avg_return, avg_steps; } EvalResult;
@@ -790,6 +820,32 @@ for REINFORCE. `lambda`, `vf_coef` and `entropy_coef` are ignored by REINFORCE;
 vectorised trainers). `num_threads` is forwarded to `vecenv_set_threads` and
 cannot change the trained weights, only the wall time; see the note on when it
 pays off under [`vecenv.h`](#vecenvh).
+
+`lr_schedule`/`lr_end` and `anneal_entropy`/`entropy_coef_end` are supported by
+every trainer: the learning rate interpolates from `learning_rate` at update 0
+to `lr_end` at the final update (linearly, or on a cosine which keeps the rate
+high longer), and the entropy bonus does the same linearly when
+`anneal_entropy` is set. REINFORCE uses neither an entropy term nor a value
+loss, so only its learning rate is scheduled. The public helpers
+`train_lr_at(config, lr_start, iteration)` and
+`train_entropy_coef_at(config, iteration)` return the same values the trainers
+use, so logging and external schedules cannot drift from them.
+
+`vf_clip` and `target_kl` are PPO-only (both `train_ppo` variants). The critic
+loss takes the worse of the unclipped and clipped-against-the-rollout-value
+branches, and an update stops early once the mean approximate KL
+(`E[ratio - 1 - log ratio]`, the k3 estimator) over the minibatches seen so far
+exceeds `1.5 * target_kl`.
+
+`norm_obs`/`norm_reward` are PPO-only running transforms over the trainer's own
+rollout stream: observations are normalized by Welford mean/variance (clipped),
+and rewards are scaled by the inverse standard deviation of the running
+discounted return (clipped), both starting from a standard-normal prior so the
+first steps are mild. When either flag is set, `norm` must point at a
+`norm_stats_new(arena, obs_dim)` instance. The statistics survive the call, so
+evaluation can feed the policy the same observation transform with
+`evaluate_seeded_normed` (the reported return stays the raw environment
+return — reward scaling is a training transform).
 
 ### Rollouts
 
@@ -859,6 +915,17 @@ EvalResult evaluate_seeded(Env *env, Net *model, const u64 *seeds,
 EvalResult evaluate_continuous(Env *env, Net *model, Rng *rng, u32 episodes, b32 greedy);
 EvalResult evaluate_continuous_seeded(Env *env, Net *model, const u64 *seeds,
                                       u32 num_episodes, b32 greedy);
+
+EvalResult evaluate_normed(Env *env, Net *model, const NormStats *stats,
+                           Rng *rng, u32 episodes, b32 greedy);
+EvalResult evaluate_seeded_normed(Env *env, Net *model, const NormStats *stats,
+                                  const u64 *seeds, u32 num_episodes, b32 greedy);
+EvalResult evaluate_continuous_normed(Env *env, Net *model, const NormStats *stats,
+                                      Rng *rng, u32 episodes, b32 deterministic);
+EvalResult evaluate_continuous_seeded_normed(Env *env, Net *model,
+                                             const NormStats *stats,
+                                             const u64 *seeds, u32 num_episodes,
+                                             b32 deterministic);
 ```
 
 `greedy = true` selects `argmax` actions; otherwise they are sampled.
@@ -869,6 +936,38 @@ The `_continuous` variants step the environment through the policy's squash: a
 greedy evaluation applies the same mean clamp the sampler does and then
 `center + half * tanh(mean)`, so it really is the mode of the trained density,
 and a stochastic evaluation draws a fresh `u` per step with the env's own RNG.
+
+The `_normed` variants are for models trained with `TrainCfg.norm_obs`: each
+observation is mapped through the (read-only) `stats` first. The statistics are
+never folded during evaluation, and the reported return is the raw environment
+return — reward scaling is a training transform and must not leak into the
+metric.
+
+### Normalization statistics
+
+```c
+NormStats *norm_stats_new(Arena *arena, u32 obs_dim);
+void norm_stats_fold_obs(NormStats *stats, const real *obs);
+void norm_stats_fold_return(NormStats *stats, real discounted_return);
+void norm_stats_obs(const NormStats *stats, const real *obs, real *out);
+real norm_reward_factor(const NormStats *stats);
+real train_lr_at(const TrainCfg *config, real lr_start, u32 iteration);
+real train_entropy_coef_at(const TrainCfg *config, u32 iteration);
+```
+
+One `NormStats` serves a whole training run (every sub-environment of a
+`VecEnv`), which is why the PPO trainers fold it from their serial collection
+loop rather than from a per-env wrapper: worker threads never touch it, so
+threaded stepping stays bit-identical to serial. The folds are Welford updates;
+both transforms are posterior edits of a standard-normal prior, so the first
+observations and returns pass through nearly unchanged instead of being divided
+by a near-zero variance. `norm_stats_obs` writes a clipped, normalized copy
+(`out` may not alias `obs`); `norm_reward_factor` returns the current
+`1 / sqrt(var + eps)` reward scale. `train_lr_at` and
+`train_entropy_coef_at` are the schedule helpers described under
+[`TrainCfg`](#rlh) — public so logs and user code cannot drift from the
+trainers. A run normally trains with `TrainCfg.norm = stats` and evaluates with
+`evaluate_*_normed`, so both sides apply the same transform.
 
 ---
 

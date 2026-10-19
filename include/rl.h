@@ -11,6 +11,33 @@ typedef enum {
   OPT_ADAM = 1,
 } OptimKind;
 
+// Learning-rate decay for a training run. LR_CONSTANT keeps `learning_rate`
+// for every update; the other two interpolate from `learning_rate` at update 0
+// to `lr_end` at the final update.
+typedef enum {
+  LR_CONSTANT = 0,
+  LR_LINEAR = 1,
+  LR_COSINE = 2,
+} LrSchedule;
+
+// Running statistics for observation normalization and reward scaling,
+// Welford-updated while training (one instance serves every environment of a
+// run) and read-only afterwards. Both transformations start from a
+// standard-normal prior, so the first observations and returns pass through
+// nearly unchanged instead of being divided by a near-zero variance.
+typedef struct {
+  u32 obs_dim;
+  u64 count;      // observations folded in
+  real *mean;     // [obs_dim]
+  real *m2;       // [obs_dim] sum of squared deltas
+  real eps;       // variance floor (1e-8)
+  real clip_obs;  // observation clip
+  u64 ret_count;  // discounted returns folded in
+  real ret_mean;
+  real ret_m2;
+  real gamma;     // discount of the reward-scale return estimate (0.99)
+} NormStats;
+
 // Configuration for training
 typedef struct {
   u32 epochs;
@@ -35,7 +62,58 @@ typedef struct {
   // never changes the trajectories, only how fast they are produced, and it only
   // pays off when one env step is more expensive than a barrier round-trip.
   u32 num_threads;
+
+  // Learning-rate decay. See LrSchedule; ignored when lr_schedule is
+  // LR_CONSTANT. Every trainer refreshes Adam's stored rate each update.
+  LrSchedule lr_schedule;
+  real lr_end;
+
+  // PPO value-loss clipping, relative to the rollout's value estimate (the
+  // worse of the clipped and unclipped branches, as in the clipped surrogate).
+  // <= 0 disables it.
+  real vf_clip;
+
+  // PPO early stop: once the mean approximate KL of an update exceeds
+  // 1.5 * target_kl, the remaining epochs of that update are skipped. <= 0
+  // disables it.
+  real target_kl;
+
+  // Optional linear decay of the entropy bonus across the run, from
+  // `entropy_coef` at update 0 to `entropy_coef_end` at the final update.
+  b32 anneal_entropy;
+  real entropy_coef_end;
+
+  // Observation normalization and reward scaling over the trainer's rollout
+  // stream. When either flag is set, `norm` must point at a norm_stats_new()
+  // instance: it is folded during training and can then be handed to the
+  // *_normed evaluation functions so evaluation sees the same transform.
+  b32 norm_obs;
+  b32 norm_reward;
+  real norm_clip;         // observation clip (<= 0 => 10)
+  real norm_reward_clip;  // scaled-reward clip (<= 0 => 10)
+  NormStats *norm;
 } TrainCfg;
+
+// Allocates arena-backed observation/reward statistics.
+NormStats *norm_stats_new(Arena *arena, u32 obs_dim);
+
+// Welford folds: the trainer calls these on every observation (and terminal
+// observation) it feeds the model and on every discounted return it tracks.
+void norm_stats_fold_obs(NormStats *stats, const real *obs);
+void norm_stats_fold_return(NormStats *stats, real discounted_return);
+
+// Maps one observation through the current statistics, clipped to
+// stats->clip_obs. `out` must not alias `obs`.
+void norm_stats_obs(const NormStats *stats, const real *obs, real *out);
+
+// Current reward scale: 1 / sqrt(var + eps) of the folded discounted returns.
+real norm_reward_factor(const NormStats *stats);
+
+// The learning rate / entropy coefficient a trainer uses at `iteration` under
+// the configured schedules. `lr_start` is the trainer's resolved starting rate
+// (its default differs per trainer).
+real train_lr_at(const TrainCfg *config, real lr_start, u32 iteration);
+real train_entropy_coef_at(const TrainCfg *config, u32 iteration);
 
 // Evaluation metrics
 typedef struct {
@@ -111,5 +189,23 @@ EvalResult evaluate_continuous(Env *env, Net *model, Rng *rng, u32 episodes,
                                b32 deterministic);
 EvalResult evaluate_continuous_seeded(Env *env, Net *model, const u64 *seeds,
                                       u32 num_episodes, b32 deterministic);
+
+// Normalized-observation counterparts, for models trained with
+// TrainCfg.norm_obs. The observation is mapped through `stats` first; the
+// reported return is the raw environment return (reward scaling is a training
+// transform only).
+EvalResult evaluate_normed(Env *env, Net *model, const NormStats *stats,
+                           Rng *rng, u32 episodes, b32 greedy);
+EvalResult evaluate_seeded_normed(Env *env, Net *model, const NormStats *stats,
+                                  const u64 *seeds, u32 num_episodes,
+                                  b32 greedy);
+EvalResult evaluate_continuous_normed(Env *env, Net *model,
+                                      const NormStats *stats, Rng *rng,
+                                      u32 episodes, b32 deterministic);
+EvalResult evaluate_continuous_seeded_normed(Env *env, Net *model,
+                                             const NormStats *stats,
+                                             const u64 *seeds,
+                                             u32 num_episodes,
+                                             b32 deterministic);
 
 #endif // RL_H

@@ -56,6 +56,14 @@ b32 mat_softmax_add_grad(Mat *out, const Mat *softmax_out,
                          const Mat *grad); // Per-column mat_softmax backward
 b32 mat_mse_add_grad(Mat *pred_grad, const Mat *pred, const Mat *target,
                      const Mat *grad);
+
+// Value-loss gradient with the PPO-style clipped target: the unclipped branch
+// (v - t) is used where |v - old_v| <= clip or where the unclipped error is
+// already the larger of the two; the clipped branch contributes a constant, so
+// outside the trust region its gradient is zero. `old_v` is the rollout's
+// value estimate for the same row. `grad` carries the loss seed.
+b32 mat_mse_clip_add_grad(Mat *pred_grad, const Mat *pred, const Mat *old_v,
+                          const Mat *target, real clip, const Mat *grad);
 b32 mat_reinforce_add_grad(Mat *prob_grads, const Mat *probs,
                            const Mat *rt, const Mat *grad);
 b32 mat_fused_policy_add_grad(Mat *logits_grad, const Mat *logits,

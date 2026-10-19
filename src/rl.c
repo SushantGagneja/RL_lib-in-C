@@ -35,6 +35,178 @@ Rollout *rollout_new(Arena *arena, u32 num_trajectories,
 
 // Derives a fresh 64-bit seed from a PRNG stream so each episode's env.reset()
 // gets an independent but reproducible seed.
+// ── Training schedules and normalization statistics ─────────────────────────
+
+// Linear ramp from 0 at update 0 to 1 at the final update, clamped at both
+// ends. A single-update run stays at the start value.
+static real schedule_alpha(u32 epochs, u32 iteration) {
+  if (epochs <= 1u) {
+    return (real)0;
+  }
+  const u32 last = epochs - 1u;
+  const u32 it = iteration < last ? iteration : last;
+  return (real)it / (real)last;
+}
+
+real train_lr_at(const TrainCfg *config, real lr_start, u32 iteration) {
+  RL_LIB_ASSERT(config != NULL, "train_lr_at: NULL config");
+  const real a = schedule_alpha(config->epochs, iteration);
+  switch (config->lr_schedule) {
+    case LR_LINEAR:
+      return lr_start + (config->lr_end - lr_start) * a;
+    case LR_COSINE: {
+      const real pi = (real)3.14159265358979323846;
+      return config->lr_end + (real)0.5 * (lr_start - config->lr_end) *
+                                  ((real)1 + real_cos(pi * a));
+    }
+    case LR_CONSTANT:
+    default:
+      return lr_start;
+  }
+}
+
+real train_entropy_coef_at(const TrainCfg *config, u32 iteration) {
+  RL_LIB_ASSERT(config != NULL, "train_entropy_coef_at: NULL config");
+  if (!config->anneal_entropy) {
+    return config->entropy_coef;
+  }
+  const real a = schedule_alpha(config->epochs, iteration);
+  return config->entropy_coef +
+         (config->entropy_coef_end - config->entropy_coef) * a;
+}
+
+NormStats *norm_stats_new(Arena *arena, u32 obs_dim) {
+  RL_LIB_ASSERT(arena != NULL && obs_dim > 0u, "norm_stats_new: bad argument");
+  NormStats *stats = ARENA_OBJ(arena, NormStats);
+  stats->obs_dim = obs_dim;
+  stats->count = 0;
+  stats->mean = ARENA_ARR(arena, real, obs_dim);
+  stats->m2 = ARENA_ARR(arena, real, obs_dim);
+  stats->eps = 1e-8f;
+  stats->clip_obs = 10.0f;
+  stats->ret_count = 0;
+  stats->ret_mean = 0.0f;
+  stats->ret_m2 = 0.0f;
+  stats->gamma = 0.99f;
+  return stats;
+}
+
+void norm_stats_fold_obs(NormStats *stats, const real *obs) {
+  RL_LIB_ASSERT(stats != NULL && obs != NULL,
+                "norm_stats_fold_obs: NULL argument");
+  stats->count++;
+  const real n = (real)stats->count;
+  for (u32 d = 0; d < stats->obs_dim; d++) {
+    const real delta = obs[d] - stats->mean[d];
+    stats->mean[d] += delta / n;
+    stats->m2[d] += delta * (obs[d] - stats->mean[d]);
+  }
+}
+
+void norm_stats_fold_return(NormStats *stats, real ret) {
+  RL_LIB_ASSERT(stats != NULL, "norm_stats_fold_return: NULL stats");
+  stats->ret_count++;
+  const real n = (real)stats->ret_count;
+  const real delta = ret - stats->ret_mean;
+  stats->ret_mean += delta / n;
+  stats->ret_m2 += delta * (ret - stats->ret_mean);
+}
+
+// Welford's posterior under a standard-normal prior weighted as one
+// observation: var = (m2 + 1) / (count + 1). The prior is what keeps the first
+// steps away from dividing by a near-zero variance.
+void norm_stats_obs(const NormStats *stats, const real *obs, real *out) {
+  RL_LIB_ASSERT(stats != NULL && obs != NULL && out != NULL,
+                "norm_stats_obs: NULL argument");
+  RL_LIB_ASSERT(out != obs, "norm_stats_obs: out must not alias obs");
+  const real n = (real)stats->count;
+  const real w = (real)1 / (n + (real)1);
+  for (u32 d = 0; d < stats->obs_dim; d++) {
+    const real mean = stats->mean[d] * (n * w);
+    const real var = (stats->m2[d] + (real)1) * w + stats->eps;
+    real x = (obs[d] - mean) / real_sqrt(var);
+    if (x > stats->clip_obs) {
+      x = stats->clip_obs;
+    }
+    if (x < -stats->clip_obs) {
+      x = -stats->clip_obs;
+    }
+    out[d] = x;
+  }
+}
+
+real norm_reward_factor(const NormStats *stats) {
+  RL_LIB_ASSERT(stats != NULL, "norm_reward_factor: NULL stats");
+  const real n = (real)stats->ret_count;
+  const real var = (stats->ret_m2 + (real)1) / (n + (real)1) + stats->eps;
+  return (real)1 / real_sqrt(var);
+}
+
+// Folds one raw observation into the statistics and hands back the normalized
+// copy (written into `scratch`).
+static const real *norm_fold_obs(NormStats *stats, const real *obs,
+                                 real *scratch) {
+  norm_stats_fold_obs(stats, obs);
+  norm_stats_obs(stats, obs, scratch);
+  return scratch;
+}
+
+// One reward scaled through the running return statistics. The running
+// discounted return is folded before scaling (Stable-Baselines3's VecNormalize
+// scheme); the caller resets *ret_disc at episode boundaries.
+static real norm_scale_reward(NormStats *stats, real *ret_disc, real raw,
+                              real clip) {
+  *ret_disc = stats->gamma * (*ret_disc) + raw;
+  norm_stats_fold_return(stats, *ret_disc);
+  real r = raw * norm_reward_factor(stats);
+  if (r > clip) {
+    r = clip;
+  }
+  if (r < -clip) {
+    r = -clip;
+  }
+  return r;
+}
+
+// Mean policy KL between the rollout policy and the current one, estimated as
+// E[ratio - 1 - log(ratio)] over the minibatch (Schulman's k3 estimator), with
+// the log-probabilities recovered from the pre-softmax logits.
+static real ppo_approx_kl(const Mat *logits, const u32 *actions,
+                          const real *old_logp, u32 batch_size) {
+  const u32 act_dim = logits->rows;
+  real kl_sum = 0.0f;
+  for (u32 b = 0; b < batch_size; b++) {
+    real max_z = logits->data[b];
+    for (u32 a = 1; a < act_dim; a++) {
+      const real z = logits->data[(u64)a * batch_size + b];
+      if (z > max_z) {
+        max_z = z;
+      }
+    }
+    real exp_sum = 0.0f;
+    for (u32 a = 0; a < act_dim; a++) {
+      exp_sum += real_exp(logits->data[(u64)a * batch_size + b] - max_z);
+    }
+    const real z_chosen = logits->data[(u64)actions[b] * batch_size + b];
+    const real log_ratio =
+        z_chosen - max_z - real_log(exp_sum) - old_logp[b];
+    kl_sum += real_exp(log_ratio) - (real)1 - log_ratio;
+  }
+  return kl_sum / (real)batch_size;
+}
+
+// Same k3 estimator for the continuous policy: `logp` holds the new
+// log-probabilities of the stored pre-squash actions u.
+static real ppo_approx_kl_continuous(const Mat *logp, const real *old_logp,
+                                     u32 batch_size) {
+  real kl_sum = 0.0f;
+  for (u32 b = 0; b < batch_size; b++) {
+    const real log_ratio = logp->data[b] - old_logp[b];
+    kl_sum += real_exp(log_ratio) - (real)1 - log_ratio;
+  }
+  return kl_sum / (real)batch_size;
+}
+
 static u64 next_seed(Rng *rng) {
   u64 hi = rng_u32(rng);
   u64 lo = rng_u32(rng);
@@ -142,6 +314,8 @@ void train_reinforce(Env *env, Net *model, const TrainCfg *config,
              "train_reinforce: forward_graph is empty (forgot schedule_from?)");
   RL_LIB_ASSERT(train_arena != NULL, "train_reinforce: NULL arena");
   apply_config_batch_size(train_arena, model, config);
+  RL_LIB_ASSERT(!config->norm_obs && !config->norm_reward,
+                "train_reinforce: normalization is PPO-only (use train_ppo)");
 
   u32 rollout_size = config->rollout_size > 0 ? config->rollout_size : 32;
   u32 max_steps = config->max_steps > 0 ? config->max_steps : env->max_steps;
@@ -197,6 +371,7 @@ void train_reinforce(Env *env, Net *model, const TrainCfg *config,
   for (u32 epoch = 0; epoch < config->epochs; epoch++) {
     real total_reward = 0.0f;
     u32 sample_count = 0;
+    const real lr_t = train_lr_at(config, lr, epoch);
 
     // 1. Rollout phase
     for (u32 i = 0; i < rollout_size; i++) {
@@ -298,9 +473,10 @@ void train_reinforce(Env *env, Net *model, const TrainCfg *config,
         clip_grad_norm(model, config->max_grad_norm);
       }
       if (config->optim == OPT_ADAM) {
+        adam->lr = lr_t;
         adam_step(adam, model);
       } else {
-        sgd_step(model, lr, 1.0f);
+        sgd_step(model, lr_t, 1.0f);
       }
       zero_grad(model);
     } else {
@@ -321,9 +497,10 @@ void train_reinforce(Env *env, Net *model, const TrainCfg *config,
           clip_grad_norm(model, config->max_grad_norm);
         }
         if (config->optim == OPT_ADAM) {
+          adam->lr = lr_t;
           adam_step(adam, model);
         } else {
-          sgd_step(model, lr, 1.0f / (real)sample_count);
+          sgd_step(model, lr_t, 1.0f / (real)sample_count);
         }
       }
     }
@@ -349,6 +526,8 @@ void train_a2c(Env *env, Net *model, const TrainCfg *config,
              "train_a2c: missing graph (use actor_critic_build)");
   RL_LIB_ASSERT(model->value != NULL && model->batch_value != NULL,
              "train_a2c: model has no value head");
+  RL_LIB_ASSERT(!config->norm_obs && !config->norm_reward,
+                "train_a2c: normalization is PPO-only (use train_ppo)");
 
   u32 rollout_size = config->rollout_size > 0 ? config->rollout_size : 32;
   u32 max_steps = config->max_steps > 0 ? config->max_steps : env->max_steps;
@@ -401,6 +580,8 @@ void train_a2c(Env *env, Net *model, const TrainCfg *config,
   for (u32 epoch = 0; epoch < config->epochs; epoch++) {
     real total_reward = 0.0f;
     u32 sample_count = 0;
+    const real lr_t = train_lr_at(config, lr, epoch);
+    const real entropy_t = train_entropy_coef_at(config, epoch);
 
     // 1. Rollout collection with state values and GAE
     for (u32 i = 0; i < rollout_size; i++) {
@@ -489,8 +670,8 @@ void train_a2c(Env *env, Net *model, const TrainCfg *config,
     shuffle_samples(sample_obs, sample_actions, sample_values, sample_advantages,
                     order, sample_count, &shuf_rng);
 
-    if (entropy_coef != 0.0f) {
-      seed_ent->data[0] = -entropy_coef / (real)num_batches;
+    if (entropy_t != 0.0f) {
+      seed_ent->data[0] = -entropy_t / (real)num_batches;
     } else {
       seed_ent->data[0] = 0.0f;
     }
@@ -517,7 +698,7 @@ void train_a2c(Env *env, Net *model, const TrainCfg *config,
       RL_LIB_CHECK(mat_fused_policy_add_grad(model->batch_logits->grad,
                                           model->batch_logits->val, batch_acts,
                                           batch_advs, batch_size, seed_pi));
-      if (entropy_coef != 0.0f) {
+      if (entropy_t != 0.0f) {
         RL_LIB_CHECK(mat_entropy_add_grad(model->batch_logits->grad,
                                        model->batch_logits->val, batch_size,
                                        seed_ent));
@@ -533,9 +714,10 @@ void train_a2c(Env *env, Net *model, const TrainCfg *config,
       clip_grad_norm(model, config->max_grad_norm);
     }
     if (config->optim == OPT_ADAM) {
+      adam->lr = lr_t;
       adam_step(adam, model);
     } else {
-      sgd_step(model, lr, 1.0f);
+      sgd_step(model, lr_t, 1.0f);
     }
     zero_grad(model);
 
@@ -593,10 +775,11 @@ void train_ppo(Env *env, Net *model, const TrainCfg *config,
   const real gamma = config->gamma > 0.0f ? config->gamma : 0.99f;
   const real lambda = config->lambda > 0.0f ? config->lambda : 0.95f;
   const real vf_coef = config->vf_coef > 0.0f ? config->vf_coef : 0.5f;
-  const real entropy_coef = config->entropy_coef;
   const real lr = config->learning_rate > 0.0f ? config->learning_rate : 3e-4f;
   const real clip_eps = config->ppo_clip > 0.0f ? config->ppo_clip : 0.2f;
   const u32 ppo_epochs = config->ppo_epochs > 0 ? config->ppo_epochs : 10;
+  const real vf_clip = config->vf_clip > 0.0f ? config->vf_clip : 0.0f;
+  const real target_kl = config->target_kl > 0.0f ? config->target_kl : 0.0f;
 
   const u32 obs_dim = env->obs_dim;
   const u32 batch_size = model->batch_input->val->cols;
@@ -606,6 +789,19 @@ void train_ppo(Env *env, Net *model, const TrainCfg *config,
   const u32 total = num_envs * rollout_len;
   RL_LIB_ASSERT(total >= batch_size,
                 "train_ppo: rollout smaller than one minibatch");
+
+  NormStats *stats = config->norm;
+  if (config->norm_obs || config->norm_reward) {
+    RL_LIB_ASSERT(stats != NULL,
+                  "train_ppo: norm_obs/norm_reward need TrainCfg.norm");
+    RL_LIB_ASSERT(stats->obs_dim == obs_dim,
+                  "train_ppo: TrainCfg.norm has the wrong obs_dim");
+  }
+  if (config->norm_obs && config->norm_clip > 0.0f) {
+    stats->clip_obs = config->norm_clip;
+  }
+  const real norm_clip =
+      config->norm_reward_clip > 0.0f ? config->norm_reward_clip : 10.0f;
 
   const u64 seed = config->seed != 0 ? config->seed : 42;
   VecEnv *vec = vecenv_new(train_arena, env, num_envs);
@@ -640,12 +836,18 @@ void train_ppo(Env *env, Net *model, const TrainCfg *config,
   real *tail_val = ARENA_ARR(train_arena, real, num_envs);
   real *ep_ret = ARENA_ARR(train_arena, real, num_envs);
 
+  real *obs_norm =
+      config->norm_obs ? ARENA_ARR(train_arena, real, obs_dim) : NULL;
+  real *ret_disc =
+      config->norm_reward ? ARENA_ARR(train_arena, real, num_envs) : NULL;
+
   u32 *step_actions = ARENA_ARR(train_arena, u32, num_envs);
   u32 *order = ARENA_ARR(train_arena, u32, total);
   u32 *batch_acts = ARENA_ARR(train_arena, u32, batch_size);
   real *batch_advs = ARENA_ARR(train_arena, real, batch_size);
   real *batch_oldlp = ARENA_ARR(train_arena, real, batch_size);
   Mat *target_val_mat = mat_new(train_arena, 1, batch_size);
+  Mat *old_val_mat = mat_new(train_arena, 1, batch_size);
   Mat *seed_pi = mat_new(train_arena, 1, 1);
   Mat *seed_vf = mat_new(train_arena, 1, 1);
   Mat *seed_ent = mat_new(train_arena, 1, 1);
@@ -657,11 +859,16 @@ void train_ppo(Env *env, Net *model, const TrainCfg *config,
   for (u32 update = 0; update < config->epochs; update++) {
     real episode_return_sum = 0.0f;
     u64 episode_count = 0;
+    const real lr_t = train_lr_at(config, lr, update);
+    const real entropy_t = train_entropy_coef_at(config, update);
 
     // 1. Collect `rollout_len` steps from every sub-environment.
     for (u32 t = 0; t < rollout_len; t++) {
       for (u32 i = 0; i < num_envs; i++) {
         const real *obs = vec->obs + (u64)i * obs_dim;
+        if (config->norm_obs) {
+          obs = norm_fold_obs(stats, obs, obs_norm);
+        }
         memcpy(model->input->val->data, obs, sizeof(real) * obs_dim);
         schedule_run(&model->fwd);
 
@@ -680,30 +887,47 @@ void train_ppo(Env *env, Net *model, const TrainCfg *config,
 
       for (u32 i = 0; i < num_envs; i++) {
         const u64 idx = (u64)i * rollout_len + t;
-        rew_buf[idx] = vec->rewards[i];
+        const real raw_rew = vec->rewards[i];
+        rew_buf[idx] = config->norm_reward
+                           ? norm_scale_reward(stats, &ret_disc[i], raw_rew,
+                                               norm_clip)
+                           : raw_rew;
         end_flag[idx] = vec->dones[i];
         term_flag[idx] = vec->terminals[i];
         boot_val[idx] = 0.0f;
 
-        ep_ret[i] += vec->rewards[i];
+        ep_ret[i] += raw_rew;
         if (vec->dones[i]) {
           episode_return_sum += ep_ret[i];
           episode_count++;
           ep_ret[i] = 0.0f;
+          if (config->norm_reward) {
+            ret_disc[i] = 0.0f;
+          }
 
           // Time-limit truncation: bootstrap from the value of the final state.
           if (vec->truncateds[i]) {
-            boot_val[idx] =
-                critic_value(model, vec->final_obs + (u64)i * obs_dim, obs_dim);
+            const real *fin = vec->final_obs + (u64)i * obs_dim;
+            if (config->norm_obs) {
+              fin = norm_fold_obs(stats, fin, obs_norm);
+            }
+            boot_val[idx] = critic_value(model, fin, obs_dim);
           }
         }
       }
     }
 
     // Value of each env's current (post-rollout) state, for the last-step
-    // bootstrap of episodes that did not end inside the rollout.
+    // bootstrap of episodes that did not end inside the rollout. This state is
+    // consumed again as step 0 of the next rollout, so it is normalized but not
+    // folded here (it is folded at that first consumption).
     for (u32 i = 0; i < num_envs; i++) {
-      tail_val[i] = critic_value(model, vec->obs + (u64)i * obs_dim, obs_dim);
+      const real *tail = vec->obs + (u64)i * obs_dim;
+      if (config->norm_obs) {
+        norm_stats_obs(stats, tail, obs_norm);
+        tail = obs_norm;
+      }
+      tail_val[i] = critic_value(model, tail, obs_dim);
     }
 
     // 2. GAE-Lambda per sub-environment (buffers are env-major).
@@ -753,8 +977,12 @@ void train_ppo(Env *env, Net *model, const TrainCfg *config,
     }
 
     // 4. PPO update: `ppo_epochs` passes of shuffled minibatches, one optimiser
-    // step per minibatch.
+    // step per minibatch. With target_kl set, the update stops as soon as the
+    // mean approximate KL over the minibatches seen so far leaves the trust
+    // region.
     const u32 num_batches = total / batch_size;
+    real kl_sum = 0.0f;
+    u32 kl_count = 0;
     zero_grad(model);
 
     for (u32 pe = 0; pe < ppo_epochs; pe++) {
@@ -779,10 +1007,17 @@ void train_ppo(Env *env, Net *model, const TrainCfg *config,
           batch_advs[b] = adv_buf[idx];
           batch_oldlp[b] = logp_old[idx];
           target_val_mat->data[b] = ret_buf[idx];
+          old_val_mat->data[b] = val_buf[idx];
         }
 
         schedule_run(&model->train);
         schedule_zero_act(&model->train);
+
+        if (target_kl > 0.0f) {
+          kl_sum += ppo_approx_kl(model->batch_logits->val, batch_acts,
+                                  batch_oldlp, batch_size);
+          kl_count++;
+        }
 
         // The clipped surrogate is already a mean over the minibatch, so its
         // gradient seed is 1; the value and entropy terms are weighted.
@@ -791,17 +1026,23 @@ void train_ppo(Env *env, Net *model, const TrainCfg *config,
             model->batch_logits->grad, model->batch_logits->val, batch_acts,
             batch_advs, batch_oldlp, clip_eps, batch_size, seed_pi));
 
-        if (entropy_coef != 0.0f) {
-          seed_ent->data[0] = -entropy_coef;
+        if (entropy_t != 0.0f) {
+          seed_ent->data[0] = -entropy_t;
           RL_LIB_CHECK(mat_entropy_add_grad(model->batch_logits->grad,
                                             model->batch_logits->val,
                                             batch_size, seed_ent));
         }
 
         seed_vf->data[0] = vf_coef;
-        RL_LIB_CHECK(mat_mse_add_grad(model->batch_value->grad,
-                                      model->batch_value->val, target_val_mat,
-                                      seed_vf));
+        if (vf_clip > 0.0f) {
+          RL_LIB_CHECK(mat_mse_clip_add_grad(
+              model->batch_value->grad, model->batch_value->val, old_val_mat,
+              target_val_mat, vf_clip, seed_vf));
+        } else {
+          RL_LIB_CHECK(mat_mse_add_grad(model->batch_value->grad,
+                                        model->batch_value->val,
+                                        target_val_mat, seed_vf));
+        }
 
         schedule_grad_accum(&model->train);
 
@@ -809,11 +1050,27 @@ void train_ppo(Env *env, Net *model, const TrainCfg *config,
           clip_grad_norm(model, config->max_grad_norm);
         }
         if (config->optim == OPT_ADAM) {
+          adam->lr = lr_t;
           adam_step(adam, model);
         } else {
-          sgd_step(model, lr, 1.0f);
+          sgd_step(model, lr_t, 1.0f);
         }
         zero_grad(model);
+      }
+
+      // Trust-region early stop: the mean approximate KL over the minibatches
+      // seen in this update ends the remaining epochs once it exceeds
+      // 1.5 * target_kl.
+      if (target_kl > 0.0f) {
+        const real mean_kl = kl_sum / (real)kl_count;
+        if (mean_kl > 1.5f * target_kl) {
+          if (config->verbose) {
+            printf("  early stop after epoch %u/%u: mean approx KL %.5f > "
+                   "%.5f\n",
+                   pe + 1, ppo_epochs, mean_kl, 1.5f * target_kl);
+          }
+          break;
+        }
       }
     }
 
@@ -892,6 +1149,79 @@ EvalResult evaluate(Env *env, Net *model, Rng *rng,
   return res;
 }
 
+EvalResult evaluate_seeded_normed(Env *env, Net *model, const NormStats *stats,
+                                  const u64 *seeds, u32 num_episodes,
+                                  b32 greedy) {
+  RL_LIB_ASSERT(env != NULL && model != NULL && stats != NULL &&
+                    seeds != NULL && num_episodes > 0,
+                "evaluate_seeded_normed: bad argument");
+  RL_LIB_ASSERT(stats->obs_dim == env->obs_dim,
+                "evaluate_seeded_normed: statistics have the wrong obs_dim");
+
+  real total_reward = 0.0f;
+  u64 total_steps = 0;
+  real *obs_buf = malloc(sizeof(real) * env->obs_dim);
+  real *norm_buf = malloc(sizeof(real) * env->obs_dim);
+  RL_LIB_ASSERT(obs_buf != NULL && norm_buf != NULL,
+                "evaluate_seeded_normed: allocation failure");
+
+  for (u32 ep = 0; ep < num_episodes; ep++) {
+    env->reset(env, seeds[ep]);
+    Rng ep_rng;
+    rng_seed(&ep_rng, seeds[ep] ^ 0x5851f42d4c957f2dULL, ep + 1);
+    real ep_reward = 0.0f;
+
+    for (u32 t = 0; t < env->max_steps; t++) {
+      env->observe(env, obs_buf);
+      // The statistics are read, never folded: evaluation must not move the
+      // transform the policy was trained under.
+      norm_stats_obs(stats, obs_buf, norm_buf);
+      memcpy(model->input->val->data, norm_buf, sizeof(real) * env->obs_dim);
+      schedule_run(&model->fwd);
+
+      u32 action = greedy ? argmax_action(model->output->val)
+                          : sample_action(&ep_rng, model->output->val);
+
+      b32 done = false;
+      b32 truncated = false;
+      real r = env->step(env, action, &done, &truncated);
+      ep_reward += r;
+      total_steps++;
+
+      if (done || truncated) {
+        break;
+      }
+    }
+
+    total_reward += ep_reward;
+  }
+
+  free(norm_buf);
+  free(obs_buf);
+  return (EvalResult){
+      .avg_return = total_reward / (real)num_episodes,
+      .avg_steps = (real)total_steps / (real)num_episodes,
+  };
+}
+
+EvalResult evaluate_normed(Env *env, Net *model, const NormStats *stats,
+                           Rng *rng, u32 episodes, b32 greedy) {
+  RL_LIB_ASSERT(env != NULL && model != NULL && stats != NULL && rng != NULL &&
+                    episodes > 0,
+                "evaluate_normed: bad argument");
+
+  u64 *seeds = malloc(sizeof(u64) * episodes);
+  RL_LIB_ASSERT(seeds != NULL, "evaluate_normed: allocation failure");
+  for (u32 i = 0; i < episodes; i++) {
+    seeds[i] = next_seed(rng);
+  }
+
+  EvalResult res =
+      evaluate_seeded_normed(env, model, stats, seeds, episodes, greedy);
+  free(seeds);
+  return res;
+}
+
 // ---------------------------------------------------------------------------
 // Continuous-action PPO
 // ---------------------------------------------------------------------------
@@ -948,10 +1278,11 @@ void train_ppo_continuous(Env *env, Net *model, const TrainCfg *config,
   const real gamma = config->gamma > 0.0f ? config->gamma : 0.99f;
   const real lambda = config->lambda > 0.0f ? config->lambda : 0.95f;
   const real vf_coef = config->vf_coef > 0.0f ? config->vf_coef : 0.5f;
-  const real entropy_coef = config->entropy_coef;
   const real lr = config->learning_rate > 0.0f ? config->learning_rate : 3e-4f;
   const real clip_eps = config->ppo_clip > 0.0f ? config->ppo_clip : 0.2f;
   const u32 ppo_epochs = config->ppo_epochs > 0 ? config->ppo_epochs : 10;
+  const real vf_clip = config->vf_clip > 0.0f ? config->vf_clip : 0.0f;
+  const real target_kl = config->target_kl > 0.0f ? config->target_kl : 0.0f;
 
   const u32 obs_dim = env->obs_dim;
   const u32 act_dim = env->act_dim;
@@ -962,6 +1293,20 @@ void train_ppo_continuous(Env *env, Net *model, const TrainCfg *config,
   const u32 total = num_envs * rollout_len;
   RL_LIB_ASSERT(total >= batch_size,
                 "train_ppo_continuous: rollout smaller than one minibatch");
+
+  NormStats *stats = config->norm;
+  if (config->norm_obs || config->norm_reward) {
+    RL_LIB_ASSERT(
+        stats != NULL,
+        "train_ppo_continuous: norm_obs/norm_reward need TrainCfg.norm");
+    RL_LIB_ASSERT(stats->obs_dim == obs_dim,
+                  "train_ppo_continuous: TrainCfg.norm has the wrong obs_dim");
+  }
+  if (config->norm_obs && config->norm_clip > 0.0f) {
+    stats->clip_obs = config->norm_clip;
+  }
+  const real norm_clip =
+      config->norm_reward_clip > 0.0f ? config->norm_reward_clip : 10.0f;
 
   const u64 seed = config->seed != 0 ? config->seed : 42;
   VecEnv *vec = vecenv_new(train_arena, env, num_envs);
@@ -997,12 +1342,19 @@ void train_ppo_continuous(Env *env, Net *model, const TrainCfg *config,
   real *tail_val = ARENA_ARR(train_arena, real, num_envs);
   real *ep_ret = ARENA_ARR(train_arena, real, num_envs);
 
+  real *obs_norm =
+      config->norm_obs ? ARENA_ARR(train_arena, real, obs_dim) : NULL;
+  real *ret_disc =
+      config->norm_reward ? ARENA_ARR(train_arena, real, num_envs) : NULL;
+
   real *step_actions = ARENA_ARR(train_arena, real, (u64)num_envs * act_dim);
   u32 *order = ARENA_ARR(train_arena, u32, total);
   Mat *batch_us = mat_new(train_arena, act_dim, batch_size);
   real *batch_advs = ARENA_ARR(train_arena, real, batch_size);
   real *batch_oldlp = ARENA_ARR(train_arena, real, batch_size);
   Mat *target_val_mat = mat_new(train_arena, 1, batch_size);
+  Mat *old_val_mat = mat_new(train_arena, 1, batch_size);
+  Mat *kl_logp_mat = mat_new(train_arena, 1, batch_size);
   Mat *sample_action_mat = mat_new(train_arena, act_dim, 1);
   Mat *sample_u_mat = mat_new(train_arena, act_dim, 1);
   real *us = ARENA_ARR(train_arena, real, (u64)total * act_dim);
@@ -1018,11 +1370,16 @@ void train_ppo_continuous(Env *env, Net *model, const TrainCfg *config,
   for (u32 update = 0; update < config->epochs; update++) {
     real episode_return_sum = 0.0f;
     u64 episode_count = 0;
+    const real lr_t = train_lr_at(config, lr, update);
+    const real entropy_t = train_entropy_coef_at(config, update);
 
     // 1. Collect `rollout_len` steps from every sub-environment.
     for (u32 t = 0; t < rollout_len; t++) {
       for (u32 i = 0; i < num_envs; i++) {
         const real *obs = vec->obs + (u64)i * obs_dim;
+        if (config->norm_obs) {
+          obs = norm_fold_obs(stats, obs, obs_norm);
+        }
         memcpy(model->input->val->data, obs, sizeof(real) * obs_dim);
         schedule_run(&model->fwd);
 
@@ -1048,30 +1405,47 @@ void train_ppo_continuous(Env *env, Net *model, const TrainCfg *config,
 
       for (u32 i = 0; i < num_envs; i++) {
         const u64 idx = (u64)i * rollout_len + t;
-        rew_buf[idx] = vec->rewards[i];
+        const real raw_rew = vec->rewards[i];
+        rew_buf[idx] = config->norm_reward
+                           ? norm_scale_reward(stats, &ret_disc[i], raw_rew,
+                                               norm_clip)
+                           : raw_rew;
         end_flag[idx] = vec->dones[i];
         term_flag[idx] = vec->terminals[i];
         boot_val[idx] = 0.0f;
 
-        ep_ret[i] += vec->rewards[i];
+        ep_ret[i] += raw_rew;
         if (vec->dones[i]) {
           episode_return_sum += ep_ret[i];
           episode_count++;
           ep_ret[i] = 0.0f;
+          if (config->norm_reward) {
+            ret_disc[i] = 0.0f;
+          }
 
           // Time-limit truncation: bootstrap from the value of the final state.
           if (vec->truncateds[i]) {
-            boot_val[idx] =
-                critic_value(model, vec->final_obs + (u64)i * obs_dim, obs_dim);
+            const real *fin = vec->final_obs + (u64)i * obs_dim;
+            if (config->norm_obs) {
+              fin = norm_fold_obs(stats, fin, obs_norm);
+            }
+            boot_val[idx] = critic_value(model, fin, obs_dim);
           }
         }
       }
     }
 
     // Value of each env's current (post-rollout) state, for the last-step
-    // bootstrap of episodes that did not end inside the rollout.
+    // bootstrap of episodes that did not end inside the rollout. This state is
+    // consumed again as step 0 of the next rollout, so it is normalized but not
+    // folded here (it is folded at that first consumption).
     for (u32 i = 0; i < num_envs; i++) {
-      tail_val[i] = critic_value(model, vec->obs + (u64)i * obs_dim, obs_dim);
+      const real *tail = vec->obs + (u64)i * obs_dim;
+      if (config->norm_obs) {
+        norm_stats_obs(stats, tail, obs_norm);
+        tail = obs_norm;
+      }
+      tail_val[i] = critic_value(model, tail, obs_dim);
     }
 
     // 2. GAE-Lambda per sub-environment (buffers are env-major).
@@ -1120,8 +1494,12 @@ void train_ppo_continuous(Env *env, Net *model, const TrainCfg *config,
     }
 
     // 4. PPO update: `ppo_epochs` passes of shuffled minibatches, one optimiser
-    // step per minibatch.
+    // step per minibatch. With target_kl set, the update stops as soon as the
+    // mean approximate KL over the minibatches seen so far leaves the trust
+    // region.
     const u32 num_batches = total / batch_size;
+    real kl_sum = 0.0f;
+    u32 kl_count = 0;
     zero_grad(model);
 
     for (u32 pe = 0; pe < ppo_epochs; pe++) {
@@ -1148,10 +1526,20 @@ void train_ppo_continuous(Env *env, Net *model, const TrainCfg *config,
           batch_advs[b] = adv_buf[idx];
           batch_oldlp[b] = logp_old[idx];
           target_val_mat->data[b] = ret_buf[idx];
+          old_val_mat->data[b] = val_buf[idx];
         }
 
         schedule_run(&model->train);
         schedule_zero_act(&model->train);
+
+        if (target_kl > 0.0f) {
+          RL_LIB_CHECK(mat_gaussian_logp(
+              kl_logp_mat, model->batch_mean->val, model->log_std->val,
+              batch_us, env->action_min, env->action_max, batch_size));
+          kl_sum += ppo_approx_kl_continuous(kl_logp_mat, batch_oldlp,
+                                             batch_size);
+          kl_count++;
+        }
 
         // The Gaussian surrogate is already a mean over the minibatch, so its
         // seed is 1; the value and entropy terms are weighted. The policy
@@ -1164,17 +1552,23 @@ void train_ppo_continuous(Env *env, Net *model, const TrainCfg *config,
             batch_oldlp, env->action_min, env->action_max, clip_eps, batch_size,
             seed_pi));
 
-        if (entropy_coef != 0.0f) {
-          seed_ent->data[0] = -entropy_coef;
+        if (entropy_t != 0.0f) {
+          seed_ent->data[0] = -entropy_t;
           RL_LIB_CHECK(mat_gaussian_entropy_add_grad(model->log_std->grad,
                                                     model->log_std->val,
                                                     seed_ent));
         }
 
         seed_vf->data[0] = vf_coef;
-        RL_LIB_CHECK(mat_mse_add_grad(model->batch_value->grad,
-                                      model->batch_value->val, target_val_mat,
-                                      seed_vf));
+        if (vf_clip > 0.0f) {
+          RL_LIB_CHECK(mat_mse_clip_add_grad(
+              model->batch_value->grad, model->batch_value->val, old_val_mat,
+              target_val_mat, vf_clip, seed_vf));
+        } else {
+          RL_LIB_CHECK(mat_mse_add_grad(model->batch_value->grad,
+                                        model->batch_value->val,
+                                        target_val_mat, seed_vf));
+        }
 
         schedule_grad_accum(&model->train);
 
@@ -1182,11 +1576,25 @@ void train_ppo_continuous(Env *env, Net *model, const TrainCfg *config,
           clip_grad_norm(model, config->max_grad_norm);
         }
         if (config->optim == OPT_ADAM) {
+          adam->lr = lr_t;
           adam_step(adam, model);
         } else {
-          sgd_step(model, lr, 1.0f);
+          sgd_step(model, lr_t, 1.0f);
         }
         zero_grad(model);
+      }
+
+      // Trust-region early stop, same rule as the discrete trainer.
+      if (target_kl > 0.0f) {
+        const real mean_kl = kl_sum / (real)kl_count;
+        if (mean_kl > 1.5f * target_kl) {
+          if (config->verbose) {
+            printf("  early stop after epoch %u/%u: mean approx KL %.5f > "
+                   "%.5f\n",
+                   pe + 1, ppo_epochs, mean_kl, 1.5f * target_kl);
+          }
+          break;
+        }
       }
     }
 
@@ -1291,6 +1699,110 @@ EvalResult evaluate_continuous(Env *env, Net *model, Rng *rng, u32 episodes,
 
   EvalResult res =
       evaluate_continuous_seeded(env, model, seeds, episodes, deterministic);
+  free(seeds);
+  return res;
+}
+
+EvalResult evaluate_continuous_seeded_normed(Env *env, Net *model,
+                                             const NormStats *stats,
+                                             const u64 *seeds,
+                                             u32 num_episodes,
+                                             b32 deterministic) {
+  RL_LIB_ASSERT(env != NULL && model != NULL && stats != NULL &&
+                    seeds != NULL && num_episodes > 0,
+                "evaluate_continuous_seeded_normed: bad argument");
+  RL_LIB_ASSERT(env->continuous && env->step_continuous != NULL,
+                "evaluate_continuous_seeded_normed: env is not continuous");
+  RL_LIB_ASSERT(model->mean != NULL && model->log_std != NULL,
+                "evaluate_continuous_seeded_normed: model has no continuous "
+                "policy");
+  RL_LIB_ASSERT(env->action_min != NULL && env->action_max != NULL,
+                "evaluate_continuous_seeded_normed: env has no action bounds");
+  RL_LIB_ASSERT(stats->obs_dim == env->obs_dim,
+                "evaluate_continuous_seeded_normed: statistics have the wrong "
+                "obs_dim");
+
+  real total_reward = 0.0f;
+  u64 total_steps = 0;
+  real *obs_buf = malloc(sizeof(real) * env->obs_dim);
+  real *norm_buf = malloc(sizeof(real) * env->obs_dim);
+  real *act_buf = malloc(sizeof(real) * env->act_dim);
+  real *u_buf = malloc(sizeof(real) * env->act_dim);
+  RL_LIB_ASSERT(obs_buf != NULL && norm_buf != NULL && act_buf != NULL &&
+                    u_buf != NULL,
+                "evaluate_continuous_seeded_normed: allocation failure");
+
+  // Stack Mats wrapping the action buffers, so sampling needs no arena here.
+  Mat action_mat = {
+      .rows = env->act_dim,
+      .cols = 1u,
+      .data = act_buf,
+  };
+  Mat u_mat = {
+      .rows = env->act_dim,
+      .cols = 1u,
+      .data = u_buf,
+  };
+
+  for (u32 ep = 0; ep < num_episodes; ep++) {
+    env->reset(env, seeds[ep]);
+    Rng ep_rng;
+    rng_seed(&ep_rng, seeds[ep] ^ 0x5851f42d4c957f2dULL, ep + 1);
+    real ep_reward = 0.0f;
+
+    for (u32 t = 0; t < env->max_steps; t++) {
+      env->observe(env, obs_buf);
+      norm_stats_obs(stats, obs_buf, norm_buf);
+      memcpy(model->input->val->data, norm_buf, sizeof(real) * env->obs_dim);
+      schedule_run(&model->fwd);
+
+      if (deterministic) {
+        continuous_greedy_action(env, model->mean->val, act_buf);
+      } else {
+        RL_LIB_CHECK(mat_gaussian_sample(&action_mat, &u_mat, model->mean->val,
+                                        model->log_std->val, env->action_min,
+                                        env->action_max, &ep_rng));
+      }
+
+      b32 done = false;
+      b32 truncated = false;
+      const real r = env->step_continuous(env, act_buf, &done, &truncated);
+      ep_reward += r;
+      total_steps++;
+
+      if (done || truncated) {
+        break;
+      }
+    }
+
+    total_reward += ep_reward;
+  }
+
+  free(u_buf);
+  free(act_buf);
+  free(norm_buf);
+  free(obs_buf);
+  return (EvalResult){
+      .avg_return = total_reward / (real)num_episodes,
+      .avg_steps = (real)total_steps / (real)num_episodes,
+  };
+}
+
+EvalResult evaluate_continuous_normed(Env *env, Net *model,
+                                      const NormStats *stats, Rng *rng,
+                                      u32 episodes, b32 deterministic) {
+  RL_LIB_ASSERT(env != NULL && model != NULL && stats != NULL && rng != NULL &&
+                    episodes > 0,
+                "evaluate_continuous_normed: bad argument");
+
+  u64 *seeds = malloc(sizeof(u64) * episodes);
+  RL_LIB_ASSERT(seeds != NULL, "evaluate_continuous_normed: allocation failure");
+  for (u32 i = 0; i < episodes; i++) {
+    seeds[i] = next_seed(rng);
+  }
+
+  EvalResult res = evaluate_continuous_seeded_normed(
+      env, model, stats, seeds, episodes, deterministic);
   free(seeds);
   return res;
 }

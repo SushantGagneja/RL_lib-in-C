@@ -8,7 +8,18 @@
 
 // Trains 6x6 Snake with PPO over a vectorized environment.
 //
-//   ./train_ppo_snake [seed] [updates] [shaping_coef] [threads]
+//   ./train_ppo_snake [seed] [updates] [shaping_coef] [threads] [recipe]
+//
+// `recipe` selects the training recipe:
+//   0  the original recipe: fixed learning rate, no value clipping, no early
+//      stop, no normalization. Reproduces the pre-recipe-fix numbers in the
+//      README bit for bit.
+//   1  (default) the full recipe: cosine learning-rate decay 3e-4 -> 3e-5,
+//      PPO value clipping (0.2), approximate-KL early stop (0.03), entropy
+//      annealing 0.01 -> 0.001, and running observation normalization plus
+//      reward scaling. Evaluation still runs on the raw environment (raw
+//      rewards) but feeds the policy the same normalized observations it was
+//      trained on.
 //
 // The environment's reward is sparse (once per food, +20). The default is to
 // train on it as-is: in the reported runs the sparse reward was learnable at
@@ -144,10 +155,11 @@ int main(int argc, char **argv) {
   const u32 updates = (argc > 2) ? (u32)atoi(argv[2]) : 1500;
   const real coef = (argc > 3) ? (real)atof(argv[3]) : 0.0f;
   const u32 threads = (argc > 4) ? (u32)atoi(argv[4]) : 0;
+  const u32 recipe = (argc > 5) ? (u32)atoi(argv[5]) : 1;
 
   printf("=== PPO on Snake 6x6 (seed: %llu, updates: %u, shaping: %.2f, "
-         "threads: %u) ===\n",
-         (unsigned long long)seed, updates, (double)coef, threads);
+         "threads: %u, recipe: %u) ===\n",
+         (unsigned long long)seed, updates, (double)coef, threads, recipe);
 
   Arena *arena = arena_new(GiB(1));
   Net *model = net_new(arena);
@@ -179,20 +191,43 @@ int main(int argc, char **argv) {
       .ppo_clip = 0.2f,
   };
 
+  NormStats *stats = NULL;
+  if (recipe != 0) {
+    cfg.lr_schedule = LR_COSINE;
+    cfg.lr_end = 3e-5f;
+    cfg.vf_clip = 0.2f;
+    cfg.target_kl = 0.03f;
+    cfg.anneal_entropy = true;
+    cfg.entropy_coef_end = 0.001f;
+    cfg.norm_obs = true;
+    cfg.norm_reward = true;
+    stats = norm_stats_new(arena, env->obs_dim);
+    cfg.norm = stats;
+  }
+
   Env *train_env =
       (coef > 0.0f) ? shaped_snake_create(arena, env, coef, cfg.gamma) : env;
   train_ppo(train_env, model, &cfg, arena);
 
   // The raw environment, so these returns are on the same scale as the other
   // Snake baselines (a food is +20, a win +100 on top), on the benchmark
-  // harness's evaluation seeds (training seed + 5000).
+  // harness's evaluation seeds (training seed + 5000). When the recipe
+  // normalized observations, evaluation feeds the policy the same transform
+  // (statistics frozen at their end-of-training values).
   enum { EVAL_EPISODES = 100 };
   u64 eval_seeds[EVAL_EPISODES];
   make_eval_seeds(eval_seeds, EVAL_EPISODES, seed + 5000);
-  const EvalResult greedy =
-      evaluate_seeded(env, model, eval_seeds, EVAL_EPISODES, true);
-  const EvalResult stochastic =
-      evaluate_seeded(env, model, eval_seeds, EVAL_EPISODES, false);
+  EvalResult greedy;
+  EvalResult stochastic;
+  if (cfg.norm_obs) {
+    greedy = evaluate_seeded_normed(env, model, stats, eval_seeds,
+                                    EVAL_EPISODES, true);
+    stochastic = evaluate_seeded_normed(env, model, stats, eval_seeds,
+                                        EVAL_EPISODES, false);
+  } else {
+    greedy = evaluate_seeded(env, model, eval_seeds, EVAL_EPISODES, true);
+    stochastic = evaluate_seeded(env, model, eval_seeds, EVAL_EPISODES, false);
+  }
   printf("\nFinal Evaluation (raw env, %d episodes, harness seeds):\n",
          (int)EVAL_EPISODES);
   printf("  Greedy:     mean return %7.2f | mean steps %5.1f\n",
