@@ -34,6 +34,14 @@ typedef enum {
   OP_EXP,
   OP_LOG,
   OP_DIV,
+  OP_RESHAPE,   // same elements, aux_rows x aux_cols
+  OP_BROADCAST, // 1 -> N replicas, aux_rows x aux_cols
+  OP_SUM,       // reduce over `axis` (a ReduceMode)
+  OP_MEAN,      // reduce over `axis`, divided by the reduced count
+  OP_GATHER,    // per-column selection by a 1 x C index row
+  OP_MIN,       // elementwise min of two same-shaped operands
+  OP_MAX,       // elementwise max
+  OP_CLIP,      // clamp to [aux_lo, aux_hi]
 } OpKind;
 
 typedef struct Tensor Tensor;
@@ -48,6 +56,16 @@ struct Tensor {
   Mat *grad;
 
   Tensor *inputs[MAX_ARITY];
+
+  // Result shape and parameters for ops whose output shape is not a function
+  // of their operands alone: reshape/broadcast store the target in
+  // aux_rows/aux_cols, sum/mean store a ReduceMode in axis, clip stores its
+  // bounds in aux_lo/aux_hi. Zero for every other op.
+  u32 aux_rows;
+  u32 aux_cols;
+  u32 axis;
+  real aux_lo;
+  real aux_hi;
 };
 
 // A topologically ordered list of nodes (inputs first).
@@ -121,6 +139,31 @@ Tensor *tensor_mm(Arena *arena, Net *model, Tensor *a, Tensor *b);
 Tensor *tensor_mse(Arena *arena, Net *model, Tensor *pred, Tensor *target);
 Tensor *tensor_reinforce_loss(Arena *arena, Net *model, Tensor *probs,
                               Tensor *rt);
+
+// Shape ops. `tensor_reshape` requires the same element count and copies in
+// row-major order; `tensor_broadcast` accepts any input dimension that is 1 or
+// already the target size; `tensor_sum`/`tensor_mean` reduce over a ReduceMode
+// axis. Gradients flow through all of them: reshape copies back, broadcast sums
+// the replicas, and a reduction broadcasts its seed.
+Tensor *tensor_reshape(Arena *arena, Net *model, Tensor *input, u32 rows,
+                       u32 cols);
+Tensor *tensor_broadcast(Arena *arena, Net *model, Tensor *input, u32 rows,
+                         u32 cols);
+Tensor *tensor_sum(Arena *arena, Net *model, Tensor *input, ReduceMode mode);
+Tensor *tensor_mean(Arena *arena, Net *model, Tensor *input, ReduceMode mode);
+
+// Per-column gather. `values` is (R x C), `indices` is (1 x C) holding integral
+// action indices in [0, R), and the result is (1 x C). The indices are data,
+// not a differentiable input: the gradient scatters back into `values`.
+Tensor *tensor_gather(Arena *arena, Net *model, Tensor *values,
+                      Tensor *indices);
+
+// Elementwise selection and clamping. min/max take two same-shaped operands
+// (ties route the gradient to the first); clip passes gradient inside
+// [lo, hi] and blocks it outside.
+Tensor *tensor_min(Arena *arena, Net *model, Tensor *a, Tensor *b);
+Tensor *tensor_max(Arena *arena, Net *model, Tensor *a, Tensor *b);
+Tensor *tensor_clip(Arena *arena, Net *model, Tensor *input, real lo, real hi);
 
 Schedule schedule_from(Arena *arena, Net *model, Tensor *out_var);
 

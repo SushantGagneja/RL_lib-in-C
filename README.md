@@ -32,10 +32,11 @@ so there is nothing to attribute and no external license to carry.
 - **Reverse-mode autograd engine**
   - Static computation graph; every node carries an operation tag, and forward
     and backward are interpreted by one `switch` dispatch (no vtable).
-  - Ops: matrix multiply (NN/NT/TN/TT), ReLU, Tanh, numerically stable
-    per-column Softmax, elementwise Mul, Add, Sub, MSE, REINFORCE loss, a fused
-    policy cross-entropy loss with a mean-entropy bonus, and a PPO clipped
-    surrogate loss.
+  - Ops: matrix multiply (NN/NT/TN/TT), ReLU, Tanh, Sigmoid, Exp, Log, Div,
+    numerically stable per-column Softmax, elementwise Mul/Add/Sub, MSE,
+    REINFORCE loss, reshape, broadcast, sum/mean reductions, per-column gather,
+    min/max/clip, a fused policy cross-entropy loss with a mean-entropy bonus,
+    and a PPO clipped surrogate loss.
   - Gradient accumulation across minibatches; `schedule_from_roots` builds a
     graph for models with more than one output (e.g. actor-critic).
 - **Arena allocator** — 64-byte aligned bump allocator for graph nodes,
@@ -429,9 +430,9 @@ of aborting; `RL_LIB_HAS_THREADS` in `vecenv.h` is the compile-time answer.
 | Suite | What it covers |
 |---|---|
 | `test_base` | 13 checks: KiB/MiB/GiB, MIN/MAX, ALIGN_UP_POW2 (multiples and crossing), and the fatal-error hook — an installed handler captures the formatted message via `longjmp`, the assert/check paths carry the caller's text, expression and source location, and `NULL` restores the default |
-| `test_gradcheck` (f64) | 12 suites / 280 parameters vs central differences, `h = 1e-5`, tolerance `1e-6`; includes the elementwise sigmoid/exp/log/div suite, the Gaussian PPO surrogate and its log-density against an independent double-precision formula |
-| `test_mat` | 13 checks over MatMul (NN/NT/TN/TT), SIMD-vs-scalar agreement across two shape sets that cross the vector and TT-tile boundaries, softmax, ReLU, add/sub, broadcast add, mul/tanh/MSE |
-| `test_gradcheck` (f32) | the same 12 suites in the default build (looser tolerance) |
+| `test_gradcheck` (f64) | 16 suites / 373 parameters vs central differences, `h = 1e-5`, tolerance `1e-6`; includes the elementwise sigmoid/exp/log/div suite, reshape and broadcast, sum/mean reductions, gather with a repeated index, min/max/clip, the Gaussian PPO surrogate and its log-density against an independent double-precision formula |
+| `test_mat` | 20 checks over MatMul (NN/NT/TN/TT), SIMD-vs-scalar agreement across two shape sets that cross the vector and TT-tile boundaries, softmax, ReLU, add/sub, broadcast add, mul/tanh/MSE, and the shape kernels (reshape/broadcast, sum/mean, gather, min/max/clip) including invalid shapes, out-of-range indices, gradient masks and accumulation |
+| `test_gradcheck` (f32) | the same 16 suites in the default build (looser tolerance) |
 | `test_envs` | 191 checks: CartPole bounds/termination/determinism; Snake reset, grid validation, wall/self collision, tail vacate, eating; Pendulum reset, hand-computed Euler dynamics, torque clamp, speed cap, determinism, clone independence and 200-step truncation; VecEnv shape, determinism, independent clones, auto-reset terminal-observation capture, vectorized continuous stepping with action bounds, and threaded-vs-serial stepping compared field by field over 260 steps |
 | `test_rl` | 103 checks: GAE vs a hand-computed trajectory, one Adam step, grad clipping, actor-critic build, value-head learning, batched-vs-per-sample gradient equivalence, a parameter registry grown past 128 entries, rebuilding the batched graph for a new minibatch size (weights preserved, batch and single-sample inference agree), the continuous builder (per-dimension bounds, sampled `u`/squash round trip, `log_std` registered as a parameter and surviving a rebuild), CartPole learning smoke tests for REINFORCE and PPO with same-seed determinism, a Pendulum continuous-PPO learning smoke test plus determinism, the LR/entropy schedules against hand-computed values, normalization statistics (Welford/posterior/clip cases), PPO recipe-knob effects (each knob changes the run; the defaults do not), normalized-training determinism, and threaded rollouts reaching bit-identical weights in both trainers |
 | `test_checkpoint` | 616 checks: byte-exact parameter round trips, bit-exact Adam-state resume, parameter-only and optimiser-only files, atomic replacement (no `.tmp` is left behind, and a save that cannot start leaves the previous checkpoint byte-identical and loadable), a continuous model round trip including `log_std`, bit-exact round trips of `NormStats` through `checkpoint_save_ex` / `checkpoint_load_ex`, architecture gating (an actor file cannot be loaded into an actor-critic, a different hidden width, or a hand-built graph, all before a parameter changes), a flipped byte caught by the CRC before the parser runs, a 300-case mutation fuzz pass (bit flips, truncations, overwritten runs, one third of them with a recomputed checksum), and rejection of missing, corrupt, truncated, wrong-width, wrongly-sized, wrongly-shaped and format-3 files — each verified to leave the model untouched |
@@ -454,12 +455,12 @@ Tests: 13 passed, 0 failed
   log-density vs textbook form (4 columns)... OK (0 bad)
   ...
 ---
-Tests: 12 passed, 0 failed
-Parameters checked: 280/280 passed within tolerance
+Tests: 16 passed, 0 failed
+Parameters checked: 373/373 passed within tolerance
 
 --- test_mat ---
   SIMD path == scalar reference... (backend neon, max diff 2.38e-06) OK
-Passed: 13  Failed: 0
+Passed: 20  Failed: 0
 
 --- test_envs ---
 Passed: 191  Failed: 0
@@ -698,9 +699,10 @@ Tests: 38 passed, 0 failed
         target network, epsilon schedule, and the masked-MSE regression on the
         existing autograd engine; `make dqn` reaches ~194 greedy on CartPole in
         16000 steps (seed 42, 100 episodes); `test_dqn` covers it (38 checks).
-  - [x] Graph ops: elementwise `sigmoid`, `exp`, `log` and `div` with matching
-        kernels and numerical gradient-check coverage (12 suites / 280
-        parameters, f32 + f64).
+  - [x] Graph ops: elementwise `sigmoid`, `exp`, `log` and `div`, plus shape
+        ops (`reshape`, `broadcast`, `sum`/`mean`, `gather`, `min`/`max`/`clip`)
+        with matching kernels and numerical gradient-check coverage (16 suites /
+        373 parameters, f32 + f64).
 
 - [x] **Phase 9: Release and robustness**
   - [x] v1.1.0 tagged (recipe, DQN, new graph ops, optional system BLAS, ctypes

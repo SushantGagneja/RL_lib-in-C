@@ -950,6 +950,224 @@ static void test_gradcheck_elementwise_ops(void) {
   arena_dispose(arena);
 }
 
+// ── Test: reshape and broadcast ──────────────────────────────────────
+
+static void test_gradcheck_shape_ops(void) {
+  printf("\n[gradcheck: reshape and broadcast]\n");
+
+  Arena *arena = arena_new(MiB(32));
+  Net *model = ARENA_OBJ(arena, Net);
+
+  Tensor *matrix = tensor_create(arena, model, 3, 4,
+                                 TENSOR_PARAM | TENSOR_GRAD);
+  Tensor *reshaped = tensor_reshape(arena, model, matrix, 4, 3);
+  Tensor *reshape_out = tensor_sum(arena, model, reshaped, REDUCE_ALL);
+
+  Tensor *row = tensor_create(arena, model, 1, 4,
+                              TENSOR_PARAM | TENSOR_GRAD);
+  Tensor *scalar = tensor_create(arena, model, 1, 1,
+                                 TENSOR_PARAM | TENSOR_GRAD);
+  Tensor *w = tensor_create(arena, model, 3, 4, TENSOR_PARAM | TENSOR_GRAD);
+  Tensor *row_full = tensor_broadcast(arena, model, row, 3, 4);
+  Tensor *scalar_full = tensor_broadcast(arena, model, scalar, 3, 4);
+  Tensor *summed = tensor_add(arena, model, row_full, scalar_full);
+  Tensor *broadcast_out = tensor_sum(
+      arena, model, tensor_mul(arena, model, summed, w), REDUCE_ALL);
+
+  Schedule reshape_graph = schedule_from(arena, model, reshape_out);
+  Schedule broadcast_graph = schedule_from(arena, model, broadcast_out);
+
+  rng_seed_g(112233, 4);
+  mat_rand(matrix->val, -0.5f, 0.5f);
+  mat_rand(row->val, -0.5f, 0.5f);
+  mat_rand(scalar->val, -0.5f, 0.5f);
+  mat_rand(w->val, -0.5f, 0.5f);
+
+  printf("  matrix (3x4, reshaped to 4x3)... ");
+  u32 f1 =
+      gradcheck_param(&reshape_graph, reshape_out, matrix, GRAD_H, GRAD_TOL);
+  printf("%s (%u failures)\n", f1 == 0 ? "OK" : "FAIL", f1);
+
+  printf("  row (1x4, broadcast)... ");
+  u32 f2 = gradcheck_param(&broadcast_graph, broadcast_out, row, GRAD_H,
+                           GRAD_TOL);
+  printf("%s (%u failures)\n", f2 == 0 ? "OK" : "FAIL", f2);
+
+  printf("  scalar (1x1, broadcast)... ");
+  u32 f3 = gradcheck_param(&broadcast_graph, broadcast_out, scalar, GRAD_H,
+                           GRAD_TOL);
+  printf("%s (%u failures)\n", f3 == 0 ? "OK" : "FAIL", f3);
+
+  printf("  w (3x4, broadcast product)... ");
+  u32 f4 =
+      gradcheck_param(&broadcast_graph, broadcast_out, w, GRAD_H, GRAD_TOL);
+  printf("%s (%u failures)\n", f4 == 0 ? "OK" : "FAIL", f4);
+
+  if (f1 + f2 + f3 + f4 == 0)
+    tests_passed++;
+  else
+    tests_failed++;
+
+  arena_dispose(arena);
+}
+
+// ── Test: reductions ─────────────────────────────────────────────────
+
+static void test_gradcheck_reduce(void) {
+  printf("\n[gradcheck: sum and mean reductions]\n");
+
+  Arena *arena = arena_new(MiB(32));
+  Net *model = ARENA_OBJ(arena, Net);
+
+  Tensor *rows_in = tensor_create(arena, model, 3, 4,
+                                  TENSOR_PARAM | TENSOR_GRAD);
+  Tensor *cols_in = tensor_create(arena, model, 3, 4,
+                                  TENSOR_PARAM | TENSOR_GRAD);
+  Tensor *all_in = tensor_create(arena, model, 3, 4,
+                                 TENSOR_PARAM | TENSOR_GRAD);
+
+  Tensor *rows_out = tensor_sum(arena, model, rows_in, REDUCE_ROWS);
+  Tensor *cols_out = tensor_mean(arena, model, cols_in, REDUCE_COLS);
+  Tensor *all_out = tensor_mean(arena, model, all_in, REDUCE_ALL);
+
+  Schedule rows_graph = schedule_from(arena, model, rows_out);
+  Schedule cols_graph = schedule_from(arena, model, cols_out);
+  Schedule all_graph = schedule_from(arena, model, all_out);
+
+  rng_seed_g(445566, 7);
+  mat_rand(rows_in->val, -1.0f, 1.0f);
+  mat_rand(cols_in->val, -1.0f, 1.0f);
+  mat_rand(all_in->val, -1.0f, 1.0f);
+
+  printf("  rows_in (3x4, sum over rows)... ");
+  u32 f1 =
+      gradcheck_param(&rows_graph, rows_out, rows_in, GRAD_H, GRAD_TOL);
+  printf("%s (%u failures)\n", f1 == 0 ? "OK" : "FAIL", f1);
+
+  printf("  cols_in (3x4, mean over cols)... ");
+  u32 f2 =
+      gradcheck_param(&cols_graph, cols_out, cols_in, GRAD_H, GRAD_TOL);
+  printf("%s (%u failures)\n", f2 == 0 ? "OK" : "FAIL", f2);
+
+  printf("  all_in (3x4, mean of all)... ");
+  u32 f3 = gradcheck_param(&all_graph, all_out, all_in, GRAD_H, GRAD_TOL);
+  printf("%s (%u failures)\n", f3 == 0 ? "OK" : "FAIL", f3);
+
+  if (f1 + f2 + f3 == 0)
+    tests_passed++;
+  else
+    tests_failed++;
+
+  arena_dispose(arena);
+}
+
+// ── Test: gather ─────────────────────────────────────────────────────
+
+static void test_gradcheck_gather(void) {
+  printf("\n[gradcheck: gather]\n");
+
+  Arena *arena = arena_new(MiB(32));
+  Net *model = ARENA_OBJ(arena, Net);
+
+  Tensor *logits = tensor_create(arena, model, 3, 4,
+                                 TENSOR_PARAM | TENSOR_GRAD);
+  Tensor *indices = tensor_create(arena, model, 1, 4, TENSOR_PLAIN);
+  // Deliberately repeat index 2: the scatter in the backward pass must add.
+  indices->val->data[0] = (real)0;
+  indices->val->data[1] = (real)2;
+  indices->val->data[2] = (real)1;
+  indices->val->data[3] = (real)2;
+
+  Tensor *picked = tensor_gather(arena, model, logits, indices);
+  Schedule graph = schedule_from(arena, model, picked);
+
+  rng_seed_g(667788, 9);
+  mat_rand(logits->val, -1.0f, 1.0f);
+
+  schedule_run(&graph);
+  b32 values_ok = true;
+  for (u32 c = 0; c < 4; c++) {
+    const u32 idx = (u32)indices->val->data[c];
+    const real expected = logits->val->data[(u64)idx * 4u + c];
+    if (picked->val->data[c] != expected) {
+      values_ok = false;
+    }
+  }
+  printf("  forward selection (with a repeated index)... %s\n",
+         values_ok ? "OK" : "FAIL");
+
+  printf("  logits (3x4, repeated index)... ");
+  u32 f = gradcheck_param(&graph, picked, logits, GRAD_H, GRAD_TOL);
+  printf("%s (%u failures)\n", f == 0 ? "OK" : "FAIL", f);
+
+  if (f == 0 && values_ok)
+    tests_passed++;
+  else
+    tests_failed++;
+
+  arena_dispose(arena);
+}
+
+// ── Test: min, max and clip ──────────────────────────────────────────
+
+static void test_gradcheck_minmax_clip(void) {
+  printf("\n[gradcheck: min, max, clip]\n");
+
+  Arena *arena = arena_new(MiB(32));
+  Net *model = ARENA_OBJ(arena, Net);
+
+  Tensor *a = tensor_create(arena, model, 3, 2, TENSOR_PARAM | TENSOR_GRAD);
+  Tensor *b = tensor_create(arena, model, 3, 2, TENSOR_PARAM | TENSOR_GRAD);
+  Tensor *c = tensor_create(arena, model, 2, 2, TENSOR_PARAM | TENSOR_GRAD);
+
+  Tensor *min_out = tensor_min(arena, model, a, b);
+  Tensor *max_out = tensor_max(arena, model, a, b);
+  Tensor *both = tensor_add(arena, model, min_out, max_out);
+  Schedule mm_graph = schedule_from(arena, model, both);
+
+  Tensor *clipped = tensor_clip(arena, model, c, REAL_C(-1.0), REAL_C(1.0));
+  Schedule clip_graph = schedule_from(arena, model, clipped);
+
+  rng_seed_g(889900, 11);
+  mat_rand(a->val, -1.0f, 1.0f);
+  mat_rand(b->val, -1.0f, 1.0f);
+  // Keep every element well away from the clip bounds so the central
+  // difference never straddles a kink.
+  const real clip_vals[4] = {-2.0f, -0.4f, 0.4f, 2.0f};
+  for (u32 i = 0; i < 4u; i++) {
+    c->val->data[i] = clip_vals[i];
+  }
+
+  printf("  a (min and max LHS)... ");
+  u32 f1 = gradcheck_param(&mm_graph, both, a, GRAD_H, GRAD_TOL);
+  printf("%s (%u failures)\n", f1 == 0 ? "OK" : "FAIL", f1);
+
+  printf("  b (min and max RHS)... ");
+  u32 f2 = gradcheck_param(&mm_graph, both, b, GRAD_H, GRAD_TOL);
+  printf("%s (%u failures)\n", f2 == 0 ? "OK" : "FAIL", f2);
+
+  printf("  c (clip to [-1, 1])... ");
+  u32 f3 = gradcheck_param(&clip_graph, clipped, c, GRAD_H, GRAD_TOL);
+  printf("%s (%u failures)\n", f3 == 0 ? "OK" : "FAIL", f3);
+
+  schedule_run(&clip_graph);
+  const real expected[4] = {-1.0f, -0.4f, 0.4f, 1.0f};
+  b32 values_ok = true;
+  for (u32 i = 0; i < 4u; i++) {
+    if (clipped->val->data[i] != expected[i]) {
+      values_ok = false;
+    }
+  }
+  printf("  clipped forward values... %s\n", values_ok ? "OK" : "FAIL");
+
+  if (f1 + f2 + f3 == 0 && values_ok)
+    tests_passed++;
+  else
+    tests_failed++;
+
+  arena_dispose(arena);
+}
+
 int main(void) {
   printf("\n=== Autograd gradient checks (%s) ===\n\n", GRADCHECK_NAME);
 
@@ -959,6 +1177,10 @@ int main(void) {
   test_gradcheck_broadcast_add();
   test_gradcheck_tanh_mul();
   test_gradcheck_elementwise_ops();
+  test_gradcheck_shape_ops();
+  test_gradcheck_reduce();
+  test_gradcheck_gather();
+  test_gradcheck_minmax_clip();
   test_gradcheck_mse();
   test_gradcheck_fused_policy();
   test_gradcheck_ppo_policy();

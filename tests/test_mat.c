@@ -411,6 +411,128 @@ static void test_mul_tanh_mse(Arena *arena) {
   printf("%s\n", (ok_mul && ok_tanh && ok_mse) ? "OK" : "FAIL");
 }
 
+static void test_shape_reduction_kernels(Arena *arena) {
+  printf("  reshape, broadcast, reductions... ");
+  Mat *m = mat_new(arena, 2, 3);
+  Mat *r = mat_new(arena, 3, 2);
+  Mat *bad = mat_new(arena, 2, 2);
+  for (u32 i = 0; i < 6; i++) {
+    m->data[i] = (real)(i + 1);
+  }
+
+  b32 ok = mat_reshape(r, m);
+  ok = ok && r->data[0] == 1.0f && r->data[1] == 2.0f && r->data[2] == 3.0f &&
+       r->data[3] == 4.0f && r->data[4] == 5.0f && r->data[5] == 6.0f;
+  ok = ok && !mat_reshape(bad, m); // 4 != 6 elements
+  ASSERT_TRUE(ok, "reshape copies row-major and rejects a count mismatch");
+
+  Mat *row = mat_new(arena, 1, 2);
+  Mat *bc = mat_new(arena, 3, 2);
+  row->data[0] = 7.0f;
+  row->data[1] = 8.0f;
+  ok = mat_broadcast(bc, row);
+  ok = ok && bc->data[0] == 7.0f && bc->data[1] == 8.0f &&
+       bc->data[2] == 7.0f && bc->data[3] == 8.0f && bc->data[4] == 7.0f &&
+       bc->data[5] == 8.0f;
+  Mat *col = mat_new(arena, 2, 1);
+  Mat *bc2 = mat_new(arena, 2, 3);
+  col->data[0] = 1.0f;
+  col->data[1] = 2.0f;
+  ok = ok && mat_broadcast(bc2, col);
+  ok = ok && bc2->data[0] == 1.0f && bc2->data[1] == 1.0f &&
+       bc2->data[2] == 1.0f && bc2->data[3] == 2.0f && bc2->data[4] == 2.0f &&
+       bc2->data[5] == 2.0f;
+  ok = ok && !mat_broadcast(bad, m);
+  ASSERT_TRUE(ok, "broadcast replicates rows and columns");
+
+  Mat *sum_rows = mat_new(arena, 1, 3);
+  Mat *sum_cols = mat_new(arena, 2, 1);
+  Mat *sum_all = mat_new(arena, 1, 1);
+  ok = mat_sum(sum_rows, m, REDUCE_ROWS);
+  ok = ok && sum_rows->data[0] == 5.0f && sum_rows->data[1] == 7.0f &&
+       sum_rows->data[2] == 9.0f;
+  ok = ok && mat_sum(sum_cols, m, REDUCE_COLS) && sum_cols->data[0] == 6.0f &&
+       sum_cols->data[1] == 15.0f;
+  ok = ok && mat_sum(sum_all, m, REDUCE_ALL) && sum_all->data[0] == 21.0f;
+  ok = ok && mat_mean(sum_all, m, REDUCE_ALL) && sum_all->data[0] == 3.5f;
+  ASSERT_TRUE(ok, "sum/mean over rows, columns and all elements");
+
+  Mat *mean_grad = mat_new(arena, 2, 3);
+  Mat *mean_seed = mat_new(arena, 1, 1);
+  mat_zero(mean_grad);
+  mean_seed->data[0] = 12.0f;
+  ok = mat_mean_add_grad(mean_grad, mean_seed, REDUCE_ALL);
+  ok = ok && mean_grad->data[0] == 2.0f && mean_grad->data[5] == 2.0f;
+  ok = ok && mat_mean_add_grad(mean_grad, mean_seed, REDUCE_ALL) &&
+       mean_grad->data[0] == 4.0f; // accumulates, does not replace
+  ASSERT_TRUE(ok, "mean backward scales its contribution and accumulates");
+
+  Mat *values = mat_new(arena, 3, 2);
+  for (u32 i = 0; i < 6; i++) {
+    values->data[i] = (real)(i + 1);
+  }
+  Mat *idx = mat_new(arena, 1, 2);
+  Mat *gathered = mat_new(arena, 1, 2);
+  idx->data[0] = 2.0f;
+  idx->data[1] = 0.0f;
+  ok = mat_gather(gathered, values, idx) && gathered->data[0] == 5.0f &&
+       gathered->data[1] == 2.0f;
+  Mat *values_grad = mat_new(arena, 3, 2);
+  Mat *gather_seed = mat_new(arena, 1, 2);
+  mat_zero(values_grad);
+  gather_seed->data[0] = 10.0f;
+  gather_seed->data[1] = 20.0f;
+  ok = ok && mat_gather_add_grad(values_grad, idx, gather_seed) &&
+       values_grad->data[4] == 10.0f && values_grad->data[1] == 20.0f;
+  idx->data[0] = 3.0f; // out of range
+  ok = ok && !mat_gather(gathered, values, idx);
+  idx->data[0] = 0.5f; // not integral
+  ok = ok && !mat_gather(gathered, values, idx);
+  idx->data[0] = -1.0f;
+  ok = ok && !mat_gather(gathered, values, idx);
+  ASSERT_TRUE(ok, "gather selects per column and rejects bad indices");
+
+  Mat *a = mat_new(arena, 1, 2);
+  Mat *b = mat_new(arena, 1, 2);
+  Mat *mn = mat_new(arena, 1, 2);
+  Mat *mx = mat_new(arena, 1, 2);
+  a->data[0] = 1.0f;
+  a->data[1] = 4.0f;
+  b->data[0] = 2.0f;
+  b->data[1] = 3.0f;
+  ok = mat_min(mn, a, b) && mn->data[0] == 1.0f && mn->data[1] == 3.0f;
+  ok = ok && mat_max(mx, a, b) && mx->data[0] == 2.0f && mx->data[1] == 4.0f;
+  Mat *a_grad = mat_new(arena, 1, 2);
+  Mat *b_grad = mat_new(arena, 1, 2);
+  Mat *ones = mat_new(arena, 1, 2);
+  mat_zero(a_grad);
+  mat_zero(b_grad);
+  mat_fill(ones, 1.0f);
+  ok = ok && mat_min_add_grad(a_grad, b_grad, a, b, ones) &&
+       a_grad->data[0] == 1.0f && a_grad->data[1] == 0.0f &&
+       b_grad->data[0] == 0.0f && b_grad->data[1] == 1.0f;
+  ASSERT_TRUE(ok, "min/max route gradients to the selected operand");
+
+  Mat *clip_in = mat_new(arena, 1, 4);
+  Mat *clip_out = mat_new(arena, 1, 4);
+  Mat *clip_grad = mat_new(arena, 1, 4);
+  Mat *clip_seed = mat_new(arena, 1, 4);
+  clip_in->data[0] = -2.0f;
+  clip_in->data[1] = -0.5f;
+  clip_in->data[2] = 0.5f;
+  clip_in->data[3] = 2.0f;
+  mat_fill(clip_seed, 1.0f);
+  mat_zero(clip_grad);
+  ok = mat_clip(clip_out, clip_in, -1.0f, 1.0f) && clip_out->data[0] == -1.0f &&
+       clip_out->data[1] == -0.5f && clip_out->data[2] == 0.5f &&
+       clip_out->data[3] == 1.0f;
+  ok = ok && mat_clip_add_grad(clip_grad, clip_in, -1.0f, 1.0f, clip_seed) &&
+       clip_grad->data[0] == 0.0f && clip_grad->data[1] == 1.0f &&
+       clip_grad->data[2] == 1.0f && clip_grad->data[3] == 0.0f;
+  ok = ok && !mat_clip(clip_out, clip_in, 1.0f, -1.0f);
+  ASSERT_TRUE(ok, "clip clamps forward and blocks gradient outside the bounds");
+}
+
 // ── Main ─────────────────────────────────────────────────────────────
 
 int main(void) {
@@ -436,6 +558,9 @@ int main(void) {
   test_add_sub(arena);
   test_broadcast_add(arena);
   test_mul_tanh_mse(arena);
+
+  printf("\n[shape & reduction kernels]\n");
+  test_shape_reduction_kernels(arena);
 
   printf("\n---\nPassed: %u  Failed: %u\n\n", tests_passed, tests_failed);
 

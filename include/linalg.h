@@ -44,6 +44,40 @@ b32 mat_log(Mat *out, const Mat *in);
 b32 mat_div(Mat *out, const Mat *a, const Mat *b); // a / b, elementwise
 b32 mat_softmax(Mat *out, const Mat *in); // Per-column mat_softmax for batching
 
+// ── Shape, reduction and selection kernels (autograd shape ops) ───────
+// Each forward function requires `out` to already have the documented shape and
+// returns false instead of aborting on a mismatch: reshape needs the same
+// element count, broadcast needs every input dimension to be 1 or the target,
+// and gather needs integral indices in [0, rows). The `_add_grad` variants
+// accumulate into the destination, like every other reverse-mode helper here.
+
+typedef enum {
+  REDUCE_ROWS = 0, // down the rows: (R x C) -> (1 x C)
+  REDUCE_COLS = 1, // across the columns: (R x C) -> (R x 1)
+  REDUCE_ALL = 2,  // every element: (R x C) -> (1 x 1)
+} ReduceMode;
+
+b32 mat_reshape(Mat *out, const Mat *in);
+b32 mat_broadcast(Mat *out, const Mat *in);
+b32 mat_sum(Mat *out, const Mat *in, ReduceMode mode);
+b32 mat_mean(Mat *out, const Mat *in, ReduceMode mode);
+b32 mat_gather(Mat *out, const Mat *values, const Mat *indices);
+b32 mat_min(Mat *out, const Mat *a, const Mat *b);
+b32 mat_max(Mat *out, const Mat *a, const Mat *b);
+b32 mat_clip(Mat *out, const Mat *in, real lo, real hi);
+
+b32 mat_reshape_add_grad(Mat *out, const Mat *grad);
+b32 mat_broadcast_add_grad(Mat *out, const Mat *grad);
+b32 mat_sum_add_grad(Mat *out, const Mat *grad, ReduceMode mode);
+b32 mat_mean_add_grad(Mat *out, const Mat *grad, ReduceMode mode);
+b32 mat_gather_add_grad(Mat *out, const Mat *indices, const Mat *grad);
+b32 mat_min_add_grad(Mat *a_grad, Mat *b_grad, const Mat *a, const Mat *b,
+                     const Mat *grad);
+b32 mat_max_add_grad(Mat *a_grad, Mat *b_grad, const Mat *a, const Mat *b,
+                     const Mat *grad);
+b32 mat_clip_add_grad(Mat *out, const Mat *in, real lo, real hi,
+                      const Mat *grad);
+
 // Loss functions
 b32 mat_mse_loss(Mat *out, const Mat *pred, const Mat *target);
 b32 mat_reinforce_loss(Mat *out, const Mat *probs, const Mat *advantages);

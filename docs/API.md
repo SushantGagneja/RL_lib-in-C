@@ -228,6 +228,44 @@ b32 mat_softmax(Mat *out, const Mat *in);   // per column: softmax over rows
 `mat_softmax` is column-wise: with a `(classes x batch)` input each column is an
 independent distribution, which is what a batched policy needs.
 
+### Shape and reduction kernels
+
+```c
+typedef enum { REDUCE_ROWS = 0, REDUCE_COLS = 1, REDUCE_ALL = 2 } ReduceMode;
+
+b32 mat_reshape(Mat *out, const Mat *in);
+b32 mat_broadcast(Mat *out, const Mat *in);
+b32 mat_sum(Mat *out, const Mat *in, ReduceMode mode);
+b32 mat_mean(Mat *out, const Mat *in, ReduceMode mode);
+b32 mat_gather(Mat *out, const Mat *values, const Mat *indices);
+b32 mat_min(Mat *out, const Mat *a, const Mat *b);
+b32 mat_max(Mat *out, const Mat *a, const Mat *b);
+b32 mat_clip(Mat *out, const Mat *in, real lo, real hi);
+
+b32 mat_reshape_add_grad(Mat *out, const Mat *grad);
+b32 mat_broadcast_add_grad(Mat *out, const Mat *grad);
+b32 mat_sum_add_grad(Mat *out, const Mat *grad, ReduceMode mode);
+b32 mat_mean_add_grad(Mat *out, const Mat *grad, ReduceMode mode);
+b32 mat_gather_add_grad(Mat *out, const Mat *indices, const Mat *grad);
+b32 mat_min_add_grad(Mat *a_grad, Mat *b_grad, const Mat *a, const Mat *b,
+                     const Mat *grad);
+b32 mat_max_add_grad(Mat *a_grad, Mat *b_grad, const Mat *a, const Mat *b,
+                     const Mat *grad);
+b32 mat_clip_add_grad(Mat *out, const Mat *in, real lo, real hi,
+                      const Mat *grad);
+```
+
+These back the graph's shape operations ([`graph.h`](#graphh)) and are useful
+directly. `mat_broadcast` replicates any input dimension that is 1, and
+`mat_broadcast_add_grad` collapses the seed by summing. `mat_sum` / `mat_mean`
+reduce down the rows (`REDUCE_ROWS`, result `1 x C`), across the columns
+(`REDUCE_COLS`, result `R x 1`), or over everything; their backward passes
+broadcast the seed back (dividing by the reduced count for the mean). `mat_gather`
+requires integral indices in `[0, rows)` and rejects anything else; its backward
+scatters with `+=`, so duplicate indices accumulate. `mat_min` / `mat_max`
+tie-break towards the first operand, and `mat_clip_add_grad` passes gradient
+exactly on the bounds, matching common framework behaviour.
+
 ### Losses
 
 ```c
@@ -416,12 +454,16 @@ bound that instead of forbidding it, in both precisions.
 typedef enum { TENSOR_PLAIN = 0, TENSOR_GRAD = 1, TENSOR_PARAM = 2 } TensorFlags;
 typedef enum { OP_NONE = 0, OP_RELU, OP_TANH, OP_SOFTMAX, OP_ADD, OP_SUB, OP_MUL,
                OP_MM, OP_MSE, OP_REINFORCE, OP_SIGMOID, OP_EXP, OP_LOG,
-               OP_DIV } OpKind;
+               OP_DIV, OP_RESHAPE, OP_BROADCAST, OP_SUM, OP_MEAN, OP_GATHER,
+               OP_MIN, OP_MAX, OP_CLIP } OpKind;
 
 struct Tensor {
   u32 index; u32 flags; u8 arity; OpKind op;
   Mat *val; Mat *grad;
   Tensor *inputs[MAX_ARITY];
+  u32 aux_rows, aux_cols;  // target shape for reshape/broadcast
+  u32 axis;                // ReduceMode for sum/mean
+  real aux_lo, aux_hi;     // clip bounds
 };
 
 typedef struct { Tensor **ops; u32 len; } Schedule;
@@ -465,6 +507,15 @@ Tensor *tensor_mm(Arena *arena, Net *model, Tensor *a, Tensor *b);
 Tensor *tensor_mse(Arena *arena, Net *model, Tensor *pred, Tensor *target);
 Tensor *tensor_reinforce_loss(Arena *arena, Net *model, Tensor *probs, Tensor *rt);
 
+Tensor *tensor_reshape(Arena *arena, Net *model, Tensor *input, u32 rows, u32 cols);
+Tensor *tensor_broadcast(Arena *arena, Net *model, Tensor *input, u32 rows, u32 cols);
+Tensor *tensor_sum(Arena *arena, Net *model, Tensor *input, ReduceMode mode);
+Tensor *tensor_mean(Arena *arena, Net *model, Tensor *input, ReduceMode mode);
+Tensor *tensor_gather(Arena *arena, Net *model, Tensor *values, Tensor *indices);
+Tensor *tensor_min(Arena *arena, Net *model, Tensor *a, Tensor *b);
+Tensor *tensor_max(Arena *arena, Net *model, Tensor *a, Tensor *b);
+Tensor *tensor_clip(Arena *arena, Net *model, Tensor *input, real lo, real hi);
+
 Schedule schedule_from(Arena *arena, Net *model, Tensor *out_var);
 Schedule schedule_from_roots(Arena *arena, Net *model, Tensor **roots, u32 num_roots);
 void schedule_run(Schedule *graph);
@@ -475,6 +526,20 @@ void schedule_zero_act(Schedule *graph);
 
 Net *net_new(Arena *arena);
 ```
+
+The shape ops complete the set needed to express losses compositionally:
+`tensor_reshape` reindexes the same elements (row-major), `tensor_broadcast`
+replicates a dimension that is 1, `tensor_sum`/`tensor_mean` reduce over rows,
+over columns, or over everything (`REDUCE_ROWS`, `REDUCE_COLS`, `REDUCE_ALL`),
+`tensor_gather` selects one entry per column from an `R x C` matrix using a
+`1 x C` index row, and `tensor_min`/`tensor_max`/`tensor_clip` provide the
+selection and trust-region primitives. Every one has an analytic backward pass:
+reshape copies the seed back, broadcast sums the replicas, a reduction broadcasts
+and (for `mean`) divides by the reduced count, gather scatters with `+=` so a
+repeated index accumulates, min/max route the gradient to the selected operand
+(ties to the first), and clip passes gradient inside `[lo, hi]` only. The
+constructors reject shapes that cannot work with an assert; the `mat_*` kernels
+underneath return `false` instead.
 
 Two ways to build a schedule: `schedule_from` for a single output, and
 `schedule_from_roots` when a model has several heads. The latter exists because

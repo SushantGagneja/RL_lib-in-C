@@ -9,6 +9,14 @@ single source of truth — it is also stamped into `rl_lib.pc`.
 ## Unreleased
 
 ### Added
+- **General autograd shape ops.** `tensor_reshape`, `tensor_broadcast`,
+  `tensor_sum` / `tensor_mean` (over rows, columns, or everything),
+  `tensor_gather` (per-column selection with a scatter-add backward), and
+  elementwise `tensor_min` / `tensor_max` / `tensor_clip` join the graph, each
+  with an analytic backward pass and a finite-difference gradcheck.
+  `test_gradcheck` grows from 12 to 16 suites (373 parameters), and `test_mat`
+  gains direct edge-case coverage of the kernels (invalid shapes, out-of-range
+  indices, gradient masks and accumulation).
 - **Checkpoint format 4.** Builder-made models now record their architecture —
   kind, observation/action dimensions and hidden widths — in an ARCH block, and
   `checkpoint_save_ex` / `checkpoint_load_ex` carry a run's running

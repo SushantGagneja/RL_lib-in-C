@@ -224,6 +224,321 @@ b32 mat_mul_add_grad(Mat *a_grad, Mat *b_grad, const Mat *a, const Mat *b,
 }
 
 // ---------------------------------------------------------------------------
+// Shape, reduction and selection kernels (autograd shape ops).
+// ---------------------------------------------------------------------------
+
+b32 mat_reshape(Mat *out, const Mat *in) {
+  if (mat_count(out) != mat_count(in)) {
+    return false;
+  }
+  const u64 n = mat_count(in);
+  for (u64 i = 0; i < n; i++) {
+    out->data[i] = in->data[i];
+  }
+  return true;
+}
+
+b32 mat_reshape_add_grad(Mat *out, const Mat *grad) {
+  if (mat_count(out) != mat_count(grad)) {
+    return false;
+  }
+  const u64 n = mat_count(out);
+  for (u64 i = 0; i < n; i++) {
+    out->data[i] += grad->data[i];
+  }
+  return true;
+}
+
+b32 mat_broadcast(Mat *out, const Mat *in) {
+  if ((in->rows != out->rows && in->rows != 1u) ||
+      (in->cols != out->cols && in->cols != 1u)) {
+    return false;
+  }
+  for (u32 r = 0; r < out->rows; r++) {
+    const u32 ir = (in->rows == 1u) ? 0u : r;
+    for (u32 c = 0; c < out->cols; c++) {
+      const u32 ic = (in->cols == 1u) ? 0u : c;
+      out->data[(u64)r * out->cols + c] =
+          in->data[(u64)ir * in->cols + ic];
+    }
+  }
+  return true;
+}
+
+// Collapses `grad` back onto the broadcast input's shape, summing wherever a
+// dimension was replicated.
+b32 mat_broadcast_add_grad(Mat *out, const Mat *grad) {
+  if ((out->rows != grad->rows && out->rows != 1u) ||
+      (out->cols != grad->cols && out->cols != 1u)) {
+    return false;
+  }
+  for (u32 r = 0; r < grad->rows; r++) {
+    const u32 orow = (out->rows == 1u) ? 0u : r;
+    for (u32 c = 0; c < grad->cols; c++) {
+      const u32 ocol = (out->cols == 1u) ? 0u : c;
+      out->data[(u64)orow * out->cols + ocol] +=
+          grad->data[(u64)r * grad->cols + c];
+    }
+  }
+  return true;
+}
+
+static b32 reduced_dims_ok(const Mat *reduced, const Mat *full,
+                           ReduceMode mode) {
+  switch (mode) {
+  case REDUCE_ROWS:
+    return reduced->rows == 1u && reduced->cols == full->cols;
+  case REDUCE_COLS:
+    return reduced->rows == full->rows && reduced->cols == 1u;
+  case REDUCE_ALL:
+    return reduced->rows == 1u && reduced->cols == 1u;
+  }
+  return false;
+}
+
+b32 mat_sum(Mat *out, const Mat *in, ReduceMode mode) {
+  if (in->rows == 0u || in->cols == 0u ||
+      !reduced_dims_ok(out, in, mode)) {
+    return false;
+  }
+  if (mode == REDUCE_ALL) {
+    real acc = 0.0f;
+    const u64 n = mat_count(in);
+    for (u64 i = 0; i < n; i++) {
+      acc += in->data[i];
+    }
+    out->data[0] = acc;
+    return true;
+  }
+  if (mode == REDUCE_ROWS) {
+    for (u32 c = 0; c < in->cols; c++) {
+      real acc = 0.0f;
+      for (u32 r = 0; r < in->rows; r++) {
+        acc += in->data[(u64)r * in->cols + c];
+      }
+      out->data[c] = acc;
+    }
+    return true;
+  }
+  for (u32 r = 0; r < in->rows; r++) {
+    real acc = 0.0f;
+    for (u32 c = 0; c < in->cols; c++) {
+      acc += in->data[(u64)r * in->cols + c];
+    }
+    out->data[r] = acc;
+  }
+  return true;
+}
+
+b32 mat_mean(Mat *out, const Mat *in, ReduceMode mode) {
+  if (!mat_sum(out, in, mode)) {
+    return false;
+  }
+  const real count = (mode == REDUCE_ROWS)   ? (real)in->rows
+                     : (mode == REDUCE_COLS) ? (real)in->cols
+                                             : (real)mat_count(in);
+  mat_scale(out, (real)1.0 / count);
+  return true;
+}
+
+b32 mat_sum_add_grad(Mat *out, const Mat *grad, ReduceMode mode) {
+  if (!reduced_dims_ok(grad, out, mode)) {
+    return false;
+  }
+  if (mode == REDUCE_ALL) {
+    const real g = grad->data[0];
+    const u64 n = mat_count(out);
+    for (u64 i = 0; i < n; i++) {
+      out->data[i] += g;
+    }
+    return true;
+  }
+  if (mode == REDUCE_ROWS) {
+    for (u32 r = 0; r < out->rows; r++) {
+      for (u32 c = 0; c < out->cols; c++) {
+        out->data[(u64)r * out->cols + c] += grad->data[c];
+      }
+    }
+    return true;
+  }
+  for (u32 r = 0; r < out->rows; r++) {
+    for (u32 c = 0; c < out->cols; c++) {
+      out->data[(u64)r * out->cols + c] += grad->data[r];
+    }
+  }
+  return true;
+}
+
+b32 mat_mean_add_grad(Mat *out, const Mat *grad, ReduceMode mode) {
+  if (!reduced_dims_ok(grad, out, mode)) {
+    return false;
+  }
+  const real count = (mode == REDUCE_ROWS)   ? (real)out->rows
+                     : (mode == REDUCE_COLS) ? (real)out->cols
+                                             : (real)mat_count(out);
+  const real scale = (real)1.0 / count;
+  if (mode == REDUCE_ALL) {
+    const real g = grad->data[0] * scale;
+    const u64 n = mat_count(out);
+    for (u64 i = 0; i < n; i++) {
+      out->data[i] += g;
+    }
+    return true;
+  }
+  if (mode == REDUCE_ROWS) {
+    for (u32 r = 0; r < out->rows; r++) {
+      for (u32 c = 0; c < out->cols; c++) {
+        out->data[(u64)r * out->cols + c] += grad->data[c] * scale;
+      }
+    }
+    return true;
+  }
+  for (u32 r = 0; r < out->rows; r++) {
+    for (u32 c = 0; c < out->cols; c++) {
+      out->data[(u64)r * out->cols + c] += grad->data[r] * scale;
+    }
+  }
+  return true;
+}
+
+// Indices travel as ordinary real entries (the graph has no integer tensor
+// type); reject anything that is not an exact integer in [0, rows), including
+// NaN and infinities.
+static b32 gather_index(real value, u32 rows, u32 *index) {
+  if (!(value >= (real)0.0) || !(value < (real)rows)) {
+    return false;
+  }
+  const u32 i = (u32)value;
+  if ((real)i != value) {
+    return false;
+  }
+  *index = i;
+  return true;
+}
+
+b32 mat_gather(Mat *out, const Mat *values, const Mat *indices) {
+  if (values->cols != indices->cols || indices->rows != 1u ||
+      out->rows != 1u || out->cols != values->cols) {
+    return false;
+  }
+  for (u32 c = 0; c < values->cols; c++) {
+    u32 idx = 0u;
+    if (!gather_index(indices->data[c], values->rows, &idx)) {
+      return false;
+    }
+    out->data[c] = values->data[(u64)idx * values->cols + c];
+  }
+  return true;
+}
+
+b32 mat_gather_add_grad(Mat *out, const Mat *indices, const Mat *grad) {
+  if (out->cols != indices->cols || indices->rows != 1u ||
+      grad->rows != 1u || grad->cols != out->cols) {
+    return false;
+  }
+  for (u32 c = 0; c < out->cols; c++) {
+    u32 idx = 0u;
+    if (!gather_index(indices->data[c], out->rows, &idx)) {
+      return false;
+    }
+    out->data[(u64)idx * out->cols + c] += grad->data[c];
+  }
+  return true;
+}
+
+b32 mat_min(Mat *out, const Mat *a, const Mat *b) {
+  if (a->rows != b->rows || a->cols != b->cols || out->rows != a->rows ||
+      out->cols != a->cols) {
+    return false;
+  }
+  const u64 n = mat_count(out);
+  for (u64 i = 0; i < n; i++) {
+    out->data[i] = (a->data[i] <= b->data[i]) ? a->data[i] : b->data[i];
+  }
+  return true;
+}
+
+b32 mat_max(Mat *out, const Mat *a, const Mat *b) {
+  if (a->rows != b->rows || a->cols != b->cols || out->rows != a->rows ||
+      out->cols != a->cols) {
+    return false;
+  }
+  const u64 n = mat_count(out);
+  for (u64 i = 0; i < n; i++) {
+    out->data[i] = (a->data[i] >= b->data[i]) ? a->data[i] : b->data[i];
+  }
+  return true;
+}
+
+b32 mat_min_add_grad(Mat *a_grad, Mat *b_grad, const Mat *a, const Mat *b,
+                     const Mat *grad) {
+  if (a->rows != b->rows || a->cols != b->cols || grad->rows != a->rows ||
+      grad->cols != a->cols) {
+    return false;
+  }
+  const u64 n = mat_count(a);
+  for (u64 i = 0; i < n; i++) {
+    if (a->data[i] <= b->data[i]) {
+      if (a_grad != NULL) {
+        a_grad->data[i] += grad->data[i];
+      }
+    } else if (b_grad != NULL) {
+      b_grad->data[i] += grad->data[i];
+    }
+  }
+  return true;
+}
+
+b32 mat_max_add_grad(Mat *a_grad, Mat *b_grad, const Mat *a, const Mat *b,
+                     const Mat *grad) {
+  if (a->rows != b->rows || a->cols != b->cols || grad->rows != a->rows ||
+      grad->cols != a->cols) {
+    return false;
+  }
+  const u64 n = mat_count(a);
+  for (u64 i = 0; i < n; i++) {
+    if (a->data[i] >= b->data[i]) {
+      if (a_grad != NULL) {
+        a_grad->data[i] += grad->data[i];
+      }
+    } else if (b_grad != NULL) {
+      b_grad->data[i] += grad->data[i];
+    }
+  }
+  return true;
+}
+
+b32 mat_clip(Mat *out, const Mat *in, real lo, real hi) {
+  if (lo > hi || mat_count(out) != mat_count(in)) {
+    return false;
+  }
+  const u64 n = mat_count(in);
+  for (u64 i = 0; i < n; i++) {
+    const real x = in->data[i];
+    out->data[i] = (x < lo) ? lo : ((x > hi) ? hi : x);
+  }
+  return true;
+}
+
+// The identity inside [lo, hi], zero outside; values exactly on a bound pass
+// gradient (the same convention as PyTorch's clamp).
+b32 mat_clip_add_grad(Mat *out, const Mat *in, real lo, real hi,
+                      const Mat *grad) {
+  if (lo > hi || mat_count(out) != mat_count(in) ||
+      mat_count(grad) != mat_count(in)) {
+    return false;
+  }
+  const u64 n = mat_count(in);
+  for (u64 i = 0; i < n; i++) {
+    const real x = in->data[i];
+    if (x >= lo && x <= hi) {
+      out->data[i] += grad->data[i];
+    }
+  }
+  return true;
+}
+
+// ---------------------------------------------------------------------------
 // Matrix multiply. Four accumulation kernels selected by the
 // (transpose_a, transpose_b) flags; each adds into `out`, so callers that want
 // a fresh result zero it first. The scalar kernels below are the portable

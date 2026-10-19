@@ -63,6 +63,14 @@ static u8 op_arity(OpKind op) {
   case OP_RELU:
   case OP_TANH:
   case OP_SOFTMAX:
+  case OP_SIGMOID:
+  case OP_EXP:
+  case OP_LOG:
+  case OP_RESHAPE:
+  case OP_BROADCAST:
+  case OP_SUM:
+  case OP_MEAN:
+  case OP_CLIP:
     return 1u;
   default:
     return 2u;
@@ -80,6 +88,8 @@ static ShapeRule *shape_rule(OpKind op) {
   case OP_EXP:
   case OP_LOG:
   case OP_DIV:
+  case OP_MIN:
+  case OP_MAX:
     return shape_same;
   case OP_ADD:
   case OP_SUB:
@@ -126,6 +136,11 @@ Tensor *tensor_create(Arena *arena, Net *model, u32 rows, u32 cols,
   out->op = OP_NONE;
   out->inputs[0] = NULL;
   out->inputs[1] = NULL;
+  out->aux_rows = 0u;
+  out->aux_cols = 0u;
+  out->axis = 0u;
+  out->aux_lo = (real)0.0;
+  out->aux_hi = (real)0.0;
   out->val = mat_new(arena, rows, cols);
   out->grad = (flags & TENSOR_GRAD) ? mat_new(arena, rows, cols) : NULL;
 
@@ -133,6 +148,19 @@ Tensor *tensor_create(Arena *arena, Net *model, u32 rows, u32 cols,
     register_param(arena, model, out);
   }
 
+  return out;
+}
+
+static Tensor *make_node(Arena *arena, Net *model, OpKind op, Tensor *a,
+                         Tensor *b, u32 rows, u32 cols, b32 wants_grad) {
+  Tensor *out = tensor_create(arena, model, rows, cols,
+                              wants_grad ? TENSOR_GRAD : TENSOR_PLAIN);
+  out->op = op;
+  out->arity = op_arity(op);
+  out->inputs[0] = a;
+  out->inputs[1] = b;
+  out->aux_rows = rows;
+  out->aux_cols = cols;
   return out;
 }
 
@@ -147,13 +175,7 @@ static Tensor *make_op(Arena *arena, Net *model, OpKind op, Tensor *a,
 
   const b32 needs_grad = (a != NULL && (a->flags & TENSOR_GRAD)) ||
                          (b != NULL && (b->flags & TENSOR_GRAD));
-  Tensor *out = tensor_create(arena, model, rows, cols,
-                              needs_grad ? TENSOR_GRAD : TENSOR_PLAIN);
-  out->op = op;
-  out->arity = op_arity(op);
-  out->inputs[0] = a;
-  out->inputs[1] = b;
-  return out;
+  return make_node(arena, model, op, a, b, rows, cols, needs_grad);
 }
 
 Tensor *tensor_relu(Arena *arena, Net *model, Tensor *input) {
@@ -207,6 +229,105 @@ Tensor *tensor_mse(Arena *arena, Net *model, Tensor *pred, Tensor *target) {
 Tensor *tensor_reinforce_loss(Arena *arena, Net *model, Tensor *probs,
                               Tensor *rt) {
   return make_op(arena, model, OP_REINFORCE, probs, rt);
+}
+
+Tensor *tensor_reshape(Arena *arena, Net *model, Tensor *input, u32 rows,
+                       u32 cols) {
+  RL_LIB_ASSERT(input != NULL, "tensor_reshape: NULL input");
+  RL_LIB_ASSERT(rows > 0u && cols > 0u, "tensor_reshape: empty result shape");
+  RL_LIB_ASSERT((u64)rows * (u64)cols ==
+                    (u64)input->val->rows * (u64)input->val->cols,
+                "tensor_reshape: element count mismatch");
+  return make_node(arena, model, OP_RESHAPE, input, NULL, rows, cols,
+                   (input->flags & TENSOR_GRAD) != 0u);
+}
+
+Tensor *tensor_broadcast(Arena *arena, Net *model, Tensor *input, u32 rows,
+                         u32 cols) {
+  RL_LIB_ASSERT(input != NULL, "tensor_broadcast: NULL input");
+  RL_LIB_ASSERT(rows > 0u && cols > 0u, "tensor_broadcast: empty result shape");
+  RL_LIB_ASSERT((input->val->rows == rows || input->val->rows == 1u) &&
+                    (input->val->cols == cols || input->val->cols == 1u),
+                "tensor_broadcast: input cannot be broadcast to that shape");
+  return make_node(arena, model, OP_BROADCAST, input, NULL, rows, cols,
+                   (input->flags & TENSOR_GRAD) != 0u);
+}
+
+static void reduced_shape(ReduceMode mode, const Tensor *input, u32 *rows,
+                          u32 *cols) {
+  switch (mode) {
+  case REDUCE_ROWS:
+    *rows = 1u;
+    *cols = input->val->cols;
+    break;
+  case REDUCE_COLS:
+    *rows = input->val->rows;
+    *cols = 1u;
+    break;
+  case REDUCE_ALL:
+    *rows = 1u;
+    *cols = 1u;
+    break;
+  }
+}
+
+Tensor *tensor_sum(Arena *arena, Net *model, Tensor *input, ReduceMode mode) {
+  RL_LIB_ASSERT(input != NULL, "tensor_sum: NULL input");
+  RL_LIB_ASSERT(mode == REDUCE_ROWS || mode == REDUCE_COLS ||
+                    mode == REDUCE_ALL,
+                "tensor_sum: invalid reduction mode");
+  u32 rows = 0u;
+  u32 cols = 0u;
+  reduced_shape(mode, input, &rows, &cols);
+  Tensor *out = make_node(arena, model, OP_SUM, input, NULL, rows, cols,
+                          (input->flags & TENSOR_GRAD) != 0u);
+  out->axis = (u32)mode;
+  return out;
+}
+
+Tensor *tensor_mean(Arena *arena, Net *model, Tensor *input, ReduceMode mode) {
+  RL_LIB_ASSERT(input != NULL, "tensor_mean: NULL input");
+  RL_LIB_ASSERT(mode == REDUCE_ROWS || mode == REDUCE_COLS ||
+                    mode == REDUCE_ALL,
+                "tensor_mean: invalid reduction mode");
+  u32 rows = 0u;
+  u32 cols = 0u;
+  reduced_shape(mode, input, &rows, &cols);
+  Tensor *out = make_node(arena, model, OP_MEAN, input, NULL, rows, cols,
+                          (input->flags & TENSOR_GRAD) != 0u);
+  out->axis = (u32)mode;
+  return out;
+}
+
+Tensor *tensor_gather(Arena *arena, Net *model, Tensor *values,
+                      Tensor *indices) {
+  RL_LIB_ASSERT(values != NULL && indices != NULL,
+                "tensor_gather: NULL input");
+  RL_LIB_ASSERT(indices->val->rows == 1u &&
+                    indices->val->cols == values->val->cols,
+                "tensor_gather: indices must be 1 x values->cols");
+  return make_node(arena, model, OP_GATHER, values, indices, 1u,
+                   values->val->cols, (values->flags & TENSOR_GRAD) != 0u);
+}
+
+Tensor *tensor_min(Arena *arena, Net *model, Tensor *a, Tensor *b) {
+  return make_op(arena, model, OP_MIN, a, b);
+}
+
+Tensor *tensor_max(Arena *arena, Net *model, Tensor *a, Tensor *b) {
+  return make_op(arena, model, OP_MAX, a, b);
+}
+
+Tensor *tensor_clip(Arena *arena, Net *model, Tensor *input, real lo,
+                    real hi) {
+  RL_LIB_ASSERT(input != NULL, "tensor_clip: NULL input");
+  RL_LIB_ASSERT(lo <= hi, "tensor_clip: lo must not exceed hi");
+  Tensor *out = make_node(arena, model, OP_CLIP, input, NULL,
+                          input->val->rows, input->val->cols,
+                          (input->flags & TENSOR_GRAD) != 0u);
+  out->aux_lo = lo;
+  out->aux_hi = hi;
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -343,6 +464,30 @@ static void apply_forward(Tensor *t) {
     RL_LIB_CHECK(mat_reinforce_loss(t->val, t->inputs[0]->val,
                                  t->inputs[1]->val));
     return;
+  case OP_RESHAPE:
+    RL_LIB_CHECK(mat_reshape(t->val, t->inputs[0]->val));
+    return;
+  case OP_BROADCAST:
+    RL_LIB_CHECK(mat_broadcast(t->val, t->inputs[0]->val));
+    return;
+  case OP_SUM:
+    RL_LIB_CHECK(mat_sum(t->val, t->inputs[0]->val, (ReduceMode)t->axis));
+    return;
+  case OP_MEAN:
+    RL_LIB_CHECK(mat_mean(t->val, t->inputs[0]->val, (ReduceMode)t->axis));
+    return;
+  case OP_GATHER:
+    RL_LIB_CHECK(mat_gather(t->val, t->inputs[0]->val, t->inputs[1]->val));
+    return;
+  case OP_MIN:
+    RL_LIB_CHECK(mat_min(t->val, t->inputs[0]->val, t->inputs[1]->val));
+    return;
+  case OP_MAX:
+    RL_LIB_CHECK(mat_max(t->val, t->inputs[0]->val, t->inputs[1]->val));
+    return;
+  case OP_CLIP:
+    RL_LIB_CHECK(mat_clip(t->val, t->inputs[0]->val, t->aux_lo, t->aux_hi));
+    return;
   }
 }
 
@@ -434,6 +579,47 @@ static void apply_backward(Tensor *t) {
   case OP_REINFORCE:
     if (wants_grad(a)) {
       RL_LIB_CHECK(mat_reinforce_add_grad(a->grad, a->val, b->val, t->grad));
+    }
+    return;
+  case OP_RESHAPE:
+    if (wants_grad(a)) {
+      RL_LIB_CHECK(mat_reshape_add_grad(a->grad, t->grad));
+    }
+    return;
+  case OP_BROADCAST:
+    if (wants_grad(a)) {
+      RL_LIB_CHECK(mat_broadcast_add_grad(a->grad, t->grad));
+    }
+    return;
+  case OP_SUM:
+    if (wants_grad(a)) {
+      RL_LIB_CHECK(mat_sum_add_grad(a->grad, t->grad, (ReduceMode)t->axis));
+    }
+    return;
+  case OP_MEAN:
+    if (wants_grad(a)) {
+      RL_LIB_CHECK(mat_mean_add_grad(a->grad, t->grad, (ReduceMode)t->axis));
+    }
+    return;
+  case OP_GATHER:
+    if (wants_grad(a)) {
+      RL_LIB_CHECK(mat_gather_add_grad(a->grad, b->val, t->grad));
+    }
+    return;
+  case OP_MIN:
+    RL_LIB_CHECK(mat_min_add_grad(wants_grad(a) ? a->grad : NULL,
+                                  wants_grad(b) ? b->grad : NULL, a->val,
+                                  b->val, t->grad));
+    return;
+  case OP_MAX:
+    RL_LIB_CHECK(mat_max_add_grad(wants_grad(a) ? a->grad : NULL,
+                                  wants_grad(b) ? b->grad : NULL, a->val,
+                                  b->val, t->grad));
+    return;
+  case OP_CLIP:
+    if (wants_grad(a)) {
+      RL_LIB_CHECK(mat_clip_add_grad(a->grad, a->val, t->aux_lo, t->aux_hi,
+                                     t->grad));
     }
     return;
   }
