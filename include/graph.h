@@ -121,6 +121,11 @@ typedef struct {
   // operand only, the network's own Q values are the sole gradient path.
   Tensor *target;
 
+  // SAC only (sac_q_build): the batched, gradient-free action input. The critic
+  // consumes (batch_input, batch_action) as (s, a), so the same weights can
+  // also be applied to a graph-computed action through sac_q_apply.
+  Tensor *batch_action;
+
   // Continuous (diagonal-Gaussian) policy: the mean head and its batched view,
   // plus a learnable log standard deviation that is a parameter *outside* every
   // schedule (the Gaussian policy loss accumulates into its gradient directly).

@@ -34,7 +34,7 @@ EXTRA_CFLAGS += --coverage
 endif
 CFLAGS = $(WARN) -Iinclude -I. $(THREAD_FLAGS) $(EXTRA_CFLAGS)
 
-LIB_SRCS = src/base.c src/memory.c src/random.c src/simd.c src/linalg.c src/graph.c src/layers.c src/optim.c src/checkpoint.c src/rl.c src/dqn.c src/vecenv.c envs/snake.c envs/cartpole.c envs/pendulum.c
+LIB_SRCS = src/base.c src/memory.c src/random.c src/simd.c src/linalg.c src/graph.c src/layers.c src/optim.c src/checkpoint.c src/rl.c src/dqn.c src/sac.c src/vecenv.c envs/snake.c envs/cartpole.c envs/pendulum.c
 LIB_OBJS = $(LIB_SRCS:.c=.o)
 
 TARGET_SNAKE = train_snake
@@ -44,6 +44,7 @@ TARGET_PPO = train_ppo
 TARGET_PPO_CONT = train_ppo_continuous
 TARGET_PPO_SNAKE = train_ppo_snake
 TARGET_DQN = train_dqn
+TARGET_SAC = train_sac
 TARGET_HELLO = hello_rl
 
 # ── Version and install layout ──────────────────────────────────────
@@ -89,20 +90,20 @@ SHARED_CFLAGS = $(WARN) -Iinclude -I. -O2 -fPIC $(EXTRA_CFLAGS)
 all: release
 
 release: CFLAGS += -O3
-release: clean $(TARGET_SNAKE) $(TARGET_CARTPOLE) $(TARGET_A2C) $(TARGET_PPO) $(TARGET_PPO_CONT) $(TARGET_PPO_SNAKE) $(TARGET_DQN) $(TARGET_HELLO)
+release: clean $(TARGET_SNAKE) $(TARGET_CARTPOLE) $(TARGET_A2C) $(TARGET_PPO) $(TARGET_PPO_CONT) $(TARGET_PPO_SNAKE) $(TARGET_DQN) $(TARGET_SAC) $(TARGET_HELLO)
 
 debug: CFLAGS += -g -fsanitize=undefined
-debug: clean $(TARGET_SNAKE) $(TARGET_CARTPOLE) $(TARGET_A2C) $(TARGET_PPO) $(TARGET_PPO_CONT) $(TARGET_PPO_SNAKE) $(TARGET_DQN) $(TARGET_HELLO)
+debug: clean $(TARGET_SNAKE) $(TARGET_CARTPOLE) $(TARGET_A2C) $(TARGET_PPO) $(TARGET_PPO_CONT) $(TARGET_PPO_SNAKE) $(TARGET_DQN) $(TARGET_SAC) $(TARGET_HELLO)
 
 # Compile every example and the benchmark with the current flags. CI runs this
 # with ERR=1 so example code is held to the same warning standard as the
 # library; the test binaries cannot do it, because they build the library
 # objects with -fsanitize=undefined.
-examples: $(TARGET_SNAKE) $(TARGET_CARTPOLE) $(TARGET_A2C) $(TARGET_PPO) $(TARGET_PPO_CONT) $(TARGET_PPO_SNAKE) $(TARGET_DQN) $(TARGET_HELLO)
+examples: $(TARGET_SNAKE) $(TARGET_CARTPOLE) $(TARGET_A2C) $(TARGET_PPO) $(TARGET_PPO_CONT) $(TARGET_PPO_SNAKE) $(TARGET_DQN) $(TARGET_SAC) $(TARGET_HELLO)
 
 # AddressSanitizer + UndefinedBehaviorSanitizer build of everything.
 asan: CFLAGS += -g -O1 -fsanitize=address,undefined -fno-omit-frame-pointer
-asan: clean $(TARGET_SNAKE) $(TARGET_CARTPOLE) $(TARGET_A2C) $(TARGET_PPO) $(TARGET_PPO_CONT) $(TARGET_PPO_SNAKE) $(TARGET_DQN) test_base test_mat test_gradcheck test_envs test_rl test_checkpoint test_dqn
+asan: clean $(TARGET_SNAKE) $(TARGET_CARTPOLE) $(TARGET_A2C) $(TARGET_PPO) $(TARGET_PPO_CONT) $(TARGET_PPO_SNAKE) $(TARGET_DQN) $(TARGET_SAC) test_base test_mat test_gradcheck test_envs test_rl test_checkpoint test_dqn test_sac
 	@echo ""
 	@echo "=== ASAN/UBSAN: running all tests ==="
 	./test_base
@@ -112,6 +113,7 @@ asan: clean $(TARGET_SNAKE) $(TARGET_CARTPOLE) $(TARGET_A2C) $(TARGET_PPO) $(TAR
 	./test_rl
 	./test_checkpoint
 	./test_dqn
+	./test_sac
 
 # ThreadSanitizer. Only the suites that exercise the threaded VecEnv pool are
 # run: test_gradcheck and the training examples are single-threaded by
@@ -148,6 +150,9 @@ $(TARGET_PPO_SNAKE): $(LIB_OBJS) examples/train_ppo_snake.o
 	$(CC) $(CFLAGS) -o $@ $^ -lm $(BLAS_LIBS)
 
 $(TARGET_DQN): $(LIB_OBJS) examples/train_dqn.o
+	$(CC) $(CFLAGS) -o $@ $^ -lm $(BLAS_LIBS)
+
+$(TARGET_SAC): $(LIB_OBJS) examples/train_sac.o
 	$(CC) $(CFLAGS) -o $@ $^ -lm $(BLAS_LIBS)
 
 $(TARGET_HELLO): $(LIB_OBJS) examples/hello_rl.o
@@ -210,8 +215,9 @@ TEST_ENVS_BIN = test_envs
 TEST_RL_BIN = test_rl
 TEST_CKPT_BIN = test_checkpoint
 TEST_DQN_BIN = test_dqn
+TEST_SAC_BIN = test_sac
 TEST_BASE_BIN = test_base
-TEST_BINS = $(TEST_MAT_BIN) $(TEST_GRAD_BIN) $(TEST_ENVS_BIN) $(TEST_RL_BIN) $(TEST_CKPT_BIN) $(TEST_DQN_BIN) $(TEST_BASE_BIN)
+TEST_BINS = $(TEST_MAT_BIN) $(TEST_GRAD_BIN) $(TEST_ENVS_BIN) $(TEST_RL_BIN) $(TEST_CKPT_BIN) $(TEST_DQN_BIN) $(TEST_SAC_BIN) $(TEST_BASE_BIN)
 
 # The suites are also run under UndefinedBehaviorSanitizer. This is a variable
 # because target-specific CFLAGS reach the shared library objects as well, so a
@@ -247,6 +253,10 @@ $(TEST_DQN_BIN): $(LIB_OBJS) tests/test_dqn.c
 $(TEST_BASE_BIN): CFLAGS += $(UBSAN_FLAGS)
 $(TEST_BASE_BIN): $(LIB_OBJS) tests/test_base.c
 	$(CC) $(CFLAGS) -o $@ $(LIB_OBJS) tests/test_base.c -lm $(BLAS_LIBS)
+
+$(TEST_SAC_BIN): CFLAGS += $(UBSAN_FLAGS)
+$(TEST_SAC_BIN): $(LIB_OBJS) tests/test_sac.c
+	$(CC) $(CFLAGS) -o $@ $(LIB_OBJS) tests/test_sac.c -lm $(BLAS_LIBS)
 
 # ── Double-precision builds ─────────────────────────────────────────
 # Builds the whole library in f64 (RL_LIB_USE_DOUBLE) into its own object tree so
@@ -299,6 +309,8 @@ test: $(TEST_BINS) gradcheck-double
 	./$(TEST_CKPT_BIN)
 	@echo "=== Running test_dqn ==="
 	./$(TEST_DQN_BIN)
+	@echo "=== Running test_sac ==="
+	./$(TEST_SAC_BIN)
 	@echo "=== All tests complete ==="
 
 snake: release
@@ -309,6 +321,9 @@ cartpole: release
 
 dqn: release
 	./$(TARGET_DQN)
+
+sac: release
+	./$(TARGET_SAC)
 
 a2c: release
 	./$(TARGET_A2C)
@@ -367,11 +382,11 @@ bench-double: $(BENCH_DOUBLE_BIN)
 # ── Cleanup ─────────────────────────────────────────────────────────
 
 clean:
-	rm -f $(LIB_OBJS) examples/train_snake.o examples/train_cartpole.o examples/train_a2c.o examples/train_ppo.o examples/train_ppo_continuous.o examples/train_ppo_snake.o examples/train_dqn.o examples/hello_rl.o examples/bench.o
-	rm -f $(TARGET_SNAKE) $(TARGET_CARTPOLE) $(TARGET_A2C) $(TARGET_PPO) $(TARGET_PPO_CONT) $(TARGET_PPO_SNAKE) $(TARGET_DQN) $(TARGET_HELLO) $(TEST_BINS) $(BENCH_BIN)
+	rm -f $(LIB_OBJS) examples/train_snake.o examples/train_cartpole.o examples/train_a2c.o examples/train_ppo.o examples/train_ppo_continuous.o examples/train_ppo_snake.o examples/train_dqn.o examples/train_sac.o examples/hello_rl.o examples/bench.o
+	rm -f $(TARGET_SNAKE) $(TARGET_CARTPOLE) $(TARGET_A2C) $(TARGET_PPO) $(TARGET_PPO_CONT) $(TARGET_PPO_SNAKE) $(TARGET_DQN) $(TARGET_SAC) $(TARGET_HELLO) $(TEST_BINS) $(BENCH_BIN)
 	rm -f $(TEST_GRAD_DOUBLE_BIN) $(LIB_STATIC) $(SHARED_REAL) $(SHARED_LINK) $(SHARED_EXTRA_LINKS) rl_lib.pc
 	rm -rf build
 
 .PHONY: all release debug examples asan test test-double gradcheck-double clean lib install uninstall \
-        snake cartpole a2c ppo ppo-continuous dqn hello bench bench-cartpole bench-snake bench-throughput \
+        snake cartpole a2c ppo ppo-continuous dqn sac hello bench bench-cartpole bench-snake bench-throughput \
         bench-double

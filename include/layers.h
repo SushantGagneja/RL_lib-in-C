@@ -32,6 +32,57 @@ Tensor *dense_apply(Arena *arena, Net *model, const Dense *layer, Tensor *in);
 Tensor *mlp_new(Arena *arena, Net *model, Rng *rng, Tensor *in,
                 const u32 *layer_dims, u32 num_layers);
 
+// A dense layer whose input is split into an observation and an action block:
+//   y = w_obs @ obs + w_act @ act + bias
+// Used by the SAC critics, where Q(s, a) must be differentiable in a
+// graph-computed action: `act` can be any graph tensor and the reverse sweep
+// yields dQ/da through w_act, without a concatenation op. Both matrices use the
+// He-uniform limit of the joint fan-in (obs_dim + act_dim).
+typedef struct {
+  Tensor *w_obs; // (out_features x obs_features)
+  Tensor *w_act; // (out_features x act_features)
+  Tensor *bias;  // (out_features x 1), or NULL
+  u32 obs_features;
+  u32 act_features;
+  u32 out_features;
+} SplitDense;
+
+// The layer stack of a SAC critic, kept accessible so the trainer can apply the
+// same weights to a graph-computed action for the actor loss. Every tensor
+// pointer is a model parameter; copying the struct copies only the descriptors.
+typedef struct {
+  SplitDense split; // (obs, act) -> hidden_dims[0], or the Q value itself when
+                    // the critic is linear (num_hidden == 0)
+  Dense *hidden;    // (num_hidden - 1) ReLU layers, arena-owned
+  u32 num_hidden;   // entries in `hidden`
+  b32 split_is_head; // true when `split` already produces the scalar Q
+  Dense head;       // trunk -> 1 (unused when split_is_head)
+} SacQNet;
+
+// Applies the critic's layer stack to an (observation, action) pair inside
+// `model`'s graph. Both operands are (features x batch) matrices.
+Tensor *sac_q_apply(Arena *arena, Net *model, const SacQNet *q, Tensor *obs,
+                    Tensor *act);
+
+// Builds a SAC critic: the parameter stack of Q(s, a), plus the batched graph
+// (batch_input, batch_action) -> batch_logits (1 x B), a gradient-free `target`
+// (1 x B) and the MSE `cost` with its `loss_plan`, mirroring q_net_build. The
+// record lets net_set_batch_size rebuild it and a checkpoint prove it was
+// written for the same architecture.
+void sac_q_build(Arena *arena, Net *model, Rng *rng, u32 obs_dim, u32 act_dim,
+                 const u32 *hidden_dims, u32 num_hidden, u32 batch_size);
+
+// Reads the layer descriptors a sac_q_build model recorded. Returns false for
+// any other kind of model.
+b32 sac_q_layers(const Net *model, SacQNet *out);
+
+// SAC actor: obs -> mean head (act_dim x 1) plus the same learnable log_std
+// parameter as continuous_actor_critic_build, but no value head (SAC's critics
+// are separate networks). `log_std_init` seeds log(sigma); pass 0 for sigma = 1.
+void sac_actor_build(Arena *arena, Net *model, Rng *rng, u32 obs_dim,
+                     const u32 *hidden_dims, u32 num_hidden, u32 act_dim,
+                     u32 batch_size, real log_std_init);
+
 // Builds a discrete actor:
 //   input (obs_dim x 1) -> hidden (ReLU) -> logits -> softmax (act_dim x 1)
 // When batch_size > 0 it also builds batch_input (obs_dim x B) and
@@ -94,6 +145,8 @@ typedef enum {
   NET_ARCH_ACTOR_CRITIC,
   NET_ARCH_CONTINUOUS,
   NET_ARCH_Q,
+  NET_ARCH_SAC_ACTOR,
+  NET_ARCH_SAC_Q,
 } NetArchKind;
 
 // A read-only view of the architecture a builder recorded for `model`.

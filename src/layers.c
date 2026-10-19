@@ -72,6 +72,8 @@ struct NetArchSpec {
   Dense *trunk;           // num_hidden entries, shared with the rollout graph
   Dense head_a;           // policy head
   Dense head_b;           // value head (NET_ARCH_ACTOR_CRITIC only)
+  SacQNet q;              // critic stack (NET_ARCH_SAC_Q only)
+  b32 has_q;              // whether `q` was recorded
   u32 batch_size;         // current batch dimension of the batched graph
 };
 
@@ -105,6 +107,8 @@ static NetArchSpec *record_arch(Arena *arena, Net *model, NetArchKind kind,
   arch->trunk = trunk;
   arch->head_a = head_a;
   arch->head_b = head_b;
+  arch->q = (SacQNet){0};
+  arch->has_q = false;
   arch->batch_size = 0;
   arch->hidden_dims = ARENA_ARR(arena, u32, num_hidden > 0 ? num_hidden : 1u);
   for (u32 i = 0; i < num_hidden; i++) {
@@ -123,6 +127,22 @@ static void build_batch_graph(Arena *arena, Net *model, NetArchSpec *arch,
   model->batch_input =
       tensor_create(arena, model, arch->obs_dim, batch_size, TENSOR_PLAIN);
   Tensor *b = model->batch_input;
+
+  // The SAC critic has no observation-only trunk: its first layer consumes the
+  // action as well, so it is built on its own.
+  if (arch->kind == NET_ARCH_SAC_Q) {
+    model->batch_action =
+        tensor_create(arena, model, arch->act_dim, batch_size, TENSOR_PLAIN);
+    model->batch_logits =
+        sac_q_apply(arena, model, &arch->q, b, model->batch_action);
+    model->target = tensor_create(arena, model, 1, batch_size, TENSOR_PLAIN);
+    model->cost = tensor_mse(arena, model, model->batch_logits, model->target);
+    model->train = schedule_from(arena, model, model->batch_logits);
+    model->loss_plan = schedule_from(arena, model, model->cost);
+    arch->batch_size = batch_size;
+    return;
+  }
+
   for (u32 i = 0; i < arch->num_hidden; i++) {
     b = dense_apply(arena, model, &arch->trunk[i], b);
     b = tensor_relu(arena, model, b);
@@ -145,6 +165,9 @@ static void build_batch_graph(Arena *arena, Net *model, NetArchSpec *arch,
     model->cost = tensor_mse(arena, model, model->batch_logits, model->target);
     model->train = schedule_from(arena, model, model->batch_logits);
     model->loss_plan = schedule_from(arena, model, model->cost);
+  } else if (arch->kind == NET_ARCH_SAC_ACTOR) {
+    model->batch_mean = dense_apply(arena, model, &arch->head_a, b);
+    model->train = schedule_from(arena, model, model->batch_mean);
   } else {
     model->batch_logits = dense_apply(arena, model, &arch->head_a, b);
     model->train = schedule_from(arena, model, model->batch_logits);
@@ -304,6 +327,128 @@ void q_net_build(Arena *arena, Net *model, Rng *rng, u32 obs_dim,
   NetArchSpec *arch = record_arch(arena, model, NET_ARCH_Q, obs_dim, act_dim,
                                   hidden_dims, num_hidden, trunk, head,
                                   (Dense){0});
+  if (batch_size > 0) {
+    build_batch_graph(arena, model, arch, batch_size);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// SAC
+// ---------------------------------------------------------------------------
+
+Tensor *sac_q_apply(Arena *arena, Net *model, const SacQNet *q, Tensor *obs,
+                    Tensor *act) {
+  RL_LIB_ASSERT(q != NULL && obs != NULL && act != NULL,
+                "sac_q_apply: NULL argument");
+
+  Tensor *out = tensor_mm(arena, model, q->split.w_obs, obs);
+  out = tensor_add(arena, model, out,
+                   tensor_mm(arena, model, q->split.w_act, act));
+  if (q->split.bias != NULL) {
+    out = tensor_add(arena, model, out, q->split.bias);
+  }
+  if (q->split_is_head) {
+    return out;
+  }
+
+  out = tensor_relu(arena, model, out);
+  for (u32 i = 0; i < q->num_hidden; i++) {
+    out = dense_apply(arena, model, &q->hidden[i], out);
+    out = tensor_relu(arena, model, out);
+  }
+  return dense_apply(arena, model, &q->head, out);
+}
+
+void sac_q_build(Arena *arena, Net *model, Rng *rng, u32 obs_dim, u32 act_dim,
+                 const u32 *hidden_dims, u32 num_hidden, u32 batch_size) {
+  RL_LIB_ASSERT(obs_dim > 0 && act_dim > 0,
+                "sac_q_build: zero-sized observation or action");
+
+  SacQNet q = (SacQNet){0};
+  const u32 first_dim = (num_hidden > 0) ? hidden_dims[0] : 1u;
+
+  // The split first layer draws both blocks from the He-uniform limit of the
+  // joint fan-in, so a critic built this way starts at the same scale as one
+  // over a concatenated (s, a) input.
+  q.split.w_obs = make_param(arena, model, first_dim, obs_dim);
+  q.split.w_act = make_param(arena, model, first_dim, act_dim);
+  const real limit = real_sqrt(6.0f / (real)(obs_dim + act_dim));
+  if (rng != NULL) {
+    mat_rand_r(q.split.w_obs->val, rng, -limit, limit);
+    mat_rand_r(q.split.w_act->val, rng, -limit, limit);
+  } else {
+    mat_rand(q.split.w_obs->val, -limit, limit);
+    mat_rand(q.split.w_act->val, -limit, limit);
+  }
+  q.split.bias = make_param(arena, model, first_dim, 1);
+  mat_zero(q.split.bias->val);
+  q.split.obs_features = obs_dim;
+  q.split.act_features = act_dim;
+  q.split.out_features = first_dim;
+  q.split_is_head = (num_hidden == 0);
+
+  q.num_hidden = (num_hidden > 0) ? num_hidden - 1u : 0u;
+  q.hidden = ARENA_ARR(arena, Dense, q.num_hidden);
+  u32 width = first_dim;
+  for (u32 i = 0; i < q.num_hidden; i++) {
+    q.hidden[i] =
+        dense_new(arena, model, rng, width, hidden_dims[i + 1], true, 1.0f);
+    width = hidden_dims[i + 1];
+  }
+  if (!q.split_is_head) {
+    q.head = dense_new(arena, model, rng, width, 1, true, 1.0f);
+  }
+
+  // The recorded trunk is this critic's own stack (NULL: the split layer lives
+  // in `q`), so the ARCH block a checkpoint writes still names every width.
+  NetArchSpec *arch = record_arch(arena, model, NET_ARCH_SAC_Q, obs_dim,
+                                  act_dim, hidden_dims, num_hidden, NULL,
+                                  (Dense){0}, (Dense){0});
+  arch->q = q;
+  arch->has_q = true;
+
+  if (batch_size > 0) {
+    build_batch_graph(arena, model, arch, batch_size);
+  }
+}
+
+b32 sac_q_layers(const Net *model, SacQNet *out) {
+  if (model == NULL || out == NULL || model->arch == NULL ||
+      model->arch->kind != NET_ARCH_SAC_Q || !model->arch->has_q) {
+    return false;
+  }
+  *out = model->arch->q;
+  return true;
+}
+
+void sac_actor_build(Arena *arena, Net *model, Rng *rng, u32 obs_dim,
+                     const u32 *hidden_dims, u32 num_hidden, u32 act_dim,
+                     u32 batch_size, real log_std_init) {
+  RL_LIB_ASSERT(act_dim > 0, "sac_actor_build: act_dim == 0");
+
+  model->input = tensor_create(arena, model, obs_dim, 1, TENSOR_PLAIN);
+
+  Dense *trunk = ARENA_ARR(arena, Dense, num_hidden);
+  Tensor *cur = build_trunk(arena, model, rng, model->input, obs_dim,
+                            hidden_dims, num_hidden, trunk);
+  const u32 trunk_dim = (num_hidden > 0) ? hidden_dims[num_hidden - 1] : obs_dim;
+
+  Dense mean_head =
+      dense_new(arena, model, rng, trunk_dim, act_dim, true, 0.01f);
+  model->mean = dense_apply(arena, model, &mean_head, cur);
+
+  // Unlike the PPO actor, the SAC log_std parameter is consumed by the training
+  // graph (through the reparameterised sample and the log-density), so it is
+  // updated in the same reverse sweep as the mean head.
+  model->log_std =
+      tensor_create(arena, model, act_dim, 1, TENSOR_PARAM | TENSOR_GRAD);
+  mat_fill(model->log_std->val, log_std_init);
+
+  model->fwd = schedule_from(arena, model, model->mean);
+
+  NetArchSpec *arch = record_arch(arena, model, NET_ARCH_SAC_ACTOR, obs_dim,
+                                  act_dim, hidden_dims, num_hidden, trunk,
+                                  mean_head, (Dense){0});
   if (batch_size > 0) {
     build_batch_graph(arena, model, arch, batch_size);
   }

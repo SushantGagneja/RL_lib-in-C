@@ -106,6 +106,16 @@ typedef struct {
   real eps_end;        // final epsilon (<= 0 => 0.05)
   u32 eps_decay_steps; // env steps over which epsilon decays linearly
                        // (0 => half the run: epochs * rollout_size / 2)
+
+  // SAC-only knobs (train_sac). The DQN block above supplies the shared
+  // off-policy settings: `epochs` updates, `rollout_size` env steps per update,
+  // `replay_capacity`, `warmup_steps` and `train_every`. `target_sync` is not
+  // used: the twin critics are tracked with soft updates instead of copies.
+  real tau;            // soft target rate (<= 0 => 0.005)
+  real alpha;          // initial temperature (<= 0 => 0.2)
+  b32 auto_alpha;      // learn log_alpha against `target_entropy` (default off)
+  real alpha_lr;       // temperature learning rate (<= 0 => learning_rate)
+  real target_entropy; // entropy target for auto_alpha (<= 0 => -act_dim)
 } TrainCfg;
 
 // Allocates arena-backed observation/reward statistics.
