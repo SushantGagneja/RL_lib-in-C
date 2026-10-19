@@ -223,10 +223,15 @@ b32 mat_exp(Mat *out, const Mat *in);
 b32 mat_log(Mat *out, const Mat *in);
 b32 mat_div(Mat *out, const Mat *a, const Mat *b);
 b32 mat_softmax(Mat *out, const Mat *in);   // per column: softmax over rows
+b32 mat_log_softmax(Mat *out, const Mat *in); // per column, stable
+b32 mat_log_sech2(Mat *out, const Mat *in);   // log(sech^2), stable in the tails
 ```
 
 `mat_softmax` is column-wise: with a `(classes x batch)` input each column is an
 independent distribution, which is what a batched policy needs.
+`mat_log_softmax` subtracts the column maximum before exponentiating, and
+`mat_log_sech2` evaluates `2 * (log 2 - |u| - log1p(exp(-2|u|)))` so it stays
+finite where forming `tanh(u)^2` first underflows to `-inf`.
 
 ### Shape and reduction kernels
 
@@ -303,6 +308,8 @@ b32 mat_log_add_grad(Mat *out, const Mat *in, const Mat *grad);
 b32 mat_div_add_grad(Mat *a_grad, Mat *b_grad, const Mat *a, const Mat *b,
                      const Mat *grad);
 b32 mat_softmax_add_grad(Mat *out, const Mat *softmax_out, const Mat *grad);
+b32 mat_log_softmax_add_grad(Mat *out, const Mat *logp, const Mat *grad);
+b32 mat_log_sech2_add_grad(Mat *out, const Mat *in, const Mat *grad);
 b32 mat_mse_add_grad(Mat *pred_grad, const Mat *pred, const Mat *target, const Mat *grad);
 b32 mat_mse_clip_add_grad(Mat *pred_grad, const Mat *pred, const Mat *old_v,
                           const Mat *target, real clip, const Mat *grad);
@@ -407,6 +414,14 @@ depends on the sample but not on `mean` or `log_std`:
 `H = sum_d log(sigma_d) + D/2 * log(2*pi*e)`, the usual stand-in for the entropy
 bonus (the squashed density's entropy has no closed form).
 
+The same three conventions are available as graph builders —
+`tensor_gaussian_logp` and `tensor_gaussian_entropy` in `graph.h` — and
+`train_ppo_continuous` uses those, so `log_std` is an ordinary parameter reached
+by the reverse sweep instead of a gradient accumulated by hand. The fused
+`mat_gaussian_*` helpers above remain the reference implementation: the
+gradcheck suite compares the graph's forward values against them and differences
+the graph's backward passes directly.
+
 ---
 
 ## `simd.h`
@@ -455,7 +470,7 @@ typedef enum { TENSOR_PLAIN = 0, TENSOR_GRAD = 1, TENSOR_PARAM = 2 } TensorFlags
 typedef enum { OP_NONE = 0, OP_RELU, OP_TANH, OP_SOFTMAX, OP_ADD, OP_SUB, OP_MUL,
                OP_MM, OP_MSE, OP_REINFORCE, OP_SIGMOID, OP_EXP, OP_LOG,
                OP_DIV, OP_RESHAPE, OP_BROADCAST, OP_SUM, OP_MEAN, OP_GATHER,
-               OP_MIN, OP_MAX, OP_CLIP } OpKind;
+               OP_MIN, OP_MAX, OP_CLIP, OP_LOG_SOFTMAX, OP_LOG_SECH2 } OpKind;
 
 struct Tensor {
   u32 index; u32 flags; u8 arity; OpKind op;
@@ -464,6 +479,7 @@ struct Tensor {
   u32 aux_rows, aux_cols;  // target shape for reshape/broadcast
   u32 axis;                // ReduceMode for sum/mean
   real aux_lo, aux_hi;     // clip bounds
+  u8 aux_flags;            // clip variant (straight-through when set)
 };
 
 typedef struct { Tensor **ops; u32 len; } Schedule;
@@ -515,6 +531,13 @@ Tensor *tensor_gather(Arena *arena, Net *model, Tensor *values, Tensor *indices)
 Tensor *tensor_min(Arena *arena, Net *model, Tensor *a, Tensor *b);
 Tensor *tensor_max(Arena *arena, Net *model, Tensor *a, Tensor *b);
 Tensor *tensor_clip(Arena *arena, Net *model, Tensor *input, real lo, real hi);
+Tensor *tensor_clip_straight(Arena *arena, Net *model, Tensor *input, real lo, real hi);
+Tensor *tensor_log_softmax(Arena *arena, Net *model, Tensor *input);
+Tensor *tensor_log_sech2(Arena *arena, Net *model, Tensor *input);
+
+Tensor *tensor_gaussian_logp(Arena *arena, Net *model, Tensor *mean, Tensor *log_std,
+                             Tensor *u, const real *action_min, const real *action_max);
+Tensor *tensor_gaussian_entropy(Arena *arena, Net *model, Tensor *log_std);
 
 Schedule schedule_from(Arena *arena, Net *model, Tensor *out_var);
 Schedule schedule_from_roots(Arena *arena, Net *model, Tensor **roots, u32 num_roots);
@@ -540,6 +563,19 @@ repeated index accumulates, min/max route the gradient to the selected operand
 (ties to the first), and clip passes gradient inside `[lo, hi]` only. The
 constructors reject shapes that cannot work with an assert; the `mat_*` kernels
 underneath return `false` instead.
+
+`tensor_clip_straight` is the straight-through variant: it clamps the forward
+value but passes the gradient unchanged, the convention the Gaussian mean bound
+uses (an exact zero gradient outside the bound would park the mean head).
+`tensor_log_softmax` is the stable per-column log-softmax
+(`g - softmax(z) * column_sum(g)` backward), and `tensor_log_sech2` evaluates
+`log(sech^2(u))` as `2 * (log 2 - |u| - log1p(exp(-2|u|)))` with derivative
+`-2 * tanh(u)`, so it stays finite where forming `tanh(u)^2` first underflows.
+`tensor_gaussian_logp` and `tensor_gaussian_entropy` assemble the squashed
+diagonal-Gaussian log-density and its entropy from those pieces, with the mean
+clamped to `+-RL_GAUSSIAN_MEAN_BOUND` straight-through and `log_std` clamped to
+`[RL_GAUSSIAN_LOG_STD_MIN, RL_GAUSSIAN_LOG_STD_MAX]` with a zero gradient while
+active; the PPO trainers build their losses from them.
 
 Two ways to build a schedule: `schedule_from` for a single output, and
 `schedule_from_roots` when a model has several heads. The latter exists because

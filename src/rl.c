@@ -844,13 +844,84 @@ void train_ppo(Env *env, Net *model, const TrainCfg *config,
   u32 *step_actions = ARENA_ARR(train_arena, u32, num_envs);
   u32 *order = ARENA_ARR(train_arena, u32, total);
   u32 *batch_acts = ARENA_ARR(train_arena, u32, batch_size);
-  real *batch_advs = ARENA_ARR(train_arena, real, batch_size);
   real *batch_oldlp = ARENA_ARR(train_arena, real, batch_size);
-  Mat *target_val_mat = mat_new(train_arena, 1, batch_size);
-  Mat *old_val_mat = mat_new(train_arena, 1, batch_size);
-  Mat *seed_pi = mat_new(train_arena, 1, 1);
-  Mat *seed_vf = mat_new(train_arena, 1, 1);
-  Mat *seed_ent = mat_new(train_arena, 1, 1);
+
+  // The PPO surrogate is a graph: data tensors are refilled on every minibatch
+  // and the coefficients are scalar tensors, so schedules and config changes do
+  // not need a second graph. The reverse sweep is then the engine's, not
+  // hand-seeded gradients on intermediate activations.
+  Tensor *g_actions =
+      tensor_create(train_arena, model, 1, batch_size, TENSOR_PLAIN);
+  Tensor *g_adv =
+      tensor_create(train_arena, model, 1, batch_size, TENSOR_PLAIN);
+  Tensor *g_oldlp =
+      tensor_create(train_arena, model, 1, batch_size, TENSOR_PLAIN);
+  Tensor *g_returns =
+      tensor_create(train_arena, model, 1, batch_size, TENSOR_PLAIN);
+  Tensor *g_oldval =
+      tensor_create(train_arena, model, 1, batch_size, TENSOR_PLAIN);
+  Tensor *g_ent_coef =
+      tensor_create(train_arena, model, 1, 1, TENSOR_PLAIN);
+  Tensor *g_vf_coef = tensor_create(train_arena, model, 1, 1, TENSOR_PLAIN);
+  Tensor *g_neg_one = tensor_create(train_arena, model, 1, 1, TENSOR_PLAIN);
+  g_neg_one->val->data[0] = -1.0f;
+
+  Tensor *g_logp = tensor_log_softmax(train_arena, model, model->batch_logits);
+  Tensor *g_taken = tensor_gather(train_arena, model, g_logp, g_actions);
+  // Same ratio guard as the fused kernel: exp() overflows past ~88 nats and a
+  // log-ratio beyond +-20 is far outside the trust region (the clip is +-0.2).
+  // Past the guard the graph contributes zero gradient, where the fused kernel
+  // kept the advantage; only samples no policy reaches distinguish the two.
+  Tensor *g_ratio = tensor_exp(
+      train_arena, model,
+      tensor_clip(train_arena, model,
+                  tensor_sub(train_arena, model, g_taken, g_oldlp), -20.0f,
+                  20.0f));
+  Tensor *g_s1 = tensor_mul(train_arena, model, g_ratio, g_adv);
+  Tensor *g_s2 = tensor_mul(
+      train_arena, model,
+      tensor_clip(train_arena, model, g_ratio, 1.0f - clip_eps,
+                  1.0f + clip_eps),
+      g_adv);
+  Tensor *g_pi = tensor_min(train_arena, model, g_s1, g_s2);
+  Tensor *g_pi_loss = tensor_mul(
+      train_arena, model,
+      tensor_mean(train_arena, model, g_pi, REDUCE_COLS), g_neg_one);
+
+  Tensor *g_probs = tensor_exp(train_arena, model, g_logp);
+  Tensor *g_neg_ent = tensor_mean(
+      train_arena, model,
+      tensor_sum(train_arena, model,
+                 tensor_mul(train_arena, model, g_probs, g_logp), REDUCE_ROWS),
+      REDUCE_COLS);
+
+  Tensor *g_vdiff =
+      tensor_sub(train_arena, model, model->batch_value, g_oldval);
+  Tensor *g_vpred = tensor_add(
+      train_arena, model,
+      (vf_clip > 0.0f)
+          ? tensor_clip(train_arena, model, g_vdiff, -vf_clip, vf_clip)
+          : g_vdiff,
+      g_oldval);
+  Tensor *g_verr =
+      tensor_sub(train_arena, model, model->batch_value, g_returns);
+  Tensor *g_sq = tensor_mul(train_arena, model, g_verr, g_verr);
+  if (vf_clip > 0.0f) {
+    Tensor *g_verr_clip = tensor_sub(train_arena, model, g_vpred, g_returns);
+    g_sq = tensor_max(train_arena, model, g_sq,
+                      tensor_mul(train_arena, model, g_verr_clip,
+                                 g_verr_clip));
+  }
+
+  Tensor *g_ent_term =
+      tensor_mul(train_arena, model, g_ent_coef, g_neg_ent);
+  Tensor *g_vloss = tensor_mul(
+      train_arena, model,
+      tensor_mean(train_arena, model, g_sq, REDUCE_ALL), g_vf_coef);
+  Tensor *g_cost = tensor_add(
+      train_arena, model,
+      tensor_add(train_arena, model, g_pi_loss, g_ent_term), g_vloss);
+  Schedule g_loss = schedule_from(train_arena, model, g_cost);
 
   for (u32 i = 0; i < num_envs; i++) {
     ep_ret[i] = 0.0f;
@@ -1004,14 +1075,17 @@ void train_ppo(Env *env, Net *model, const TrainCfg *config,
             model->batch_input->val->data[r * batch_size + b] = obs[r];
           }
           batch_acts[b] = acts[idx];
-          batch_advs[b] = adv_buf[idx];
           batch_oldlp[b] = logp_old[idx];
-          target_val_mat->data[b] = ret_buf[idx];
-          old_val_mat->data[b] = val_buf[idx];
+          g_actions->val->data[b] = (real)acts[idx];
+          g_adv->val->data[b] = adv_buf[idx];
+          g_oldlp->val->data[b] = logp_old[idx];
+          g_returns->val->data[b] = ret_buf[idx];
+          g_oldval->val->data[b] = val_buf[idx];
         }
+        g_ent_coef->val->data[0] = entropy_t;
+        g_vf_coef->val->data[0] = vf_coef;
 
-        schedule_run(&model->train);
-        schedule_zero_act(&model->train);
+        schedule_run(&g_loss);
 
         if (target_kl > 0.0f) {
           kl_sum += ppo_approx_kl(model->batch_logits->val, batch_acts,
@@ -1019,32 +1093,9 @@ void train_ppo(Env *env, Net *model, const TrainCfg *config,
           kl_count++;
         }
 
-        // The clipped surrogate is already a mean over the minibatch, so its
-        // gradient seed is 1; the value and entropy terms are weighted.
-        seed_pi->data[0] = 1.0f;
-        RL_LIB_CHECK(mat_ppo_policy_add_grad(
-            model->batch_logits->grad, model->batch_logits->val, batch_acts,
-            batch_advs, batch_oldlp, clip_eps, batch_size, seed_pi));
-
-        if (entropy_t != 0.0f) {
-          seed_ent->data[0] = -entropy_t;
-          RL_LIB_CHECK(mat_entropy_add_grad(model->batch_logits->grad,
-                                            model->batch_logits->val,
-                                            batch_size, seed_ent));
-        }
-
-        seed_vf->data[0] = vf_coef;
-        if (vf_clip > 0.0f) {
-          RL_LIB_CHECK(mat_mse_clip_add_grad(
-              model->batch_value->grad, model->batch_value->val, old_val_mat,
-              target_val_mat, vf_clip, seed_vf));
-        } else {
-          RL_LIB_CHECK(mat_mse_add_grad(model->batch_value->grad,
-                                        model->batch_value->val,
-                                        target_val_mat, seed_vf));
-        }
-
-        schedule_grad_accum(&model->train);
+        // Surrogate, entropy bonus and clipped value loss all live in the
+        // graph, so the reverse sweep needs only a unit seed on the total.
+        schedule_grad_from(&g_loss, g_cost, true);
 
         if (config->max_grad_norm > 0.0f) {
           clip_grad_norm(model, config->max_grad_norm);
@@ -1349,19 +1400,82 @@ void train_ppo_continuous(Env *env, Net *model, const TrainCfg *config,
 
   real *step_actions = ARENA_ARR(train_arena, real, (u64)num_envs * act_dim);
   u32 *order = ARENA_ARR(train_arena, u32, total);
-  Mat *batch_us = mat_new(train_arena, act_dim, batch_size);
-  real *batch_advs = ARENA_ARR(train_arena, real, batch_size);
   real *batch_oldlp = ARENA_ARR(train_arena, real, batch_size);
-  Mat *target_val_mat = mat_new(train_arena, 1, batch_size);
-  Mat *old_val_mat = mat_new(train_arena, 1, batch_size);
   Mat *kl_logp_mat = mat_new(train_arena, 1, batch_size);
   Mat *sample_action_mat = mat_new(train_arena, act_dim, 1);
   Mat *sample_u_mat = mat_new(train_arena, act_dim, 1);
   real *us = ARENA_ARR(train_arena, real, (u64)total * act_dim);
   Mat *logp_mat = mat_new(train_arena, 1, 1);
-  Mat *seed_pi = mat_new(train_arena, 1, 1);
-  Mat *seed_vf = mat_new(train_arena, 1, 1);
-  Mat *seed_ent = mat_new(train_arena, 1, 1);
+
+  // Graph-based squashed-Gaussian surrogate, mirroring the discrete trainer.
+  // The log-density and entropy are reusable graph ops, so log_std is an
+  // ordinary parameter inside the graph instead of a gradient updated by hand.
+  Tensor *g_u =
+      tensor_create(train_arena, model, act_dim, batch_size, TENSOR_PLAIN);
+  Tensor *g_adv =
+      tensor_create(train_arena, model, 1, batch_size, TENSOR_PLAIN);
+  Tensor *g_oldlp =
+      tensor_create(train_arena, model, 1, batch_size, TENSOR_PLAIN);
+  Tensor *g_returns =
+      tensor_create(train_arena, model, 1, batch_size, TENSOR_PLAIN);
+  Tensor *g_oldval =
+      tensor_create(train_arena, model, 1, batch_size, TENSOR_PLAIN);
+  Tensor *g_ent_coef =
+      tensor_create(train_arena, model, 1, 1, TENSOR_PLAIN);
+  Tensor *g_vf_coef = tensor_create(train_arena, model, 1, 1, TENSOR_PLAIN);
+  Tensor *g_neg_one = tensor_create(train_arena, model, 1, 1, TENSOR_PLAIN);
+  g_neg_one->val->data[0] = -1.0f;
+
+  Tensor *g_logp = tensor_gaussian_logp(train_arena, model, model->batch_mean,
+                                        model->log_std, g_u,
+                                        env->action_min, env->action_max);
+
+  Tensor *g_ratio = tensor_exp(
+      train_arena, model,
+      tensor_clip(train_arena, model,
+                  tensor_sub(train_arena, model, g_logp, g_oldlp), -20.0f,
+                  20.0f));
+  Tensor *g_s1 = tensor_mul(train_arena, model, g_ratio, g_adv);
+  Tensor *g_s2 = tensor_mul(
+      train_arena, model,
+      tensor_clip(train_arena, model, g_ratio, 1.0f - clip_eps,
+                  1.0f + clip_eps),
+      g_adv);
+  Tensor *g_pi = tensor_min(train_arena, model, g_s1, g_s2);
+  Tensor *g_pi_loss = tensor_mul(
+      train_arena, model,
+      tensor_mean(train_arena, model, g_pi, REDUCE_COLS), g_neg_one);
+
+  Tensor *g_ent_term = tensor_mul(
+      train_arena, model, g_ent_coef,
+      tensor_mul(train_arena, model,
+                 tensor_gaussian_entropy(train_arena, model, model->log_std),
+                 g_neg_one));
+
+  Tensor *g_vdiff =
+      tensor_sub(train_arena, model, model->batch_value, g_oldval);
+  Tensor *g_vpred = tensor_add(
+      train_arena, model,
+      (vf_clip > 0.0f)
+          ? tensor_clip(train_arena, model, g_vdiff, -vf_clip, vf_clip)
+          : g_vdiff,
+      g_oldval);
+  Tensor *g_verr =
+      tensor_sub(train_arena, model, model->batch_value, g_returns);
+  Tensor *g_sq = tensor_mul(train_arena, model, g_verr, g_verr);
+  if (vf_clip > 0.0f) {
+    Tensor *g_verr_clip = tensor_sub(train_arena, model, g_vpred, g_returns);
+    g_sq = tensor_max(train_arena, model, g_sq,
+                      tensor_mul(train_arena, model, g_verr_clip,
+                                 g_verr_clip));
+  }
+  Tensor *g_vloss = tensor_mul(
+      train_arena, model,
+      tensor_mean(train_arena, model, g_sq, REDUCE_ALL), g_vf_coef);
+  Tensor *g_cost = tensor_add(
+      train_arena, model,
+      tensor_add(train_arena, model, g_pi_loss, g_ent_term), g_vloss);
+  Schedule g_loss = schedule_from(train_arena, model, g_cost);
 
   for (u32 i = 0; i < num_envs; i++) {
     ep_ret[i] = 0.0f;
@@ -1521,56 +1635,31 @@ void train_ppo_continuous(Env *env, Net *model, const TrainCfg *config,
             model->batch_input->val->data[r * batch_size + b] = obs[r];
           }
           for (u32 d = 0; d < act_dim; d++) {
-            batch_us->data[(u64)d * batch_size + b] = us[idx * act_dim + d];
+            g_u->val->data[(u64)d * batch_size + b] = us[idx * act_dim + d];
           }
-          batch_advs[b] = adv_buf[idx];
           batch_oldlp[b] = logp_old[idx];
-          target_val_mat->data[b] = ret_buf[idx];
-          old_val_mat->data[b] = val_buf[idx];
+          g_adv->val->data[b] = adv_buf[idx];
+          g_oldlp->val->data[b] = logp_old[idx];
+          g_returns->val->data[b] = ret_buf[idx];
+          g_oldval->val->data[b] = val_buf[idx];
         }
+        g_ent_coef->val->data[0] = entropy_t;
+        g_vf_coef->val->data[0] = vf_coef;
 
-        schedule_run(&model->train);
-        schedule_zero_act(&model->train);
+        schedule_run(&g_loss);
 
         if (target_kl > 0.0f) {
           RL_LIB_CHECK(mat_gaussian_logp(
               kl_logp_mat, model->batch_mean->val, model->log_std->val,
-              batch_us, env->action_min, env->action_max, batch_size));
+              g_u->val, env->action_min, env->action_max, batch_size));
           kl_sum += ppo_approx_kl_continuous(kl_logp_mat, batch_oldlp,
                                              batch_size);
           kl_count++;
         }
 
-        // The Gaussian surrogate is already a mean over the minibatch, so its
-        // seed is 1; the value and entropy terms are weighted. The policy
-        // gradient lands on the batch mean (an activation) and directly on the
-        // log_std parameter, which no schedule edge reaches.
-        seed_pi->data[0] = 1.0f;
-        RL_LIB_CHECK(mat_gaussian_ppo_add_grad(
-            model->batch_mean->grad, model->log_std->grad,
-            model->batch_mean->val, model->log_std->val, batch_us, batch_advs,
-            batch_oldlp, env->action_min, env->action_max, clip_eps, batch_size,
-            seed_pi));
-
-        if (entropy_t != 0.0f) {
-          seed_ent->data[0] = -entropy_t;
-          RL_LIB_CHECK(mat_gaussian_entropy_add_grad(model->log_std->grad,
-                                                    model->log_std->val,
-                                                    seed_ent));
-        }
-
-        seed_vf->data[0] = vf_coef;
-        if (vf_clip > 0.0f) {
-          RL_LIB_CHECK(mat_mse_clip_add_grad(
-              model->batch_value->grad, model->batch_value->val, old_val_mat,
-              target_val_mat, vf_clip, seed_vf));
-        } else {
-          RL_LIB_CHECK(mat_mse_add_grad(model->batch_value->grad,
-                                        model->batch_value->val,
-                                        target_val_mat, seed_vf));
-        }
-
-        schedule_grad_accum(&model->train);
+        // Surrogate, entropy bonus and clipped value loss all live in the
+        // graph, so the reverse sweep needs only a unit seed on the total.
+        schedule_grad_from(&g_loss, g_cost, true);
 
         if (config->max_grad_norm > 0.0f) {
           clip_grad_norm(model, config->max_grad_norm);

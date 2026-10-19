@@ -44,6 +44,18 @@ b32 mat_log(Mat *out, const Mat *in);
 b32 mat_div(Mat *out, const Mat *a, const Mat *b); // a / b, elementwise
 b32 mat_softmax(Mat *out, const Mat *in); // Per-column mat_softmax for batching
 
+// Per-column log-softmax, computed stably (the column max is subtracted before
+// the exponential). `mat_log_softmax_add_grad` accumulates the reverse-mode
+// contribution: g - softmax(z) * column_sum(g).
+b32 mat_log_softmax(Mat *out, const Mat *in);
+b32 mat_log_softmax_add_grad(Mat *out, const Mat *logp, const Mat *grad);
+
+// log(sech^2(u)) = log(1 - tanh(u)^2), evaluated as 2*(log 2 - |u| -
+// log1p(exp(-2|u|))) so it stays finite for any u (forming tanh(u)^2 first
+// underflows to -inf once tanh saturates). The derivative is -2*tanh(u).
+b32 mat_log_sech2(Mat *out, const Mat *in);
+b32 mat_log_sech2_add_grad(Mat *out, const Mat *in, const Mat *grad);
+
 // ── Shape, reduction and selection kernels (autograd shape ops) ───────
 // Each forward function requires `out` to already have the documented shape and
 // returns false instead of aborting on a mismatch: reshape needs the same

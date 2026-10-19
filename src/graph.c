@@ -71,6 +71,8 @@ static u8 op_arity(OpKind op) {
   case OP_SUM:
   case OP_MEAN:
   case OP_CLIP:
+  case OP_LOG_SOFTMAX:
+  case OP_LOG_SECH2:
     return 1u;
   default:
     return 2u;
@@ -90,6 +92,8 @@ static ShapeRule *shape_rule(OpKind op) {
   case OP_DIV:
   case OP_MIN:
   case OP_MAX:
+  case OP_LOG_SOFTMAX:
+  case OP_LOG_SECH2:
     return shape_same;
   case OP_ADD:
   case OP_SUB:
@@ -141,6 +145,7 @@ Tensor *tensor_create(Arena *arena, Net *model, u32 rows, u32 cols,
   out->axis = 0u;
   out->aux_lo = (real)0.0;
   out->aux_hi = (real)0.0;
+  out->aux_flags = 0u;
   out->val = mat_new(arena, rows, cols);
   out->grad = (flags & TENSOR_GRAD) ? mat_new(arena, rows, cols) : NULL;
 
@@ -204,6 +209,83 @@ Tensor *tensor_div(Arena *arena, Net *model, Tensor *a, Tensor *b) {
 
 Tensor *tensor_softmax(Arena *arena, Net *model, Tensor *input) {
   return make_op(arena, model, OP_SOFTMAX, input, NULL);
+}
+
+Tensor *tensor_log_softmax(Arena *arena, Net *model, Tensor *input) {
+  return make_op(arena, model, OP_LOG_SOFTMAX, input, NULL);
+}
+
+Tensor *tensor_log_sech2(Arena *arena, Net *model, Tensor *input) {
+  return make_op(arena, model, OP_LOG_SECH2, input, NULL);
+}
+
+Tensor *tensor_gaussian_logp(Arena *arena, Net *model, Tensor *mean,
+                             Tensor *log_std, Tensor *u,
+                             const real *action_min,
+                             const real *action_max) {
+  RL_LIB_ASSERT(mean != NULL && log_std != NULL && u != NULL &&
+                    action_min != NULL && action_max != NULL,
+                "tensor_gaussian_logp: NULL argument");
+  const u32 dim = mean->val->rows;
+  const u32 batch = mean->val->cols;
+  RL_LIB_ASSERT(dim > 0u && batch > 0u && log_std->val->rows == dim &&
+                    log_std->val->cols == 1u && u->val->rows == dim &&
+                    u->val->cols == batch,
+                "tensor_gaussian_logp: shape mismatch");
+
+  // sum_d (0.5*log(2*pi) + log(half_d)) is a constant of the box: fold it into
+  // one scalar leaf rather than paying for log() nodes in the graph.
+  real const_sum = 0.0f;
+  const real half_log_2pi =
+      (real)0.5 * (real)1.8378770664093454835606594728112;
+  for (u32 d = 0; d < dim; d++) {
+    const real half = (real)0.5 * (action_max[d] - action_min[d]);
+    const_sum += half_log_2pi + real_log(half);
+  }
+  Tensor *neg_half = tensor_create(arena, model, 1, 1, TENSOR_PLAIN);
+  Tensor *const_row = tensor_create(arena, model, 1, 1, TENSOR_PLAIN);
+  neg_half->val->data[0] = (real)-0.5;
+  const_row->val->data[0] = const_sum;
+
+  Tensor *clamped_mean = tensor_clip_straight(
+      arena, model, mean, -RL_GAUSSIAN_MEAN_BOUND, RL_GAUSSIAN_MEAN_BOUND);
+  Tensor *clamped_log_std = tensor_clip(arena, model, log_std,
+                                        RL_GAUSSIAN_LOG_STD_MIN,
+                                        RL_GAUSSIAN_LOG_STD_MAX);
+  Tensor *sigma_full = tensor_broadcast(
+      arena, model, tensor_exp(arena, model, clamped_log_std), dim, batch);
+  Tensor *eps =
+      tensor_div(arena, model,
+                 tensor_sub(arena, model, u, clamped_mean), sigma_full);
+  Tensor *quad = tensor_mul(
+      arena, model,
+      tensor_sum(arena, model, tensor_mul(arena, model, eps, eps), REDUCE_ROWS),
+      tensor_broadcast(arena, model, neg_half, 1, batch));
+  Tensor *log_sigma_row = tensor_broadcast(
+      arena, model,
+      tensor_sum(arena, model, clamped_log_std, REDUCE_ROWS), 1, batch);
+  Tensor *sech = tensor_sum(
+      arena, model, tensor_log_sech2(arena, model, u), REDUCE_ROWS);
+  return tensor_sub(
+      arena, model,
+      tensor_sub(
+          arena, model,
+          tensor_sub(arena, model, quad, log_sigma_row), sech),
+      tensor_broadcast(arena, model, const_row, 1, batch));
+}
+
+Tensor *tensor_gaussian_entropy(Arena *arena, Net *model, Tensor *log_std) {
+  RL_LIB_ASSERT(log_std != NULL && log_std->val->rows > 0u &&
+                    log_std->val->cols == 1u,
+                "tensor_gaussian_entropy: log_std must be D x 1");
+  Tensor *clamped = tensor_clip(arena, model, log_std, RL_GAUSSIAN_LOG_STD_MIN,
+                                RL_GAUSSIAN_LOG_STD_MAX);
+  Tensor *const_term = tensor_create(arena, model, 1, 1, TENSOR_PLAIN);
+  const_term->val->data[0] =
+      (real)0.5 * (real)log_std->val->rows *
+      (real)2.8378770664093454835606594728112;
+  return tensor_add(arena, model,
+                    tensor_sum(arena, model, clamped, REDUCE_ROWS), const_term);
 }
 
 Tensor *tensor_add(Arena *arena, Net *model, Tensor *a, Tensor *b) {
@@ -318,8 +400,8 @@ Tensor *tensor_max(Arena *arena, Net *model, Tensor *a, Tensor *b) {
   return make_op(arena, model, OP_MAX, a, b);
 }
 
-Tensor *tensor_clip(Arena *arena, Net *model, Tensor *input, real lo,
-                    real hi) {
+static Tensor *make_clip(Arena *arena, Net *model, Tensor *input, real lo,
+                         real hi, u8 flags) {
   RL_LIB_ASSERT(input != NULL, "tensor_clip: NULL input");
   RL_LIB_ASSERT(lo <= hi, "tensor_clip: lo must not exceed hi");
   Tensor *out = make_node(arena, model, OP_CLIP, input, NULL,
@@ -327,7 +409,18 @@ Tensor *tensor_clip(Arena *arena, Net *model, Tensor *input, real lo,
                           (input->flags & TENSOR_GRAD) != 0u);
   out->aux_lo = lo;
   out->aux_hi = hi;
+  out->aux_flags = flags;
   return out;
+}
+
+Tensor *tensor_clip(Arena *arena, Net *model, Tensor *input, real lo,
+                    real hi) {
+  return make_clip(arena, model, input, lo, hi, TENSOR_AUX_NONE);
+}
+
+Tensor *tensor_clip_straight(Arena *arena, Net *model, Tensor *input, real lo,
+                             real hi) {
+  return make_clip(arena, model, input, lo, hi, TENSOR_AUX_STRAIGHT_CLIP);
 }
 
 // ---------------------------------------------------------------------------
@@ -445,6 +538,12 @@ static void apply_forward(Tensor *t) {
   case OP_SOFTMAX:
     RL_LIB_CHECK(mat_softmax(t->val, t->inputs[0]->val));
     return;
+  case OP_LOG_SOFTMAX:
+    RL_LIB_CHECK(mat_log_softmax(t->val, t->inputs[0]->val));
+    return;
+  case OP_LOG_SECH2:
+    RL_LIB_CHECK(mat_log_sech2(t->val, t->inputs[0]->val));
+    return;
   case OP_ADD:
     RL_LIB_CHECK(mat_add(t->val, t->inputs[0]->val, t->inputs[1]->val));
     return;
@@ -550,6 +649,16 @@ static void apply_backward(Tensor *t) {
       RL_LIB_CHECK(mat_softmax_add_grad(a->grad, t->val, t->grad));
     }
     return;
+  case OP_LOG_SOFTMAX:
+    if (wants_grad(a)) {
+      RL_LIB_CHECK(mat_log_softmax_add_grad(a->grad, t->val, t->grad));
+    }
+    return;
+  case OP_LOG_SECH2:
+    if (wants_grad(a)) {
+      RL_LIB_CHECK(mat_log_sech2_add_grad(a->grad, a->val, t->grad));
+    }
+    return;
   case OP_ADD:
     RL_LIB_CHECK(mat_add_broadcast_grad(wants_grad(a) ? a->grad : NULL,
                                      wants_grad(b) ? b->grad : NULL, t->grad));
@@ -618,8 +727,14 @@ static void apply_backward(Tensor *t) {
     return;
   case OP_CLIP:
     if (wants_grad(a)) {
-      RL_LIB_CHECK(mat_clip_add_grad(a->grad, a->val, t->aux_lo, t->aux_hi,
-                                     t->grad));
+      if ((t->aux_flags & TENSOR_AUX_STRAIGHT_CLIP) != 0u) {
+        // Straight-through clamp: the forward value is bounded but the
+        // gradient passes unchanged.
+        RL_LIB_CHECK(mat_add_broadcast_grad(a->grad, NULL, t->grad));
+      } else {
+        RL_LIB_CHECK(mat_clip_add_grad(a->grad, a->val, t->aux_lo, t->aux_hi,
+                                       t->grad));
+      }
     }
     return;
   }

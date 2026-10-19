@@ -1168,6 +1168,290 @@ static void test_gradcheck_minmax_clip(void) {
   arena_dispose(arena);
 }
 
+// ── Test: log-softmax ────────────────────────────────────────────────
+
+static void test_gradcheck_log_softmax(void) {
+  printf("\n[gradcheck: log-softmax]\n");
+
+  Arena *arena = arena_new(MiB(32));
+  Net *model = ARENA_OBJ(arena, Net);
+
+  Tensor *logits =
+      tensor_create(arena, model, 4, 3, TENSOR_PARAM | TENSOR_GRAD);
+  Tensor *logp = tensor_log_softmax(arena, model, logits);
+  Schedule graph = schedule_from(arena, model, logp);
+
+  rng_seed_g(135791, 13);
+  mat_rand(logits->val, -2.0f, 2.0f);
+
+  schedule_run(&graph);
+  b32 values_ok = true;
+  for (u32 c = 0; c < 3u; c++) {
+    real sum = 0.0f;
+    for (u32 r = 0; r < 4u; r++) {
+      sum += real_exp(logp->val->data[(u64)r * 3u + c]);
+    }
+    if (real_fabs(sum - 1.0f) > REAL_C(1e-5)) {
+      values_ok = false;
+    }
+  }
+  printf("  columns exponentiate to one... %s\n", values_ok ? "OK" : "FAIL");
+
+  printf("  logits (4x3)... ");
+  u32 f = gradcheck_param(&graph, logp, logits, GRAD_H, GRAD_TOL);
+  printf("%s (%u failures)\n", f == 0 ? "OK" : "FAIL", f);
+
+  if (f == 0 && values_ok)
+    tests_passed++;
+  else
+    tests_failed++;
+
+  arena_dispose(arena);
+}
+
+// ── Test: PPO surrogate composed from graph ops ──────────────────────
+
+static void test_gradcheck_ppo_graph_loss(void) {
+  printf("\n[gradcheck: PPO surrogate from graph ops]\n");
+
+  Arena *arena = arena_new(MiB(32));
+  Net *model = ARENA_OBJ(arena, Net);
+
+  Tensor *logits =
+      tensor_create(arena, model, 3, 4, TENSOR_PARAM | TENSOR_GRAD);
+  Tensor *values =
+      tensor_create(arena, model, 1, 4, TENSOR_PARAM | TENSOR_GRAD);
+  Tensor *actions = tensor_create(arena, model, 1, 4, TENSOR_PLAIN);
+  Tensor *adv = tensor_create(arena, model, 1, 4, TENSOR_PLAIN);
+  Tensor *old_logp = tensor_create(arena, model, 1, 4, TENSOR_PLAIN);
+  Tensor *old_val = tensor_create(arena, model, 1, 4, TENSOR_PLAIN);
+  Tensor *ret = tensor_create(arena, model, 1, 4, TENSOR_PLAIN);
+  Tensor *coef = tensor_create(arena, model, 1, 1, TENSOR_PLAIN);
+  Tensor *vf_coef = tensor_create(arena, model, 1, 1, TENSOR_PLAIN);
+  Tensor *zero = tensor_create(arena, model, 1, 1, TENSOR_PLAIN);
+
+  actions->val->data[0] = (real)0;
+  actions->val->data[1] = (real)2;
+  actions->val->data[2] = (real)1;
+  actions->val->data[3] = (real)2;
+  adv->val->data[0] = -0.5f;
+  adv->val->data[1] = 0.7f;
+  adv->val->data[2] = -0.3f;
+  adv->val->data[3] = 0.9f;
+  for (u32 i = 0; i < 4u; i++) {
+    old_logp->val->data[i] = -1.0f;
+  }
+  // Value data chosen so one entry sits inside the clip band, one outside with
+  // the raw error smaller (zero gradient), one outside with the raw error
+  // larger (gradient flows) and one more inside.
+  values->val->data[0] = 0.1f;
+  values->val->data[1] = 1.0f;
+  values->val->data[2] = -1.0f;
+  values->val->data[3] = -0.3f;
+  old_val->val->data[0] = 0.05f;
+  old_val->val->data[1] = 0.0f;
+  old_val->val->data[2] = 0.0f;
+  old_val->val->data[3] = -0.25f;
+  ret->val->data[0] = 0.12f;
+  ret->val->data[1] = 1.1f;
+  ret->val->data[2] = -0.5f;
+  ret->val->data[3] = 0.0f;
+  coef->val->data[0] = 0.05f;
+  vf_coef->val->data[0] = 0.5f;
+  zero->val->data[0] = 0.0f;
+
+  // The same chain the trainer builds: log-softmax, gather the taken action,
+  // the guarded importance ratio, the clipped surrogate, min of the two
+  // branches, the entropy bonus, the clipped value loss, and a total that is
+  // minimised.
+  Tensor *logp = tensor_log_softmax(arena, model, logits);
+  Tensor *taken = tensor_gather(arena, model, logp, actions);
+  Tensor *ratio = tensor_exp(
+      arena, model,
+      tensor_clip(arena, model,
+                  tensor_sub(arena, model, taken, old_logp), REAL_C(-20.0),
+                  REAL_C(20.0)));
+  Tensor *clipped =
+      tensor_clip(arena, model, ratio, REAL_C(0.8), REAL_C(1.2));
+  Tensor *s1 = tensor_mul(arena, model, ratio, adv);
+  Tensor *s2 = tensor_mul(arena, model, clipped, adv);
+  Tensor *best = tensor_min(arena, model, s1, s2);
+  Tensor *pi_mean = tensor_mean(arena, model, best, REDUCE_COLS);
+
+  Tensor *probs = tensor_exp(arena, model, logp);
+  Tensor *plogp = tensor_mul(arena, model, probs, logp);
+  Tensor *ent = tensor_mean(
+      arena, model, tensor_sum(arena, model, plogp, REDUCE_ROWS),
+      REDUCE_COLS);
+
+  Tensor *loss = tensor_add(arena, model,
+                            tensor_sub(arena, model, zero, pi_mean),
+                            tensor_mul(arena, model, coef, ent));
+
+  // Clipped value loss, the same chain the trainer builds:
+  // max((v-ret)^2, ((clip(v-old, +-0.2) + old) - ret)^2), mean over the batch.
+  Tensor *vpred = tensor_add(
+      arena, model,
+      tensor_clip(arena, model, tensor_sub(arena, model, values, old_val),
+                  REAL_C(-0.2), REAL_C(0.2)),
+      old_val);
+  Tensor *e_raw = tensor_sub(arena, model, values, ret);
+  Tensor *e_clip = tensor_sub(arena, model, vpred, ret);
+  Tensor *vloss = tensor_mul(
+      arena, model,
+      tensor_mean(arena, model,
+                  tensor_max(arena, model,
+                             tensor_mul(arena, model, e_raw, e_raw),
+                             tensor_mul(arena, model, e_clip, e_clip)),
+                  REDUCE_ALL),
+      vf_coef);
+  loss = tensor_add(arena, model, loss, vloss);
+  Schedule graph = schedule_from(arena, model, loss);
+
+  rng_seed_g(246810, 17);
+  mat_rand(logits->val, -1.5f, 1.5f);
+
+  printf("  logits (3x4, gathered actions, clipped ratio, entropy)... ");
+  u32 f1 = gradcheck_param(&graph, loss, logits, GRAD_H, GRAD_TOL);
+  printf("%s (%u failures)\n", f1 == 0 ? "OK" : "FAIL", f1);
+
+  printf("  values (1x4, clipped value loss)... ");
+  u32 f2 = gradcheck_param(&graph, loss, values, GRAD_H, GRAD_TOL);
+  printf("%s (%u failures)\n", f2 == 0 ? "OK" : "FAIL", f2);
+
+  if (f1 + f2 == 0)
+    tests_passed++;
+  else
+    tests_failed++;
+
+  arena_dispose(arena);
+}
+
+// ── Test: graph Gaussian log-density, entropy and clip variants ──────
+
+static void test_gradcheck_gaussian_graph(void) {
+  printf("\n[gradcheck: graph Gaussian log-density and entropy]\n");
+
+  Arena *arena = arena_new(MiB(32));
+  Net *model = ARENA_OBJ(arena, Net);
+
+  const u32 dim = 2u;
+  const u32 batch = 4u;
+  const real act_min[2] = {-1.0f, -2.0f};
+  const real act_max[2] = {1.0f, 2.0f};
+
+  Tensor *mean =
+      tensor_create(arena, model, dim, batch, TENSOR_PARAM | TENSOR_GRAD);
+  Tensor *log_std =
+      tensor_create(arena, model, dim, 1, TENSOR_PARAM | TENSOR_GRAD);
+  Tensor *u =
+      tensor_create(arena, model, dim, batch, TENSOR_PARAM | TENSOR_GRAD);
+
+  rng_seed_g(112233, 23);
+  mat_rand(mean->val, -1.0f, 1.0f);
+  mat_rand(log_std->val, -1.0f, 0.5f);
+  mat_rand(u->val, -3.0f, 3.0f);
+
+  Tensor *logp = tensor_gaussian_logp(arena, model, mean, log_std, u, act_min,
+                                      act_max);
+  Schedule logp_graph = schedule_from(arena, model, logp);
+
+  // Forward parity against the fused reference on identical data.
+  Mat *ref = mat_new(arena, 1, batch);
+  b32 parity_ok = mat_gaussian_logp(ref, mean->val, log_std->val, u->val,
+                                    act_min, act_max, batch);
+  schedule_run(&logp_graph);
+  if (parity_ok) {
+    for (u32 b = 0; b < batch; b++) {
+      if (real_fabs(ref->data[b] - logp->val->data[b]) > REAL_C(1e-5)) {
+        parity_ok = false;
+      }
+    }
+  }
+  printf("  forward values match mat_gaussian_logp... %s\n",
+         parity_ok ? "OK" : "FAIL");
+
+  printf("  mean (2x4)... ");
+  u32 f1 = gradcheck_param(&logp_graph, logp, mean, GRAD_H, GRAD_TOL);
+  printf("%s (%u failures)\n", f1 == 0 ? "OK" : "FAIL", f1);
+
+  printf("  log_std (2x1)... ");
+  u32 f2 = gradcheck_param(&logp_graph, logp, log_std, GRAD_H, GRAD_TOL);
+  printf("%s (%u failures)\n", f2 == 0 ? "OK" : "FAIL", f2);
+
+  printf("  u (2x4)... ");
+  u32 f3 = gradcheck_param(&logp_graph, logp, u, GRAD_H, GRAD_TOL);
+  printf("%s (%u failures)\n", f3 == 0 ? "OK" : "FAIL", f3);
+
+  Tensor *ent = tensor_gaussian_entropy(arena, model, log_std);
+  Schedule ent_graph = schedule_from(arena, model, ent);
+  Mat *ref_ent = mat_new(arena, 1, 1);
+  b32 ent_ok = mat_gaussian_entropy(ref_ent, log_std->val);
+  schedule_run(&ent_graph);
+  ent_ok = ent_ok &&
+           real_fabs(ref_ent->data[0] - ent->val->data[0]) < REAL_C(1e-5);
+  printf("  entropy matches mat_gaussian_entropy... %s\n",
+         ent_ok ? "OK" : "FAIL");
+
+  printf("  log_std (entropy)... ");
+  u32 f4 = gradcheck_param(&ent_graph, ent, log_std, GRAD_H, GRAD_TOL);
+  printf("%s (%u failures)\n", f4 == 0 ? "OK" : "FAIL", f4);
+
+  // Stable tails: log(sech^2) must stay finite where tanh(u)^2 would underflow.
+  const real tail_vals[3] = {0.0f, 20.0f, -40.0f};
+  Tensor *tail =
+      tensor_create(arena, model, 1, 3, TENSOR_PARAM | TENSOR_GRAD);
+  for (u32 i = 0; i < 3u; i++) {
+    tail->val->data[i] = tail_vals[i];
+  }
+  Tensor *sech = tensor_log_sech2(arena, model, tail);
+  Schedule sech_graph = schedule_from(arena, model, sech);
+  schedule_run(&sech_graph);
+  b32 tails_ok = isfinite(sech->val->data[0]) &&
+                 real_fabs(sech->val->data[0]) < REAL_C(1e-6) &&
+                 isfinite(sech->val->data[1]) &&
+                 isfinite(sech->val->data[2]);
+  printf("  log(sech^2) finite at |u| = 0, 20, 40... %s\n",
+         tails_ok ? "OK" : "FAIL");
+
+  printf("  u (log(sech^2) tails)... ");
+  u32 f5 = gradcheck_param(&sech_graph, sech, tail, GRAD_H, GRAD_TOL);
+  printf("%s (%u failures)\n", f5 == 0 ? "OK" : "FAIL", f5);
+
+  // Straight-through clip: the forward value is bounded, the gradient is not.
+  Tensor *clipped_in =
+      tensor_create(arena, model, 1, 4, TENSOR_PARAM | TENSOR_GRAD);
+  clipped_in->val->data[0] = -2.0f;
+  clipped_in->val->data[1] = -0.4f;
+  clipped_in->val->data[2] = 0.4f;
+  clipped_in->val->data[3] = 2.0f;
+  Tensor *clipped_sc =
+      tensor_clip_straight(arena, model, clipped_in, -1.0f, 1.0f);
+  Schedule sc_graph = schedule_from(arena, model, clipped_sc);
+  schedule_run(&sc_graph);
+  b32 sc_fwd = clipped_sc->val->data[0] == -1.0f &&
+               clipped_sc->val->data[1] == -0.4f &&
+               clipped_sc->val->data[2] == 0.4f &&
+               clipped_sc->val->data[3] == 1.0f;
+  schedule_grad(&sc_graph);
+  b32 sc_grad = true;
+  for (u32 i = 0; i < 4u; i++) {
+    if (clipped_in->grad->data[i] != 1.0f) {
+      sc_grad = false;
+    }
+  }
+  printf("  straight-through clip (clamp forward, pass gradient)... %s\n",
+         (sc_fwd && sc_grad) ? "OK" : "FAIL");
+
+  if (f1 + f2 + f3 + f4 + f5 == 0 && parity_ok && ent_ok && tails_ok &&
+      sc_fwd && sc_grad)
+    tests_passed++;
+  else
+    tests_failed++;
+
+  arena_dispose(arena);
+}
+
 int main(void) {
   printf("\n=== Autograd gradient checks (%s) ===\n\n", GRADCHECK_NAME);
 
@@ -1181,6 +1465,9 @@ int main(void) {
   test_gradcheck_reduce();
   test_gradcheck_gather();
   test_gradcheck_minmax_clip();
+  test_gradcheck_log_softmax();
+  test_gradcheck_ppo_graph_loss();
+  test_gradcheck_gaussian_graph();
   test_gradcheck_mse();
   test_gradcheck_fused_policy();
   test_gradcheck_ppo_policy();

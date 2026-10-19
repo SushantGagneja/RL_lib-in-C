@@ -538,6 +538,78 @@ b32 mat_clip_add_grad(Mat *out, const Mat *in, real lo, real hi,
   return true;
 }
 
+b32 mat_log_softmax(Mat *out, const Mat *in) {
+  if (in->rows == 0u || out->rows != in->rows || out->cols != in->cols) {
+    return false;
+  }
+  const u32 rows = in->rows;
+  const u32 cols = in->cols;
+  for (u32 c = 0; c < cols; c++) {
+    real m = in->data[c];
+    for (u32 r = 1; r < rows; r++) {
+      const real z = in->data[(u64)r * cols + c];
+      if (z > m) {
+        m = z;
+      }
+    }
+    real sum = 0.0f;
+    for (u32 r = 0; r < rows; r++) {
+      sum += real_exp(in->data[(u64)r * cols + c] - m);
+    }
+    const real lse = m + real_log(sum);
+    for (u32 r = 0; r < rows; r++) {
+      out->data[(u64)r * cols + c] = in->data[(u64)r * cols + c] - lse;
+    }
+  }
+  return true;
+}
+
+b32 mat_log_softmax_add_grad(Mat *out, const Mat *logp, const Mat *grad) {
+  if (logp->rows != grad->rows || logp->cols != grad->cols ||
+      mat_count(out) != mat_count(logp)) {
+    return false;
+  }
+  const u32 rows = logp->rows;
+  const u32 cols = logp->cols;
+  for (u32 c = 0; c < cols; c++) {
+    real colsum = 0.0f;
+    for (u32 r = 0; r < rows; r++) {
+      colsum += grad->data[(u64)r * cols + c];
+    }
+    for (u32 r = 0; r < rows; r++) {
+      const u64 i = (u64)r * cols + c;
+      const real p = real_exp(logp->data[i]);
+      out->data[i] += grad->data[i] - p * colsum;
+    }
+  }
+  return true;
+}
+
+b32 mat_log_sech2(Mat *out, const Mat *in) {
+  if (mat_count(out) != mat_count(in)) {
+    return false;
+  }
+  const u64 n = mat_count(in);
+  const real log_2 = (real)0.69314718055994530942;
+  for (u64 i = 0; i < n; i++) {
+    const real a = real_fabs(in->data[i]);
+    out->data[i] =
+        (real)2 * ((log_2 - a) - real_log1p(real_exp((real)-2 * a)));
+  }
+  return true;
+}
+
+b32 mat_log_sech2_add_grad(Mat *out, const Mat *in, const Mat *grad) {
+  if (mat_count(out) != mat_count(in) || mat_count(grad) != mat_count(in)) {
+    return false;
+  }
+  const u64 n = mat_count(in);
+  for (u64 i = 0; i < n; i++) {
+    out->data[i] += (real)-2 * real_tanh(in->data[i]) * grad->data[i];
+  }
+  return true;
+}
+
 // ---------------------------------------------------------------------------
 // Matrix multiply. Four accumulation kernels selected by the
 // (transpose_a, transpose_b) flags; each adds into `out`, so callers that want

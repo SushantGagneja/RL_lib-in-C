@@ -17,6 +17,18 @@ single source of truth — it is also stamped into `rl_lib.pc`.
   `test_gradcheck` grows from 12 to 16 suites (373 parameters), and `test_mat`
   gains direct edge-case coverage of the kernels (invalid shapes, out-of-range
   indices, gradient masks and accumulation).
+- **Graph-based PPO losses.** The discrete and continuous PPO trainers now build
+  their clipped surrogate, entropy bonus and value loss as tensor graphs and
+  take one reverse sweep from a single scalar cost, instead of hand-seeding
+  gradients on intermediate activations; `log_std` becomes an ordinary
+  parameter inside the graph rather than a gradient accumulated by hand. New
+  ops back this: stable `tensor_log_softmax`, `tensor_log_sech2` (finite in the
+  tails where forming `tanh(u)^2` underflows), a straight-through
+  `tensor_clip_straight` for the Gaussian mean bound, and reusable
+  `tensor_gaussian_logp` / `tensor_gaussian_entropy` builders whose forward
+  values are compared against the fused kernels and whose backward passes are
+  finite-differenced. `test_gradcheck` grows from 16 to 19 suites (424
+  parameters); training behaviour and the public API are unchanged.
 - **Checkpoint format 4.** Builder-made models now record their architecture —
   kind, observation/action dimensions and hidden widths — in an ARCH block, and
   `checkpoint_save_ex` / `checkpoint_load_ex` carry a run's running

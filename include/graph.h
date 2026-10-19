@@ -42,7 +42,18 @@ typedef enum {
   OP_MIN,       // elementwise min of two same-shaped operands
   OP_MAX,       // elementwise max
   OP_CLIP,      // clamp to [aux_lo, aux_hi]
+  OP_LOG_SOFTMAX, // stable per-column log-softmax
+  OP_LOG_SECH2,   // log(sech^2(u)), stable in the tails
 } OpKind;
+
+// Bit flags for Tensor.aux_flags.
+typedef enum {
+  TENSOR_AUX_NONE = 0,
+  // OP_CLIP: clamp the forward value but pass gradients unchanged. This is the
+  // straight-through clamp used for the Gaussian mean bound, where an exact
+  // zero gradient outside the bound would park the mean head forever.
+  TENSOR_AUX_STRAIGHT_CLIP = 1u << 0,
+} TensorAuxFlags;
 
 typedef struct Tensor Tensor;
 
@@ -66,6 +77,7 @@ struct Tensor {
   u32 axis;
   real aux_lo;
   real aux_hi;
+  u8 aux_flags; // TensorAuxFlags
 };
 
 // A topologically ordered list of nodes (inputs first).
@@ -127,6 +139,30 @@ Tensor *tensor_relu(Arena *arena, Net *model, Tensor *input);
 Tensor *tensor_tanh(Arena *arena, Net *model, Tensor *input);
 Tensor *tensor_softmax(Arena *arena, Net *model, Tensor *input);
 
+// Stable per-column log-softmax. The gradient is g - softmax(z) * column_sum(g),
+// the form every policy-gradient loss needs when it works in log space.
+Tensor *tensor_log_softmax(Arena *arena, Net *model, Tensor *input);
+
+// log(sech^2(u)) with derivative -2*tanh(u), finite for arbitrarily large |u|.
+// This is the log-determinant of the tanh squash in a squashed Gaussian.
+Tensor *tensor_log_sech2(Arena *arena, Net *model, Tensor *input);
+
+// Squashed diagonal-Gaussian log-density, one entry per batch column:
+// log N(u | mean, exp(log_std)) minus the tanh squash's log-determinant for the
+// box [action_min, action_max]. `mean` and `u` are (dim x batch), `log_std` is
+// (dim x 1), and the result is (1 x batch). The mean is clamped to
+// +-RL_GAUSSIAN_MEAN_BOUND straight-through (the bound shapes the value but not
+// the gradient) and log_std to [RL_GAUSSIAN_LOG_STD_MIN, _MAX] with a zero
+// gradient while active — the same conventions as the fused kernels.
+Tensor *tensor_gaussian_logp(Arena *arena, Net *model, Tensor *mean,
+                             Tensor *log_std, Tensor *u,
+                             const real *action_min, const real *action_max);
+
+// Differential entropy of the unsquashed Gaussian,
+// sum_d log sigma_d + 0.5 * dim * log(2*pi*e), as a (1 x 1) tensor with the
+// same log_std clamp (and clamped gradient) as tensor_gaussian_logp.
+Tensor *tensor_gaussian_entropy(Arena *arena, Net *model, Tensor *log_std);
+
 Tensor *tensor_add(Arena *arena, Net *model, Tensor *a, Tensor *b);
 Tensor *tensor_sub(Arena *arena, Net *model, Tensor *a, Tensor *b);
 Tensor *tensor_mul(Arena *arena, Net *model, Tensor *a, Tensor *b);
@@ -160,10 +196,13 @@ Tensor *tensor_gather(Arena *arena, Net *model, Tensor *values,
 
 // Elementwise selection and clamping. min/max take two same-shaped operands
 // (ties route the gradient to the first); clip passes gradient inside
-// [lo, hi] and blocks it outside.
+// [lo, hi] and blocks it outside, while clip_straight clamps the forward value
+// but leaves the gradient unchanged (the Gaussian mean bound convention).
 Tensor *tensor_min(Arena *arena, Net *model, Tensor *a, Tensor *b);
 Tensor *tensor_max(Arena *arena, Net *model, Tensor *a, Tensor *b);
 Tensor *tensor_clip(Arena *arena, Net *model, Tensor *input, real lo, real hi);
+Tensor *tensor_clip_straight(Arena *arena, Net *model, Tensor *input, real lo,
+                             real hi);
 
 Schedule schedule_from(Arena *arena, Net *model, Tensor *out_var);
 
