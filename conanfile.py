@@ -46,6 +46,7 @@ class RlLibInCRecipe(ConanFile):
     exports_sources = (
         "CMakeLists.txt",
         "LICENSE",
+        "rl_lib.pc.in",
         "include/*",
         "src/*",
         "envs/*",
@@ -63,7 +64,10 @@ class RlLibInCRecipe(ConanFile):
     def generate(self):
         tc = CMakeToolchain(self)
         tc.variables["RL_LIB_BUILD_SHARED"] = self.options.shared
-        tc.variables["RL_LIB_BUILD_TESTS"] = True
+        # Build the suites only when they are going to run; with
+        # tools.build:skip_test=True the binaries would just be dead weight.
+        tc.variables["RL_LIB_BUILD_TESTS"] = not self.conf.get(
+            "tools.build:skip_test", default=False)
         tc.variables["RL_LIB_BUILD_EXAMPLES"] = False
         tc.variables["RL_LIB_USE_DOUBLE"] = self.options.use_double
         tc.variables["RL_LIB_NO_THREADS"] = self.options.no_threads
