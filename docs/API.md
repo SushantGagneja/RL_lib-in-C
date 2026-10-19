@@ -21,12 +21,13 @@ program has to initialise: one arena, one random generator, and you are running.
 | [`linalg.h`](#linalgh) | `Mat` plus every matrix / activation / loss / gradient kernel, including the squashed-Gaussian policy kernels |
 | [`simd.h`](#simdh) | matrix-multiply backend selection and probing |
 | [`graph.h`](#graphh) | `Tensor`, `Net`, reverse-mode autograd |
-| [`layers.h`](#layersh) | `Dense`, `mlp_new`, `actor_build`, `actor_critic_build`, `continuous_actor_critic_build` |
+| [`layers.h`](#layersh) | `Dense`, `mlp_new`, `actor_build`, `actor_critic_build`, `continuous_actor_critic_build`, `q_net_build` |
 | [`optim.h`](#optimh) | `zero_grad`, `sgd_step`, `Adam`, `clip_grad_norm` |
 | [`checkpoint.h`](#checkpointh) | `net_save` / `net_load` / `checkpoint_save` / `checkpoint_load` |
 | [`env.h`](#envh) | the `Env` interface every environment implements, discrete and continuous |
 | [`vecenv.h`](#vecenvh) | `VecEnv`, synchronised parallel environments |
 | [`rl.h`](#rlh) | `TrainCfg`, `Rollout`, `train_reinforce`, `train_a2c`, `train_ppo`, `train_ppo_continuous`, `evaluate`, `evaluate_continuous` |
+| [`dqn.h`](#dqnh) | `ReplayBuf`, `replay_new`, `replay_add`, `dqn_sync_target`, `dqn_epsilon_at`, `train_dqn` |
 | [`envs/`](#environments) | CartPole, Grid Snake, Pendulum-v1 |
 
 Three conventions run through the whole API and are worth reading first:
@@ -539,12 +540,29 @@ lets `TrainCfg.batch_size` be a runtime choice: the trainers call
 `net_set_batch_size` themselves before sizing any buffer from the graph, so
 asking for 8 when the model was built for 64 just works. Returns `false` for a
 model that was not built by `actor_build` / `actor_critic_build` /
-`continuous_actor_critic_build` (there is no recorded architecture to rebuild
-from), and `true` immediately when the size already matches. Pointers into
+`continuous_actor_critic_build` / `q_net_build` (there is no recorded
+architecture to rebuild from), and `true` immediately when the size already
+matches. Pointers into
 `batch_input` / `batch_logits` / `batch_value` / `batch_mean` are invalidated by
 a rebuild.
 
 ---
+
+### Q-networks (DQN)
+
+```c
+void q_net_build(Arena *arena, Net *model, Rng *rng, u32 obs_dim,
+                 const u32 *hidden_dims, u32 num_hidden, u32 act_dim,
+                 u32 batch_size);
+```
+
+A discrete-action Q-network, recorded as `NET_ARCH_Q`: the rollout graph maps
+`input (obs_dim x 1)` to `output (act_dim x 1)` — one Q value per action from a
+linear head, no softmax, so the stochastic sampling paths do not apply. The
+batched graph adds `batch_logits (act_dim x B)`, a plain `target` tensor of the
+same shape (regression targets must not receive gradients), and `cost =
+MSE(batch_logits, target)`, with `train` and `loss_plan` schedules ready for the
+DQN trainer — see [`dqn.h`](#dqnh) for the loop that fills `target`.
 
 ## `optim.h`
 
@@ -806,6 +824,14 @@ typedef struct {
   real norm_clip;         // observation clip (<= 0 => 10)
   real norm_reward_clip;  // scaled-reward clip (<= 0 => 10)
   NormStats *norm;        // required when norm_obs/norm_reward is set
+
+  u32 replay_capacity; // DQN: transitions stored (0 => 20000)
+  u32 warmup_steps;    // DQN: env steps before the first gradient step (0 => 1000)
+  u32 train_every;     // DQN: env steps per gradient step (0 => 1)
+  u32 target_sync;     // DQN: gradient steps between target copies (0 => 500)
+  real eps_start;      // DQN: initial epsilon (<= 0 => 1)
+  real eps_end;        // DQN: final epsilon (<= 0 => 0.05)
+  u32 eps_decay_steps; // DQN: env steps of linear epsilon decay (0 => half the run)
 } TrainCfg;
 
 typedef struct { real avg_return, avg_steps; } EvalResult;
@@ -846,6 +872,11 @@ first steps are mild. When either flag is set, `norm` must point at a
 evaluation can feed the policy the same observation transform with
 `evaluate_seeded_normed` (the reported return stays the raw environment
 return — reward scaling is a training transform).
+
+`replay_capacity`, `warmup_steps`, `train_every`, `target_sync`, `eps_start`,
+`eps_end` and `eps_decay_steps` are DQN-only (`train_dqn`, [`dqn.h`](#dqnh)).
+For DQN, `epochs` is the number of updates and `rollout_size` the number of
+environment steps collected per update (0 => 32).
 
 ### Rollouts
 
@@ -970,6 +1001,63 @@ trainers. A run normally trains with `TrainCfg.norm = stats` and evaluates with
 `evaluate_*_normed`, so both sides apply the same transform.
 
 ---
+
+## `dqn.h`
+
+```c
+typedef struct {
+  u32 obs_dim;
+  u32 capacity;
+  u32 size;       // valid transitions (<= capacity)
+  u32 head;       // next write slot
+  real *obs;      // capacity * obs_dim
+  real *next_obs; // capacity * obs_dim
+  real *rewards;  // capacity
+  u32 *actions;   // capacity
+  u8 *dones;      // capacity, 0/1: terminal *or* truncated
+} ReplayBuf;
+
+ReplayBuf *replay_new(Arena *arena, u32 capacity, u32 obs_dim);
+void replay_add(ReplayBuf *buf, const real *obs, u32 action, real reward,
+                const real *next_obs, b32 done);
+void dqn_sync_target(const Net *src, Net *dst);
+real dqn_epsilon_at(const TrainCfg *config, u32 env_steps);
+void train_dqn(Env *env, Net *q_model, Net *q_target, const TrainCfg *config,
+               Arena *train_arena);
+```
+
+The Q-network comes from `q_net_build` ([`layers.h`](#layersh)), which prepares
+the rollout graph, the batched graph and the regression target tensor.
+`train_dqn` is off-policy DQN with the usual three stabilisers:
+
+* **Replay.** `ReplayBuf` is a fixed-capacity ring over flat arrays; once full
+  it overwrites the oldest transition, so minibatches are drawn from a window of
+  the most recent `capacity` steps (uniformly, with replacement).
+* **Target network.** `q_target` is hard-copied from `q_model` once at the
+  start and again every `target_sync` gradient steps. Its own initialization
+  does not matter — the first sync overwrites it.
+* **Epsilon schedule.** `dqn_epsilon_at` is a linear decay from `eps_start` to
+  `eps_end` over `eps_decay_steps` collected steps (0 => half the run). It is
+  public so logging and tests agree with the trainer exactly.
+
+The loss is the DQN regression in *masked* form: each target column holds the
+one-step bootstrap value `r + gamma * max_a' Q_target(s', a')` for the action
+that was taken (`0` bootstrap for terminal and truncated steps alike), and a
+copy of the network's own current Q value for every other action. Because the
+MSE backpropagates into its prediction operand only, the copied entries have
+exactly zero error and contribute no gradient — the update is a one-hot squared
+error on the taken action, with no gather/scatter op needed. This is plain DQN:
+no double-Q, no dueling head.
+
+`config->epochs` updates of `config->rollout_size` environment steps (0 => 32)
+are collected with epsilon-greedy actions from the rollout graph; one gradient
+step runs per `config->train_every` collected steps (0 => 1) once the buffer
+holds `config->warmup_steps` transitions (0 => 1000, and never fewer than one
+full batch). Episodes are seeded deterministically from `config->seed`, from a
+stream separate from the epsilon/replay sampling, so runs are reproducible. The
+optimizer is `config->optim` with `config->learning_rate`, decayed by
+`config->lr_schedule` like the other trainers, and `config->max_grad_norm`
+clips the global gradient norm when positive.
 
 ## Environments
 

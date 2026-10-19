@@ -65,6 +65,7 @@ typedef enum {
   NET_ARCH_ACTOR,
   NET_ARCH_ACTOR_CRITIC,
   NET_ARCH_CONTINUOUS,
+  NET_ARCH_Q,
 } NetArchKind;
 
 // The architecture a builder used, kept so the batched training subgraph can be
@@ -145,6 +146,13 @@ static void build_batch_graph(Arena *arena, Net *model, NetArchSpec *arch,
     model->batch_value = dense_apply(arena, model, &arch->head_b, b);
     Tensor *batch_roots[2] = {model->batch_mean, model->batch_value};
     model->train = schedule_from_roots(arena, model, batch_roots, 2);
+  } else if (arch->kind == NET_ARCH_Q) {
+    model->batch_logits = dense_apply(arena, model, &arch->head_a, b);
+    model->target =
+        tensor_create(arena, model, arch->act_dim, batch_size, TENSOR_PLAIN);
+    model->cost = tensor_mse(arena, model, model->batch_logits, model->target);
+    model->train = schedule_from(arena, model, model->batch_logits);
+    model->loss_plan = schedule_from(arena, model, model->cost);
   } else {
     model->batch_logits = dense_apply(arena, model, &arch->head_a, b);
     model->train = schedule_from(arena, model, model->batch_logits);
@@ -262,6 +270,35 @@ void continuous_actor_critic_build(Arena *arena, Net *model, Rng *rng,
   NetArchSpec *arch = record_arch(arena, model, NET_ARCH_CONTINUOUS, obs_dim,
                                   act_dim, hidden_dims, num_hidden, trunk,
                                   mean_head, critic);
+  if (batch_size > 0) {
+    build_batch_graph(arena, model, arch, batch_size);
+  }
+}
+
+void q_net_build(Arena *arena, Net *model, Rng *rng, u32 obs_dim,
+                 const u32 *hidden_dims, u32 num_hidden, u32 act_dim,
+                 u32 batch_size) {
+  RL_LIB_ASSERT(act_dim > 0, "q_net_build: act_dim == 0");
+
+  model->input = tensor_create(arena, model, obs_dim, 1, TENSOR_PLAIN);
+
+  Dense *trunk = ARENA_ARR(arena, Dense, num_hidden);
+  Tensor *cur = build_trunk(arena, model, rng, model->input, obs_dim,
+                            hidden_dims, num_hidden, trunk);
+  const u32 trunk_dim = (num_hidden > 0) ? hidden_dims[num_hidden - 1] : obs_dim;
+
+  // The Q head is linear: one value per action, no softmax, unit gain like the
+  // critic head. The regression target tensor and the MSE cost are created with
+  // the batched graph (build_batch_graph), because every training step regresses
+  // a whole minibatch at once.
+  Dense head = dense_new(arena, model, rng, trunk_dim, act_dim, true, 1.0f);
+  model->output = dense_apply(arena, model, &head, cur);
+
+  model->fwd = schedule_from(arena, model, model->output);
+
+  NetArchSpec *arch = record_arch(arena, model, NET_ARCH_Q, obs_dim, act_dim,
+                                  hidden_dims, num_hidden, trunk, head,
+                                  (Dense){0});
   if (batch_size > 0) {
     build_batch_graph(arena, model, arch, batch_size);
   }

@@ -61,8 +61,11 @@ so there is nothing to attribute and no external license to carry.
   clipping (with a non-finite guard).
 - **Algorithms** — REINFORCE with mean-baseline normalization, Advantage
   Actor-Critic (A2C) with GAE-λ and an entropy bonus, PPO with the clipped
-  surrogate objective (multiple epochs of shuffled minibatches), and continuous
-  PPO on the squashed Gaussian policy.
+  surrogate objective (multiple epochs of shuffled minibatches, plus optional
+  value clipping, approximate-KL early stopping, LR/entropy schedules and
+  running observation normalization / reward scaling), continuous PPO on the
+  squashed Gaussian policy, and an off-policy **DQN** with experience replay, a
+  hard-synced target network and an epsilon-greedy schedule.
 - **Environments** — CartPole-like, grid Snake, and Pendulum-v1 behind a common
   `Env` interface (`reset(env, seed)`, `step` or `step_continuous`, `observe`,
   `clone`, plus the action bounds a continuous policy needs).
@@ -306,6 +309,7 @@ make a2c                # train CartPole with A2C
 make ppo                # train CartPole with PPO
 make ppo-continuous     # train Pendulum-v1 with continuous-action PPO
 make ppo-snake          # train 6x6 Snake with PPO (sparse; optional shaping)
+make dqn                # train CartPole with DQN (off-policy)
 make hello              # the minimal end-to-end example
 
 make bench              # multi-seed benchmarks -> bench_results.md
@@ -380,8 +384,9 @@ of aborting; `RL_LIB_HAS_THREADS` in `vecenv.h` is the compile-time answer.
 | `test_mat` | 13 checks over MatMul (NN/NT/TN/TT), SIMD-vs-scalar agreement across two shape sets that cross the vector and TT-tile boundaries, softmax, ReLU, add/sub, broadcast add, mul/tanh/MSE |
 | `test_gradcheck` (f32) | the same 11 suites in the default build (looser tolerance) |
 | `test_envs` | 191 checks: CartPole bounds/termination/determinism; Snake reset, grid validation, wall/self collision, tail vacate, eating; Pendulum reset, hand-computed Euler dynamics, torque clamp, speed cap, determinism, clone independence and 200-step truncation; VecEnv shape, determinism, independent clones, auto-reset terminal-observation capture, vectorized continuous stepping with action bounds, and threaded-vs-serial stepping compared field by field over 260 steps |
-| `test_rl` | 73 checks: GAE vs a hand-computed trajectory, one Adam step, grad clipping, actor-critic build, value-head learning, batched-vs-per-sample gradient equivalence, a parameter registry grown past 128 entries, rebuilding the batched graph for a new minibatch size (weights preserved, batch and single-sample inference agree), the continuous builder (per-dimension bounds, sampled `u`/squash round trip, `log_std` registered as a parameter and surviving a rebuild), CartPole learning smoke tests for REINFORCE and PPO with same-seed determinism, a Pendulum continuous-PPO learning smoke test plus determinism, and threaded rollouts reaching bit-identical weights in both trainers |
+| `test_rl` | 103 checks: GAE vs a hand-computed trajectory, one Adam step, grad clipping, actor-critic build, value-head learning, batched-vs-per-sample gradient equivalence, a parameter registry grown past 128 entries, rebuilding the batched graph for a new minibatch size (weights preserved, batch and single-sample inference agree), the continuous builder (per-dimension bounds, sampled `u`/squash round trip, `log_std` registered as a parameter and surviving a rebuild), CartPole learning smoke tests for REINFORCE and PPO with same-seed determinism, a Pendulum continuous-PPO learning smoke test plus determinism, the LR/entropy schedules against hand-computed values, normalization statistics (Welford/posterior/clip cases), PPO recipe-knob effects (each knob changes the run; the defaults do not), normalized-training determinism, and threaded rollouts reaching bit-identical weights in both trainers |
 | `test_checkpoint` | 61 checks: byte-exact parameter round trips, bit-exact Adam-state resume, parameter-only and optimiser-only files, a continuous model round trip including `log_std`, and rejection of missing, corrupt, truncated, wrong-width, wrongly-sized and wrongly-shaped files — each verified to leave the model untouched |
+| `test_dqn` | 33 checks: replay-ring overwrite order, the Q-network builder's rollout and batched views (including a rebuild that shares parameters), the epsilon schedule against hand-computed values, target-network sync (copies every parameter; untouched before its interval), same-seed determinism across two complete training runs, and a CartPole training run whose greedy evaluation reaches ~203 (a random policy scores ~22) |
 
 `make test-double` then rebuilds the library with `-DRL_LIB_USE_DOUBLE` and runs
 every one of those suites in f64, so the f64 path is not only exercised by the

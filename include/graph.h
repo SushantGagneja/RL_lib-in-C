@@ -81,6 +81,12 @@ typedef struct {
   Tensor *batch_value;
   Tensor *value;
 
+  // DQN only (q_net_build): plain, gradient-free target values for the batched
+  // MSE loss, one column per sampled transition. The trainer refills it on
+  // every gradient step; because the MSE backpropagates into its prediction
+  // operand only, the network's own Q values are the sole gradient path.
+  Tensor *target;
+
   // Continuous (diagonal-Gaussian) policy: the mean head and its batched view,
   // plus a learnable log standard deviation that is a parameter *outside* every
   // schedule (the Gaussian policy loss accumulates into its gradient directly).

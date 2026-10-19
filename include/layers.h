@@ -58,12 +58,25 @@ void continuous_actor_critic_build(Arena *arena, Net *model, Rng *rng,
                                    u32 num_hidden, u32 act_dim, u32 batch_size,
                                    real log_std_init);
 
+// Builds a discrete-action Q-network (DQN):
+//   - Rollout inference: input -> output, one Q value per action (act_dim x 1)
+//   - Batched training: batch_input -> batch_logits (act_dim x B), plus a
+//     plain `target` tensor (act_dim x B) and `cost` = MSE(batch_logits,
+//     target). Regression targets are written by the trainer, so they must not
+//     receive gradients — `target` is a plain leaf, and the MSE propagates into
+//     its prediction operand only.
+// The output head is linear (no softmax: these are values, not probabilities),
+// so `model->output` cannot be used with the stochastic sampling paths.
+void q_net_build(Arena *arena, Net *model, Rng *rng, u32 obs_dim,
+                 const u32 *hidden_dims, u32 num_hidden, u32 act_dim,
+                 u32 batch_size);
+
 // Rebuilds the batched training subgraph (batch_input -> batch_logits /
 // batch_value) for a new minibatch size. The parameter tensors are shared, not
 // re-created, so the model keeps its weights; only the fixed-size batch views
 // and the training schedule are replaced. Returns false for a model that was not
-// built by actor_build / actor_critic_build (a hand-built graph has no recorded
-// architecture to rebuild from), and true immediately when the size already
+// built by one of the builder functions above (a hand-built graph has no
+// recorded architecture to rebuild from), and true immediately when the size already
 // matches. Any pointer the caller held into batch_input / batch_logits /
 // batch_value is invalidated by a rebuild.
 b32 net_set_batch_size(Arena *arena, Net *model, u32 batch_size);

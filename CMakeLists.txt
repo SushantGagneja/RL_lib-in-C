@@ -22,7 +22,7 @@ set(RL_SIMD_BACKEND "" CACHE STRING
 
 set(RL_LIB_SOURCES
     src/memory.c src/random.c src/simd.c src/linalg.c src/graph.c
-    src/layers.c src/optim.c src/checkpoint.c src/rl.c src/vecenv.c
+    src/layers.c src/optim.c src/checkpoint.c src/rl.c src/dqn.c src/vecenv.c
     envs/snake.c envs/cartpole.c envs/pendulum.c)
 
 # Everything the static library, the shared library, the tests and the examples
@@ -99,9 +99,10 @@ endforeach()
 
 set(RL_LIB_EXAMPLES
     train_snake train_cartpole train_a2c train_ppo train_ppo_continuous
-    train_ppo_snake hello_rl)
+    train_ppo_snake train_dqn hello_rl)
 
-set(RL_LIB_TESTS test_mat test_gradcheck test_envs test_rl test_checkpoint)
+set(RL_LIB_TESTS test_mat test_gradcheck test_envs test_rl test_checkpoint
+                 test_dqn)
 
 if(RL_LIB_BUILD_EXAMPLES)
   foreach(ex ${RL_LIB_EXAMPLES} bench)

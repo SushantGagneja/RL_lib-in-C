@@ -92,6 +92,20 @@ typedef struct {
   real norm_clip;         // observation clip (<= 0 => 10)
   real norm_reward_clip;  // scaled-reward clip (<= 0 => 10)
   NormStats *norm;
+
+  // DQN-only knobs (train_dqn). `epochs` is the number of updates and
+  // `rollout_size` the number of environment steps collected per update. The
+  // replay buffer is arena-backed and lives for the training call, after which
+  // the online network can be checkpointed and evaluated like any other.
+  u32 replay_capacity; // transitions stored (0 => 20000)
+  u32 warmup_steps;    // env steps collected before the first gradient step
+                       // (0 => 1000; at least one full batch is always needed)
+  u32 train_every;     // collected env steps per gradient step (0 => 1)
+  u32 target_sync;     // gradient steps between target-network copies (0 => 500)
+  real eps_start;      // initial epsilon (<= 0 => 1)
+  real eps_end;        // final epsilon (<= 0 => 0.05)
+  u32 eps_decay_steps; // env steps over which epsilon decays linearly
+                       // (0 => half the run: epochs * rollout_size / 2)
 } TrainCfg;
 
 // Allocates arena-backed observation/reward statistics.

@@ -37,6 +37,18 @@ single source of truth — it is also stamped into `rl_lib.pc`.
   recipe 1 (the new default) enables the full recipe: cosine LR 3e-4 -> 3e-5,
   value clip 0.2, KL early stop 0.03, entropy 0.01 -> 0.001, observation
   normalization and reward scaling.
+- **DQN** (`dqn.h`, `src/dqn.c`): off-policy deep Q-learning with a fixed-capacity
+  ring replay buffer, a hard-synced target network, an epsilon schedule, and the
+  DQN regression expressed as a *masked MSE* on the existing autograd engine
+  (untaken actions keep the network's own value, so their error — and gradient —
+  is exactly zero; no gather/scatter op needed). `q_net_build` in `layers.h`
+  builds the Q-network's rollout and batched graphs, including the gradient-free
+  `target` tensor. `TrainCfg` gained the DQN knobs (`replay_capacity`,
+  `warmup_steps`, `train_every`, `target_sync`, `eps_start`, `eps_end`,
+  `eps_decay_steps`). `tests/test_dqn.c` (33 checks: ring overwrite order,
+  builder/rebuild, epsilon schedule, target sync, determinism, and a CartPole run
+  reaching ~203 greedy return in 16000 steps), `examples/train_dqn.c` and
+  `make dqn`.
 
 ### Changed
 - The PPO trainers now take their learning rate and entropy coefficient from
