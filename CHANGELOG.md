@@ -23,6 +23,9 @@ single source of truth — it is also stamped into `rl_lib.pc`.
 - **CI coverage and benchmark jobs.** The suites are also built with gcov
   (`make COVERAGE=1 test`) and summarised by `gcovr`, and a benchmark job runs
   the full multi-seed harness and uploads `bench_results.md` as an artifact.
+- **Package-manager recipes.** A Conan 2 `conanfile.py` with a `test_package/`
+  that consumes the freshly built package through `find_package(RL_lib-in-C)`
+  (checked by a CI job), and a vcpkg reference port in `packaging/vcpkg/`.
 
 ### Fixed
 - A rejected `net_load`/`adam_load`/`checkpoint_load` could previously leave a

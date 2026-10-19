@@ -87,9 +87,10 @@ so there is nothing to attribute and no external license to carry.
 - **Installable and packageable** — `make install` puts the headers in
   `include/rl_lib/`, builds `librl_lib.a` plus a versioned shared library, and
   writes a `rl_lib.pc` pkg-config file; the CMake project installs the same
-  layout (plus a `find_package` config) and is the path on Windows. Either way,
-  there is no build-time dependency beyond the compiler, `libm` and the build
-  system itself.
+  layout (plus a `find_package` config) and is the path on Windows. There are
+  package-manager recipes too — a Conan 2 `conanfile.py` (with a test package)
+  and a vcpkg port. Either way, there is no build-time dependency beyond the
+  compiler, `libm` and the build system itself.
 
 ---
 
@@ -129,6 +130,16 @@ library to prove the packaged copy works outside the source tree. The C ABI is
 also all a foreign-function caller needs: `examples/python/ctypes_demo.py` drives
 the installed shared library from CPython with nothing but `ctypes` — it runs
 CartPole through the `Env` vtable and multiplies two matrices.
+
+#### Conan and vcpkg
+
+`conanfile.py` at the repository root is a Conan 2 recipe: `conan create .`
+builds the CMake project inside Conan's toolchain, runs the ctest suites (skip
+them with `-c tools.build:skip_test=True`) and packages the install tree above.
+`test_package/` then consumes that package through `find_package(RL_lib-in-C)`,
+which is how CI checks the recipe. The vcpkg side is a thin reference port in
+`packaging/vcpkg/` — the two files vcpkg's `ports/rl-lib-in-c/` carries, wrapping
+the same CMake install.
 
 ---
 
@@ -504,7 +515,11 @@ Tests: 61 passed, 0 failed
 │   └── test_dqn.c           # Replay buffer, target sync, CartPole learning
 ├── docs/
 │   └── API.md               # Full API reference
-├── .github/workflows/ci.yml # POSIX matrix + ASAN/UBSAN + TSan + serial-only + f64 + install + Windows/MSVC
+├── packaging/
+│   └── vcpkg/               # Reference vcpkg port (vcpkg.json + portfile.cmake)
+├── test_package/            # Conan test package: consumes the built package
+├── conanfile.py             # Conan 2 recipe (conan create .)
+├── .github/workflows/ci.yml # POSIX matrix + sanitizers + scalar + BLAS + f64 + coverage + bench + Windows/MSVC + install + Conan
 ├── cmake/
 │   └── RL_lib-in-CConfig.cmake.in  # find_package() config template
 ├── rl_lib.pc.in             # pkg-config template (stamped from version.h)
@@ -672,6 +687,9 @@ Tests: 61 passed, 0 failed
         the sanitizers.
   - [x] CI also reports coverage (`make COVERAGE=1 test` + `gcovr`) and
         publishes the benchmark artifact.
+  - [x] Packaging: a Conan 2 recipe with a `test_package/` (verified by a CI
+        job that builds, packages and consumes it) and a vcpkg reference port
+        wrapping the same CMake install.
 
 ### Remaining
 

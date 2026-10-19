@@ -226,3 +226,20 @@ jobs:
           test ! -e "$RUNNER_TEMP/prefix/include/rl_lib"
           test ! -e "$RUNNER_TEMP/prefix/lib/librl_lib.a"
           test ! -e "$RUNNER_TEMP/prefix/lib/pkgconfig/rl_lib.pc"
+
+  # The Conan 2 recipe goes one step further than install-smoke: it builds the
+  # project inside Conan's own CMake flow, packages the install tree, and then
+  # consumes that package from test_package/ through find_package(RL_lib-in-C).
+  # The test suites are skipped here because every other job runs them; a recipe
+  # that drops a header or the CMake config still fails on the test package.
+  conan:
+    name: Conan package (ubuntu-latest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Conan 2
+        run: pipx install conan
+      - name: Detect a profile
+        run: conan profile detect --force
+      - name: Create the package and run its test package
+        run: conan create . -c tools.build:skip_test=True
