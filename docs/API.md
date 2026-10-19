@@ -627,11 +627,12 @@ b32 checkpoint_load(Net *model, Adam *adam, const char *path);
 const char *checkpoint_last_error(void);
 ```
 
-A checkpoint is a small self-describing binary file (magic `RLLIBCK2`, little
-endian, block-structured so unknown blocks can be skipped). `checkpoint_save`
-writes the parameters plus the Adam moments; `checkpoint_load` restores both and
-needs the model only for shape validation. Passing `adam = NULL` to either
-function reduces it to parameters only.
+A checkpoint is a small self-describing binary file (magic `RLLIBCK3`, little
+endian, block-structured so unknown blocks can be skipped, closed by a CRC-32 of
+every preceding byte). `checkpoint_save` writes the parameters plus the Adam
+moments; `checkpoint_load` restores both and needs the model only for shape
+validation. Passing `adam = NULL` to either function reduces it to parameters
+only.
 
 Resuming a run:
 
@@ -643,11 +644,13 @@ RL_LIB_CHECK(checkpoint_load(model, adam, "run.ckpt"));
 ```
 
 Every function returns `false` instead of aborting, and the load is
-all-or-nothing: shapes are validated and the payload staged *before* a single
-parameter is written, so a rejected file leaves the model exactly as it was.
-Failure reasons:
+all-or-nothing: the checksum is verified first, the file is then walked once to
+validate every block and once more to apply it, so a rejected file leaves the
+model exactly as it was. Failure reasons:
 
-* bad magic or an unknown format version;
+* bad magic or an unknown format version (format 3 files only; older ones are
+  rejected rather than migrated);
+* a checksum mismatch, which is how bit rot and half-written files are caught;
 * a scalar width that does not match this build (an f32 checkpoint cannot be
   loaded into an f64 build — the values would be silently reinterpreted);
 * a parameter count, payload size, or parameter shape that does not match the

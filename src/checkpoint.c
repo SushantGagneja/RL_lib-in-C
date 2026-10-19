@@ -4,9 +4,10 @@
 // File layout (little-endian throughout, so a checkpoint moves between
 // machines):
 //
-//   char magic[8]  "RLLIBCK2"
-//   u32  version   2
+//   char magic[8]  "RLLIBCK3"
+//   u32  version   3
 //   block*
+//   u32  crc32     checksum of every preceding byte
 //
 //   block := u32 kind | u32 payload_bytes | payload
 //     PARAMS(1): u32 scalar_bytes | u32 n_params | u32 rows[n] | u32 cols[n]
@@ -16,21 +17,29 @@
 //                | m1[...] | m2[...]
 //     END(0):    empty
 //
+// The trailing CRC-32 (reflected, poly 0xEDB88320) is checked before a single
+// block is parsed, so bit rot is reported as such rather than turning into a
+// confusing block-size error or silently wrong parameters. Format 3 is format 2
+// plus that trailer; like every earlier format change, older files are rejected
+// up front rather than migrated.
+//
 // `payload_bytes` lets a reader skip blocks it does not understand, so new block
 // kinds can be appended without breaking older readers that only need the
 // blocks they know. `scalar_bytes` records sizeof(real) at save time, which is
 // how an f32/f64 mismatch is caught before values get reinterpreted: floating
 // point bit patterns are endian-independent here, but not width-independent.
 //
-// Reads stage their payload before touching the model, so a truncated or
-// mismatched file is rejected without mutating anything.
+// Reads validate the whole file before touching the model - payloads are
+// staged, and the stream is walked twice (validate, then apply) - so a
+// truncated, mismatched or corrupted file is rejected without mutating
+// anything.
 #include "checkpoint.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#define CHECKPOINT_FORMAT 2u
+#define CHECKPOINT_FORMAT 3u
 
 enum {
   BLOCK_END = 0,
@@ -41,7 +50,7 @@ enum {
 #define ADAM_HYPER_BYTES 8u  // one u64 step
 #define ADAM_HYPER_F64 4u    // lr, beta1, beta2, eps
 
-static const char CHECKPOINT_MAGIC[8] = {'R', 'L', 'L', 'I', 'B', 'C', 'K', '2'};
+static const char CHECKPOINT_MAGIC[8] = {'R', 'L', 'L', 'I', 'B', 'C', 'K', '3'};
 
 static const char *g_last_error = "";
 
@@ -244,6 +253,96 @@ static void apply_to_adam(const u8 *buf, u64 m2_off, const Net *model,
   }
 }
 
+// ── Checksum ─────────────────────────────────────────────────────────
+
+// Reflected CRC-32 (poly 0xEDB88320), a bit at a time: a checkpoint is a few
+// hundred kilobytes at most, so the table-free loop costs nothing measurable
+// and the format needs no lookup-table state.
+static u32 crc32_update(u32 crc, const u8 *data, size_t n) {
+  for (size_t i = 0; i < n; i++) {
+    crc ^= data[i];
+    for (u32 bit = 0; bit < 8; bit++) {
+      crc = (crc >> 1) ^ (0xEDB88320u & (0u - (crc & 1u)));
+    }
+  }
+  return crc;
+}
+
+// Appends the trailer: the CRC-32 of every byte already in `f`'s file. The
+// write stream is flushed but stays open, so the bytes are re-read from disk
+// (checkpoints are small) and the trailer lands at the current position.
+static b32 write_crc_trailer(FILE *f, const char *path) {
+  if (fflush(f) != 0) {
+    set_error("failed to flush checkpoint");
+    return false;
+  }
+  FILE *in = fopen(path, "rb");
+  if (in == NULL) {
+    set_error("cannot reopen checkpoint for checksum");
+    return false;
+  }
+  u32 crc = 0;
+  u8 buf[4096];
+  size_t got;
+  while ((got = fread(buf, 1, sizeof buf, in)) > 0) {
+    crc = crc32_update(crc, buf, got);
+  }
+  const b32 read_ok = !ferror(in);
+  fclose(in);
+  if (!read_ok) {
+    set_error("failed to read checkpoint for checksum");
+    return false;
+  }
+  return put_u32(f, crc);
+}
+
+// Verifies the trailing CRC-32 before the parser touches a single block, and
+// leaves the stream at the start of the header. The file size bounds the
+// payload, so a truncated or hostile file is rejected without allocating.
+static b32 verify_crc(FILE *f) {
+  if (fseek(f, 0, SEEK_END) != 0) {
+    set_error("cannot seek to checksum");
+    return false;
+  }
+  const long size = ftell(f);
+  if (size < (long)(8u + 4u + sizeof(u32))) {
+    set_error("not a checkpoint file (too small)");
+    return false;
+  }
+  const long payload = size - (long)sizeof(u32);
+  if (fseek(f, 0, SEEK_SET) != 0) {
+    set_error("cannot rewind to checksum");
+    return false;
+  }
+  u32 crc = 0;
+  u8 buf[4096];
+  for (long remaining = payload; remaining > 0;) {
+    const size_t want =
+        remaining > (long)sizeof buf ? sizeof buf : (size_t)remaining;
+    const size_t got = fread(buf, 1, want, f);
+    if (got != want) {
+      set_error("truncated checkpoint");
+      return false;
+    }
+    crc = crc32_update(crc, buf, got);
+    remaining -= (long)got;
+  }
+  u32 stored = 0;
+  if (!get_u32(f, &stored)) {
+    set_error("truncated checksum");
+    return false;
+  }
+  if (stored != crc) {
+    set_error("checksum mismatch (corrupted checkpoint)");
+    return false;
+  }
+  if (fseek(f, 0, SEEK_SET) != 0) {
+    set_error("cannot rewind checkpoint");
+    return false;
+  }
+  return true;
+}
+
 static b32 write_header(FILE *f) {
   return fwrite(CHECKPOINT_MAGIC, 1, 8, f) == 8 &&
          put_u32(f, CHECKPOINT_FORMAT);
@@ -349,7 +448,7 @@ static b32 skip_block(FILE *f, u32 bytes) {
   return true;
 }
 
-static b32 read_params_block(FILE *f, u32 bytes, Net *model) {
+static b32 read_params_block(FILE *f, u32 bytes, Net *model, b32 dry) {
   if ((u64)bytes != params_payload_bytes(model)) {
     set_error("parameter block size does not match this model");
     return false;
@@ -364,6 +463,9 @@ static b32 read_params_block(FILE *f, u32 bytes, Net *model) {
   if (n_scalars == 0) {
     return true;
   }
+  if (dry) {
+    return skip_block(f, (u32)(n_scalars * (u64)sizeof(real)));
+  }
   u8 *staging = read_scalars(f, n_scalars);
   if (staging == NULL) {
     set_error("truncated parameter data");
@@ -374,7 +476,8 @@ static b32 read_params_block(FILE *f, u32 bytes, Net *model) {
   return true;
 }
 
-static b32 read_adam_block(FILE *f, u32 bytes, Adam *adam, const Net *model) {
+static b32 read_adam_block(FILE *f, u32 bytes, Adam *adam, const Net *model,
+                           b32 dry) {
   if (adam->n_params != model->n_params) {
     set_error("optimiser state does not match this model");
     return false;
@@ -402,20 +505,28 @@ static b32 read_adam_block(FILE *f, u32 bytes, Adam *adam, const Net *model) {
 
   const u64 n_scalars = total_scalars(model);
   if (n_scalars > 0) {
-    u8 *staging = read_scalars(f, 2u * n_scalars);
-    if (staging == NULL) {
-      set_error("truncated optimiser data");
-      return false;
+    if (dry) {
+      if (!skip_block(f, (u32)(2u * n_scalars * (u64)sizeof(real)))) {
+        return false;
+      }
+    } else {
+      u8 *staging = read_scalars(f, 2u * n_scalars);
+      if (staging == NULL) {
+        set_error("truncated optimiser data");
+        return false;
+      }
+      apply_to_adam(staging, n_scalars, model, adam);
+      free(staging);
     }
-    apply_to_adam(staging, n_scalars, model, adam);
-    free(staging);
   }
 
-  adam->step = step;
-  adam->lr = (real)lr;
-  adam->beta1 = (real)beta1;
-  adam->beta2 = (real)beta2;
-  adam->eps = (real)eps;
+  if (!dry) {
+    adam->step = step;
+    adam->lr = (real)lr;
+    adam->beta1 = (real)beta1;
+    adam->beta2 = (real)beta2;
+    adam->eps = (real)eps;
+  }
   return true;
 }
 
@@ -426,6 +537,7 @@ typedef struct {
   Adam *adam; // optional: an ADAM block is skipped when NULL
   b32 saw_params;
   b32 saw_adam;
+  b32 dry; // validate without applying anything
 } LoadState;
 
 static b32 load_stream(FILE *f, LoadState *st) {
@@ -455,7 +567,7 @@ static b32 load_stream(FILE *f, LoadState *st) {
       return true;
     }
     if (kind == BLOCK_PARAMS) {
-      if (!read_params_block(f, bytes, st->model)) {
+      if (!read_params_block(f, bytes, st->model, st->dry)) {
         return false;
       }
       st->saw_params = true;
@@ -463,7 +575,7 @@ static b32 load_stream(FILE *f, LoadState *st) {
     }
     if (kind == BLOCK_ADAM) {
       if (st->adam != NULL) {
-        if (!read_adam_block(f, bytes, st->adam, st->model)) {
+        if (!read_adam_block(f, bytes, st->adam, st->model, st->dry)) {
           return false;
         }
       } else if (!skip_block(f, bytes)) {
@@ -499,18 +611,33 @@ static b32 load_from_path(const char *path, Net *model, Adam *adam,
   st.adam = adam;
   st.saw_params = false;
   st.saw_adam = false;
+  st.dry = true;
 
-  b32 ok = load_stream(f, &st);
-  if (fclose(f) != 0 && ok) {
-    set_error("failed to close checkpoint");
-    ok = false;
-  }
+  // Two passes over a file whose checksum already verified: the first validates
+  // every block without touching the model, the second applies them. A load that
+  // reports failure therefore leaves the model exactly as it was, even when the
+  // damage sits after a block that parsed cleanly.
+  b32 ok = verify_crc(f) && load_stream(f, &st);
   if (ok && need_params && !st.saw_params) {
     set_error("checkpoint has no parameter block");
     ok = false;
   }
   if (ok && need_adam && !st.saw_adam) {
     set_error("checkpoint has no optimiser block");
+    ok = false;
+  }
+  if (ok && fseek(f, 0, SEEK_SET) != 0) {
+    set_error("cannot rewind checkpoint");
+    ok = false;
+  }
+  if (ok) {
+    st.dry = false;
+    st.saw_params = false;
+    st.saw_adam = false;
+    ok = load_stream(f, &st);
+  }
+  if (fclose(f) != 0 && ok) {
+    set_error("failed to close checkpoint");
     ok = false;
   }
   return ok;
@@ -530,6 +657,9 @@ b32 net_save(const Net *model, const char *path) {
     return false;
   }
   b32 ok = write_header(f) && write_params_block(f, model) && write_end_block(f);
+  if (ok) {
+    ok = write_crc_trailer(f, path);
+  }
   if (fclose(f) != 0) {
     set_error("failed to flush checkpoint");
     ok = false;
@@ -558,6 +688,9 @@ b32 adam_save(const Adam *adam, const Net *model, const char *path) {
   }
   b32 ok = write_header(f) && write_adam_block(f, adam, model) &&
            write_end_block(f);
+  if (ok) {
+    ok = write_crc_trailer(f, path);
+  }
   if (fclose(f) != 0) {
     set_error("failed to flush checkpoint");
     ok = false;
@@ -587,6 +720,9 @@ b32 checkpoint_save(const Net *model, const Adam *adam, const char *path) {
   b32 ok = write_header(f) && write_params_block(f, model);
   ok = ok && (adam == NULL || write_adam_block(f, adam, model));
   ok = ok && write_end_block(f);
+  if (ok) {
+    ok = write_crc_trailer(f, path);
+  }
   if (fclose(f) != 0) {
     set_error("failed to flush checkpoint");
     ok = false;

@@ -79,8 +79,11 @@ so there is nothing to attribute and no external license to carry.
   them too; `-DRL_SIMD_BACKEND=0` forces scalar on any build.
 - **Checkpointing** — a versioned, endian-independent binary format that saves
   and restores the parameters *and* the Adam moments, so a training run can be
-  stopped and resumed. Loading is all-or-nothing: a file that does not match the
-  model's shapes or scalar width is rejected without mutating anything.
+  stopped and resumed. Every file ends in a CRC-32 trailer that is verified
+  before parsing, and loading is all-or-nothing: a file that is corrupted,
+  truncated or does not match the model's shapes or scalar width is rejected
+  without mutating anything (the reader validates the whole file first and only
+  then applies it).
 - **Installable and packageable** — `make install` puts the headers in
   `include/rl_lib/`, builds `librl_lib.a` plus a versioned shared library, and
   writes a `rl_lib.pc` pkg-config file; the CMake project installs the same
@@ -408,7 +411,7 @@ of aborting; `RL_LIB_HAS_THREADS` in `vecenv.h` is the compile-time answer.
 | `test_gradcheck` (f32) | the same 12 suites in the default build (looser tolerance) |
 | `test_envs` | 191 checks: CartPole bounds/termination/determinism; Snake reset, grid validation, wall/self collision, tail vacate, eating; Pendulum reset, hand-computed Euler dynamics, torque clamp, speed cap, determinism, clone independence and 200-step truncation; VecEnv shape, determinism, independent clones, auto-reset terminal-observation capture, vectorized continuous stepping with action bounds, and threaded-vs-serial stepping compared field by field over 260 steps |
 | `test_rl` | 103 checks: GAE vs a hand-computed trajectory, one Adam step, grad clipping, actor-critic build, value-head learning, batched-vs-per-sample gradient equivalence, a parameter registry grown past 128 entries, rebuilding the batched graph for a new minibatch size (weights preserved, batch and single-sample inference agree), the continuous builder (per-dimension bounds, sampled `u`/squash round trip, `log_std` registered as a parameter and surviving a rebuild), CartPole learning smoke tests for REINFORCE and PPO with same-seed determinism, a Pendulum continuous-PPO learning smoke test plus determinism, the LR/entropy schedules against hand-computed values, normalization statistics (Welford/posterior/clip cases), PPO recipe-knob effects (each knob changes the run; the defaults do not), normalized-training determinism, and threaded rollouts reaching bit-identical weights in both trainers |
-| `test_checkpoint` | 61 checks: byte-exact parameter round trips, bit-exact Adam-state resume, parameter-only and optimiser-only files, a continuous model round trip including `log_std`, and rejection of missing, corrupt, truncated, wrong-width, wrongly-sized and wrongly-shaped files — each verified to leave the model untouched |
+| `test_checkpoint` | ~570 checks: byte-exact parameter round trips, bit-exact Adam-state resume, parameter-only and optimiser-only files, a continuous model round trip including `log_std`, a flipped byte caught by the CRC before the parser runs, a 300-case mutation fuzz pass (bit flips, truncations, overwritten runs, one third of them with a recomputed checksum), and rejection of missing, corrupt, truncated, wrong-width, wrongly-sized and wrongly-shaped files — each verified to leave the model untouched |
 | `test_dqn` | 33 checks: replay-ring overwrite order, the Q-network builder's rollout and batched views (including a rebuild that shares parameters), the epsilon schedule against hand-computed values, target-network sync (copies every parameter; untouched before its interval), same-seed determinism across two complete training runs, and a CartPole training run whose greedy evaluation reaches ~203 (a random policy scores ~22) |
 
 `make test-double` then rebuilds the library with `-DRL_LIB_USE_DOUBLE` and runs
@@ -472,7 +475,7 @@ Tests: 61 passed, 0 failed
 │   ├── graph.c              # Reverse-mode AD engine + op interpreter
 │   ├── layers.c             # Builders and initialization
 │   ├── optim.c              # Parameter updates
-│   ├── checkpoint.c         # Versioned checkpoint format (LE, block-structured)
+│   ├── checkpoint.c         # Versioned checkpoint format (LE, blocks + CRC-32)
 │   ├── vecenv.c             # Synchronized env vector with auto-reset
 │   ├── rl.c                 # Rollout, REINFORCE, A2C, PPO/GAE, evaluation
 │   └── dqn.c                # Replay ring, target sync, DQN update loop
@@ -497,7 +500,7 @@ Tests: 61 passed, 0 failed
 │   ├── test_gradcheck.c     # f32 and f64 numerical gradient checks
 │   ├── test_envs.c
 │   ├── test_rl.c
-│   ├── test_checkpoint.c    # Round trips and rejection of bad files
+│   ├── test_checkpoint.c    # Round trips, corrupt/truncated/fuzzed rejection
 │   └── test_dqn.c           # Replay buffer, target sync, CartPole learning
 ├── docs/
 │   └── API.md               # Full API reference
@@ -659,6 +662,16 @@ Tests: 61 passed, 0 failed
   - [x] Graph ops: elementwise `sigmoid`, `exp`, `log` and `div` with matching
         kernels and numerical gradient-check coverage (12 suites / 280
         parameters, f32 + f64).
+
+- [x] **Phase 9: Release and robustness**
+  - [x] v1.1.0 tagged (recipe, DQN, new graph ops, optional system BLAS, ctypes
+        demo): `version.h`, `docs/API.md` and the changelog move together, and
+        the pkg-config stamp follows from `version.h`.
+  - [x] Checkpoints carry a CRC-32 trailer (format 3) and loads are
+        transactional, with a 300-case mutation fuzz pass in the suite and under
+        the sanitizers.
+  - [x] CI also reports coverage (`make COVERAGE=1 test` + `gcovr`) and
+        publishes the benchmark artifact.
 
 ### Remaining
 

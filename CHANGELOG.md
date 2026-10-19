@@ -6,6 +6,29 @@ All notable changes to this project are recorded here. The format follows
 breaks on a major bump. `RL_LIB_VERSION_STRING` in `include/version.h` is the
 single source of truth — it is also stamped into `rl_lib.pc`.
 
+## Unreleased
+
+### Added
+- **Checkpoint checksums.** Every file now ends in a CRC-32 trailer that is
+  verified before parsing, so bit rot and half-written files are reported as
+  corruption instead of turning into a confusing block-size error or silently
+  wrong parameters. The format number moved to 3; older files are rejected up
+  front, as with every earlier format change.
+- **Transactional loads.** The reader walks a file twice — validate, then apply
+  — so a load that fails *after* a block parsed cleanly can no longer leave the
+  model half-updated. `test_checkpoint` grew from 61 to ~570 checks with a
+  300-case mutation fuzz pass (bit flips, truncations, overwritten runs, a third
+  of them with a recomputed checksum) asserting the no-crash and no-half-load
+  invariants; the sanitizer job runs it under ASAN/UBSAN.
+- **CI coverage and benchmark jobs.** The suites are also built with gcov
+  (`make COVERAGE=1 test`) and summarised by `gcovr`, and a benchmark job runs
+  the full multi-seed harness and uploads `bench_results.md` as an artifact.
+
+### Fixed
+- A rejected `net_load`/`adam_load`/`checkpoint_load` could previously leave a
+  model half-updated when the failure came from a block *after* the parameter
+  block; loads are now validated end-to-end before anything is applied.
+
 ## 1.1.0 — 2026-10-19
 
 ### Added

@@ -83,6 +83,38 @@ jobs:
       - name: f64 MatMul throughput
         run: make ERR=1 bench-double
 
+  # The suites are also run instrumented, so the summary shows which lines of
+  # the library and the environments the tests actually reach. Nothing is
+  # asserted on the percentages; the value is the report itself, in the log.
+  coverage:
+    name: coverage (ubuntu-latest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install gcovr
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcovr
+      - name: Build and run every suite with coverage
+        run: make ERR=1 COVERAGE=1 test
+      - name: Summarise
+        run: gcovr --root . --filter src/ --filter envs/ --print-summary
+
+  # The full multi-seed harness is far too slow to gate a pull request on, but
+  # publishing its output keeps the README's tables reviewable against a real
+  # run. The job asserts nothing about the numbers.
+  benchmarks:
+    name: benchmarks (ubuntu-latest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Multi-seed benchmarks + throughput
+        run: make ERR=1 bench
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bench-results
+          path: bench_results.md
+
   # The threaded VecEnv pool is the only concurrent code in the library, so it
   # gets a ThreadSanitizer run of the two suites that drive it (they compare the
   # threaded trajectories against the serial ones field by field).

@@ -26,6 +26,12 @@ else
 BLAS_LIBS ?= -lopenblas
 endif
 endif
+# Coverage: `make COVERAGE=1 test` instruments the build (the link rules use
+# CFLAGS, so --coverage reaches them too) and the CI job summarises the .gcda
+# files with gcovr.
+ifdef COVERAGE
+EXTRA_CFLAGS += --coverage
+endif
 CFLAGS = $(WARN) -Iinclude -I. $(THREAD_FLAGS) $(EXTRA_CFLAGS)
 
 LIB_SRCS = src/memory.c src/random.c src/simd.c src/linalg.c src/graph.c src/layers.c src/optim.c src/checkpoint.c src/rl.c src/dqn.c src/vecenv.c envs/snake.c envs/cartpole.c envs/pendulum.c

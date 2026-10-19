@@ -86,6 +86,42 @@ static void put_u32_le(FILE *f, u32 v) {
   fwrite(b, 1, 4, f);
 }
 
+// The reader verifies a CRC-32 trailer before it parses anything, and the
+// hand-built fixtures below bypass net_save, so they seal themselves with the
+// same reflected algorithm (poly 0xEDB88320, a bit at a time) - otherwise every
+// fixture would be rejected for its checksum instead of reaching the validation
+// it was written to exercise.
+static u32 crc32_bytes(u32 crc, const u8 *data, size_t n) {
+  for (size_t i = 0; i < n; i++) {
+    crc ^= data[i];
+    for (u32 bit = 0; bit < 8; bit++) {
+      crc = (crc >> 1) ^ (0xEDB88320u & (0u - (crc & 1u)));
+    }
+  }
+  return crc;
+}
+
+static void seal_junk_file(const char *path) {
+  FILE *f = fopen(path, "rb");
+  if (f == NULL) {
+    return;
+  }
+  u32 crc = 0;
+  u8 buf[4096];
+  size_t got;
+  while ((got = fread(buf, 1, sizeof buf, f)) > 0) {
+    crc = crc32_bytes(crc, buf, got);
+  }
+  if (fclose(f) != 0) {
+    return;
+  }
+  f = fopen(path, "ab");
+  if (f != NULL) {
+    put_u32_le(f, crc);
+    fclose(f);
+  }
+}
+
 // ── Parameters round-trip exactly ────────────────────────────────────
 
 static void test_param_round_trip(void) {
@@ -258,28 +294,31 @@ static void test_failure_modes(void) {
     fwrite(junk, 1, strlen(junk), f);
     fclose(f);
     ASSERT_TRUE(!net_load(model, JUNK_PATH), "a bad magic is rejected");
-    ASSERT_TRUE(strstr(checkpoint_last_error(), "magic") != NULL,
-                "the error names the magic");
+    const char *why = checkpoint_last_error();
+    ASSERT_TRUE(strstr(why, "magic") != NULL || strstr(why, "checksum") != NULL,
+                "the error explains why it is not a checkpoint");
     ASSERT_TRUE(param_checksum(model) == before, "model untouched");
   }
 
   // Wrong format version.
   f = fopen(JUNK_PATH, "wb");
   if (f != NULL) {
-    fwrite("RLLIBCK2", 1, 8, f);
+    fwrite("RLLIBCK3", 1, 8, f);
     put_u32_le(f, 99u);
     fclose(f);
+    seal_junk_file(JUNK_PATH);
     ASSERT_TRUE(!net_load(model, JUNK_PATH), "an unknown version is rejected");
   }
 
   // Truncated: a parameter block header that promises far more than it delivers.
   f = fopen(JUNK_PATH, "wb");
   if (f != NULL) {
-    fwrite("RLLIBCK2", 1, 8, f);
-    put_u32_le(f, 2u);
+    fwrite("RLLIBCK3", 1, 8, f);
+    put_u32_le(f, 3u);
     put_u32_le(f, 1u);    // BLOCK_PARAMS
     put_u32_le(f, 1000u); // payload bytes that are not there
     fclose(f);
+    seal_junk_file(JUNK_PATH);
     ASSERT_TRUE(!net_load(model, JUNK_PATH), "a truncated block is rejected");
     ASSERT_TRUE(param_checksum(model) == before, "model untouched");
   }
@@ -287,8 +326,8 @@ static void test_failure_modes(void) {
   // A payload sized for a different model.
   f = fopen(JUNK_PATH, "wb");
   if (f != NULL) {
-    fwrite("RLLIBCK2", 1, 8, f);
-    put_u32_le(f, 2u);
+    fwrite("RLLIBCK3", 1, 8, f);
+    put_u32_le(f, 3u);
     put_u32_le(f, 1u); // BLOCK_PARAMS
     put_u32_le(f, 8u);
     put_u32_le(f, (u32)sizeof(real));
@@ -298,6 +337,7 @@ static void test_failure_modes(void) {
       put_u32_le(f, model->params[i]->val->cols);
     }
     fclose(f); // no data, and a payload size that cannot be right
+    seal_junk_file(JUNK_PATH);
     ASSERT_TRUE(!net_load(model, JUNK_PATH), "a wrong payload size is rejected");
     ASSERT_TRUE(param_checksum(model) == before, "model untouched");
   }
@@ -314,8 +354,8 @@ static void test_failure_modes(void) {
         (u32)(8u + 8u * (u64)model->n_params + n_scalars * sizeof(real));
     f = fopen(JUNK_PATH, "wb");
     if (f != NULL) {
-      fwrite("RLLIBCK2", 1, 8, f);
-      put_u32_le(f, 2u);
+      fwrite("RLLIBCK3", 1, 8, f);
+      put_u32_le(f, 3u);
       put_u32_le(f, 1u);
       put_u32_le(f, payload);
       put_u32_le(f, wrong_width);
@@ -325,6 +365,7 @@ static void test_failure_modes(void) {
         put_u32_le(f, model->params[i]->val->cols);
       }
       fclose(f);
+      seal_junk_file(JUNK_PATH);
       ASSERT_TRUE(!net_load(model, JUNK_PATH),
                   "a different scalar width is rejected");
       ASSERT_TRUE(strstr(checkpoint_last_error(), "scalar width") != NULL,
@@ -358,8 +399,8 @@ static void test_failure_modes(void) {
         (u32)(8u + 8u * (u64)model->n_params + n_scalars * sizeof(real));
     f = fopen(JUNK_PATH, "wb");
     if (f != NULL) {
-      fwrite("RLLIBCK2", 1, 8, f);
-      put_u32_le(f, 2u);
+      fwrite("RLLIBCK3", 1, 8, f);
+      put_u32_le(f, 3u);
       put_u32_le(f, 1u);
       put_u32_le(f, payload);
       put_u32_le(f, (u32)sizeof(real));
@@ -370,6 +411,7 @@ static void test_failure_modes(void) {
         put_u32_le(f, m->cols);
       }
       fclose(f);
+      seal_junk_file(JUNK_PATH);
       ASSERT_TRUE(!net_load(model, JUNK_PATH),
                   "a file with a wrong parameter shape is rejected");
       ASSERT_TRUE(strstr(checkpoint_last_error(), "shapes") != NULL,
@@ -404,6 +446,133 @@ static void test_failure_modes(void) {
   arena_dispose(other);
   remove(SAVE_PATH);
   remove(JUNK_PATH);
+  printf("OK\n");
+}
+
+// ── Checksum and fuzzed inputs ───────────────────────────────────────
+
+// A single flipped byte in the middle of a real checkpoint must be reported as
+// corruption before the parser can act on it, and the model must survive.
+static void test_crc_detects_bit_rot(void) {
+  printf("  a flipped byte is caught by the checksum... ");
+
+  Arena *arena = arena_new(MiB(8));
+  Rng rng;
+  rng_seed(&rng, 7, 7);
+  Net *model = build_model(arena, &rng, 2, 4);
+  ASSERT_TRUE(net_save(model, SAVE_PATH), "a good checkpoint is written");
+
+  FILE *f = fopen(SAVE_PATH, "rb");
+  u8 buf[8192];
+  size_t n = 0;
+  if (f != NULL) {
+    n = fread(buf, 1, sizeof buf, f);
+    fclose(f);
+  }
+  ASSERT_TRUE(n > 32u, "the checkpoint fits the buffer");
+  if (n > 32u) {
+    const size_t at = 16u + (n - 32u) / 2u; // inside a payload, not the trailer
+    buf[at] ^= 0x40u;
+    f = fopen(JUNK_PATH, "wb");
+    ASSERT_TRUE(f != NULL, "the mutated copy is written");
+    if (f != NULL) {
+      fwrite(buf, 1, n, f);
+      fclose(f);
+    }
+  }
+
+  const real before = param_checksum(model);
+  ASSERT_TRUE(!net_load(model, JUNK_PATH), "the flipped checkpoint is rejected");
+  ASSERT_TRUE(strstr(checkpoint_last_error(), "checksum") != NULL,
+              "the error names the checksum");
+  ASSERT_TRUE(param_checksum(model) == before, "model untouched");
+
+  remove(SAVE_PATH);
+  remove(JUNK_PATH);
+  arena_dispose(arena);
+  printf("OK\n");
+}
+
+// The reader must survive arbitrary bytes: random mutations of a real
+// checkpoint - with and without a recomputed checksum - plus truncations and
+// overwritten runs. Every input either loads cleanly or is rejected with a
+// message, the model is only touched when the load reports success, and
+// nothing crashes; the sanitizer job turns that last point into a hard check.
+static void test_fuzzed_inputs(void) {
+  printf("  fuzzed checkpoints never crash and never half-load... ");
+
+  Arena *arena = arena_new(MiB(8));
+  Rng rng;
+  rng_seed(&rng, 21, 21);
+  Net *model = build_model(arena, &rng, 2, 4);
+  ASSERT_TRUE(net_save(model, SAVE_PATH), "a good checkpoint is written");
+
+  FILE *f = fopen(SAVE_PATH, "rb");
+  u8 base[8192];
+  size_t base_n = 0;
+  if (f != NULL) {
+    base_n = fread(base, 1, sizeof base, f);
+    fclose(f);
+  }
+  ASSERT_TRUE(base_n > 32u, "the checkpoint fits the buffer");
+
+  u32 rejected = 0;
+  u32 loaded = 0;
+  for (u32 iter = 0; iter < 300u && base_n > 32u; iter++) {
+    u8 buf[8192];
+    memcpy(buf, base, base_n);
+    size_t n = base_n;
+
+    switch (rng_below(&rng, 3u)) {
+    case 0u: { // flip a handful of bits
+      const u32 flips = 1u + rng_below(&rng, 4u);
+      for (u32 i = 0; i < flips; i++) {
+        buf[rng_below(&rng, (u32)n)] ^= (u8)(1u << rng_below(&rng, 8u));
+      }
+      break;
+    }
+    case 1u: // truncate anywhere
+      n = 1u + (size_t)rng_below(&rng, (u32)n);
+      break;
+    default: { // overwrite a run
+      const u32 at = rng_below(&rng, (u32)n);
+      const u32 len = 1u + rng_below(&rng, 16u);
+      for (u32 i = 0; i < len && (size_t)at + i < n; i++) {
+        buf[(size_t)at + i] = (u8)(rng_u32(&rng) & 0xffu);
+      }
+      break;
+    }
+    }
+
+    f = fopen(JUNK_PATH, "wb");
+    if (f == NULL) {
+      break;
+    }
+    fwrite(buf, 1, n, f);
+    fclose(f);
+    if ((iter % 3u) == 0u) {
+      seal_junk_file(JUNK_PATH); // structurally hostile, checksum consistent
+    }
+
+    const real before = param_checksum(model);
+    if (net_load(model, JUNK_PATH)) {
+      loaded++;
+    } else {
+      rejected++;
+      ASSERT_TRUE(checkpoint_last_error()[0] != '\0',
+                  "a rejected file explains itself");
+      ASSERT_TRUE(param_checksum(model) == before,
+                  "a rejected file leaves the model alone");
+    }
+  }
+
+  ASSERT_TRUE(rejected > 200u, "almost every mutation is rejected");
+  ASSERT_TRUE(loaded + rejected == 300u, "every mutation produced a verdict");
+  printf("(%u rejected / %u loaded) ", rejected, loaded);
+
+  remove(SAVE_PATH);
+  remove(JUNK_PATH);
+  arena_dispose(arena);
   printf("OK\n");
 }
 
@@ -477,6 +646,8 @@ int main(void) {
   test_adam_resume();
   test_partial_files();
   test_failure_modes();
+  test_crc_detects_bit_rot();
+  test_fuzzed_inputs();
   test_null_args();
   test_continuous_round_trip();
 
