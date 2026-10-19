@@ -193,7 +193,11 @@ value is `false` on a mismatch. `mat_add`/`mat_sub`/`mat_mul` broadcast a
 
 `mat_mm_scalar` is the portable reference implementation, kept permanently so the
 vectorized path can be cross-checked against it. `mat_mm` dispatches to SIMD when
-the build and the CPU support it, and otherwise calls exactly this.
+the build and the CPU support it, and otherwise calls exactly this. Building with
+`-DRL_LIB_USE_BLAS` (the Makefile's `BLAS=1`) instead routes every `mat_mm` call
+through CBLAS — Accelerate on macOS, OpenBLAS or any CBLAS elsewhere — for all
+four transpose cases; `mat_mm_scalar` is left untouched, so the math suite still
+cross-checks the substituted kernel against the same reference.
 
 ### Activations
 

@@ -14,6 +14,18 @@ EXTRA_CFLAGS ?=
 # has no make toolchain here: the CMake project builds there, and the Win32
 # thread API needs no flag.)
 THREAD_FLAGS ?= -pthread
+# Optional system BLAS backend: `make BLAS=1 ...` routes every MatMul through
+# CBLAS instead of the hand-written SIMD/scalar kernels. macOS selects
+# Accelerate automatically; elsewhere point at your BLAS, e.g.
+#   make BLAS=1 BLAS_CFLAGS=-I/usr/include/openblas BLAS_LIBS=-lopenblas test
+ifdef BLAS
+EXTRA_CFLAGS += -DRL_LIB_USE_BLAS $(BLAS_CFLAGS)
+ifeq ($(shell uname -s),Darwin)
+BLAS_LIBS ?= -framework Accelerate
+else
+BLAS_LIBS ?= -lopenblas
+endif
+endif
 CFLAGS = $(WARN) -Iinclude -I. $(THREAD_FLAGS) $(EXTRA_CFLAGS)
 
 LIB_SRCS = src/memory.c src/random.c src/simd.c src/linalg.c src/graph.c src/layers.c src/optim.c src/checkpoint.c src/rl.c src/dqn.c src/vecenv.c envs/snake.c envs/cartpole.c envs/pendulum.c
@@ -42,7 +54,7 @@ PKGCONFIGDIR ?= $(LIBDIR)/pkgconfig
 # Extra link flags a consumer of the installed library needs, stamped into
 # rl_lib.pc: libm, plus the thread flag unless this build dropped threads (the
 # documented no-threads invocation sets THREAD_FLAGS= empty).
-PC_LIBS_EXTRA = -lm $(THREAD_FLAGS)
+PC_LIBS_EXTRA = -lm $(BLAS_LIBS) $(THREAD_FLAGS)
 
 LIB_STATIC = librl_lib.a
 
@@ -111,28 +123,28 @@ tsan: clean test_envs test_rl $(TARGET_PPO_CONT)
 	./test_rl
 
 $(TARGET_SNAKE): $(LIB_OBJS) examples/train_snake.o
-	$(CC) $(CFLAGS) -o $@ $^ -lm
+	$(CC) $(CFLAGS) -o $@ $^ -lm $(BLAS_LIBS)
 
 $(TARGET_CARTPOLE): $(LIB_OBJS) examples/train_cartpole.o
-	$(CC) $(CFLAGS) -o $@ $^ -lm
+	$(CC) $(CFLAGS) -o $@ $^ -lm $(BLAS_LIBS)
 
 $(TARGET_A2C): $(LIB_OBJS) examples/train_a2c.o
-	$(CC) $(CFLAGS) -o $@ $^ -lm
+	$(CC) $(CFLAGS) -o $@ $^ -lm $(BLAS_LIBS)
 
 $(TARGET_PPO): $(LIB_OBJS) examples/train_ppo.o
-	$(CC) $(CFLAGS) -o $@ $^ -lm
+	$(CC) $(CFLAGS) -o $@ $^ -lm $(BLAS_LIBS)
 
 $(TARGET_PPO_CONT): $(LIB_OBJS) examples/train_ppo_continuous.o
-	$(CC) $(CFLAGS) -o $@ $^ -lm
+	$(CC) $(CFLAGS) -o $@ $^ -lm $(BLAS_LIBS)
 
 $(TARGET_PPO_SNAKE): $(LIB_OBJS) examples/train_ppo_snake.o
-	$(CC) $(CFLAGS) -o $@ $^ -lm
+	$(CC) $(CFLAGS) -o $@ $^ -lm $(BLAS_LIBS)
 
 $(TARGET_DQN): $(LIB_OBJS) examples/train_dqn.o
-	$(CC) $(CFLAGS) -o $@ $^ -lm
+	$(CC) $(CFLAGS) -o $@ $^ -lm $(BLAS_LIBS)
 
 $(TARGET_HELLO): $(LIB_OBJS) examples/hello_rl.o
-	$(CC) $(CFLAGS) -o $@ $^ -lm
+	$(CC) $(CFLAGS) -o $@ $^ -lm $(BLAS_LIBS)
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
@@ -148,7 +160,7 @@ $(SHARED_DIR)/%.o: %.c
 	$(CC) $(SHARED_CFLAGS) -c $< -o $@
 
 $(SHARED_REAL): $(SHARED_OBJS)
-	$(CC) $(SHARED_LDFLAGS) -o $@ $^ -lm
+	$(CC) $(SHARED_LDFLAGS) -o $@ $^ -lm $(BLAS_LIBS)
 
 $(SHARED_LINK): $(SHARED_REAL)
 	ln -sf $(SHARED_REAL) $(SHARED_LINK)
@@ -202,27 +214,27 @@ UBSAN_FLAGS ?= -g -fsanitize=undefined
 
 $(TEST_MAT_BIN): CFLAGS += $(UBSAN_FLAGS)
 $(TEST_MAT_BIN): $(LIB_OBJS) tests/test_mat.c
-	$(CC) $(CFLAGS) -o $@ $(LIB_OBJS) tests/test_mat.c -lm
+	$(CC) $(CFLAGS) -o $@ $(LIB_OBJS) tests/test_mat.c -lm $(BLAS_LIBS)
 
 $(TEST_GRAD_BIN): CFLAGS += $(UBSAN_FLAGS)
 $(TEST_GRAD_BIN): $(LIB_OBJS) tests/test_gradcheck.c
-	$(CC) $(CFLAGS) -o $@ $(LIB_OBJS) tests/test_gradcheck.c -lm
+	$(CC) $(CFLAGS) -o $@ $(LIB_OBJS) tests/test_gradcheck.c -lm $(BLAS_LIBS)
 
 $(TEST_ENVS_BIN): CFLAGS += $(UBSAN_FLAGS)
 $(TEST_ENVS_BIN): $(LIB_OBJS) tests/test_envs.c
-	$(CC) $(CFLAGS) -o $@ $(LIB_OBJS) tests/test_envs.c -lm
+	$(CC) $(CFLAGS) -o $@ $(LIB_OBJS) tests/test_envs.c -lm $(BLAS_LIBS)
 
 $(TEST_RL_BIN): CFLAGS += $(UBSAN_FLAGS)
 $(TEST_RL_BIN): $(LIB_OBJS) tests/test_rl.c
-	$(CC) $(CFLAGS) -o $@ $(LIB_OBJS) tests/test_rl.c -lm
+	$(CC) $(CFLAGS) -o $@ $(LIB_OBJS) tests/test_rl.c -lm $(BLAS_LIBS)
 
 $(TEST_CKPT_BIN): CFLAGS += $(UBSAN_FLAGS)
 $(TEST_CKPT_BIN): $(LIB_OBJS) tests/test_checkpoint.c
-	$(CC) $(CFLAGS) -o $@ $(LIB_OBJS) tests/test_checkpoint.c -lm
+	$(CC) $(CFLAGS) -o $@ $(LIB_OBJS) tests/test_checkpoint.c -lm $(BLAS_LIBS)
 
 $(TEST_DQN_BIN): CFLAGS += $(UBSAN_FLAGS)
 $(TEST_DQN_BIN): $(LIB_OBJS) tests/test_dqn.c
-	$(CC) $(CFLAGS) -o $@ $(LIB_OBJS) tests/test_dqn.c -lm
+	$(CC) $(CFLAGS) -o $@ $(LIB_OBJS) tests/test_dqn.c -lm $(BLAS_LIBS)
 
 # ── Double-precision builds ─────────────────────────────────────────
 # Builds the whole library in f64 (RL_LIB_USE_DOUBLE) into its own object tree so
@@ -240,12 +252,12 @@ $(DOUBLE_DIR)/%.o: %.c
 	$(CC) $(DOUBLE_CFLAGS) -c $< -o $@
 
 $(TEST_GRAD_DOUBLE_BIN): $(DOUBLE_OBJS)
-	$(CC) $(DOUBLE_CFLAGS) -o $@ $^ -lm
+	$(CC) $(DOUBLE_CFLAGS) -o $@ $^ -lm $(BLAS_LIBS)
 
 DOUBLE_TEST_BINS = $(addprefix $(DOUBLE_DIR)/,$(filter-out $(TEST_GRAD_BIN),$(TEST_BINS)))
 
 $(DOUBLE_TEST_BINS): $(DOUBLE_DIR)/%: tests/%.c $(DOUBLE_LIB_OBJS)
-	$(CC) $(DOUBLE_CFLAGS) -o $@ $(DOUBLE_LIB_OBJS) $< -lm
+	$(CC) $(DOUBLE_CFLAGS) -o $@ $(DOUBLE_LIB_OBJS) $< -lm $(BLAS_LIBS)
 
 gradcheck-double: $(TEST_GRAD_DOUBLE_BIN)
 	@echo ""
@@ -305,7 +317,7 @@ BENCH_BIN = rl_lib_bench
 
 $(BENCH_BIN): CFLAGS += -O3
 $(BENCH_BIN): $(LIB_OBJS) examples/bench.o
-	$(CC) $(CFLAGS) -o $@ $^ -lm
+	$(CC) $(CFLAGS) -o $@ $^ -lm $(BLAS_LIBS)
 
 bench: $(BENCH_BIN)
 	./$(BENCH_BIN)
@@ -333,7 +345,7 @@ $(BENCH_DOUBLE_DIR)/%.o: %.c
 	$(CC) $(BENCH_DOUBLE_CFLAGS) -c $< -o $@
 
 $(BENCH_DOUBLE_BIN): $(BENCH_DOUBLE_OBJS)
-	$(CC) $(BENCH_DOUBLE_CFLAGS) -o $@ $^ -lm
+	$(CC) $(BENCH_DOUBLE_CFLAGS) -o $@ $^ -lm $(BLAS_LIBS)
 
 bench-double: $(BENCH_DOUBLE_BIN)
 	./$(BENCH_DOUBLE_BIN) throughput

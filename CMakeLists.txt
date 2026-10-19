@@ -81,6 +81,19 @@ if(RL_LIB_BUILD_SHARED)
   list(APPEND RL_LIB_LIB_TARGETS rl_lib_shared)
 endif()
 
+# Optional system BLAS: route MatMul through CBLAS. Nothing is enabled by
+# default; consumers who flip this on must have a CBLAS header on their include
+# path (Accelerate on macOS, OpenBLAS/cblas elsewhere) and CMake must find the
+# library through FindBLAS.
+option(RL_LIB_USE_BLAS "Route MatMul through a system CBLAS" OFF)
+if(RL_LIB_USE_BLAS)
+  find_package(BLAS REQUIRED)
+  foreach(tgt IN LISTS RL_LIB_LIB_TARGETS)
+    target_compile_definitions(${tgt} PRIVATE RL_LIB_USE_BLAS)
+    target_link_libraries(${tgt} PUBLIC BLAS::BLAS)
+  endforeach()
+endif()
+
 foreach(tgt IN LISTS RL_LIB_LIB_TARGETS)
   target_link_libraries(${tgt} PUBLIC rl_lib_options)
   if(RL_LIB_PC_THREADS)

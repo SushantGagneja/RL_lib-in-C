@@ -13,6 +13,24 @@
 #include <immintrin.h>
 #endif
 
+// Optional system BLAS: when the library is built with -DRL_LIB_USE_BLAS, every
+// MatMul goes through CBLAS instead of the hand-written SIMD/scalar kernels.
+// The Makefile's BLAS=1 switch sets the define and links the right library
+// (Accelerate on macOS, OpenBLAS elsewhere by default); CMake users link their
+// own BLAS and define it on the target.
+#if defined(RL_LIB_USE_BLAS)
+#if defined(__APPLE__)
+// Apple's vecLib deprecates the classic CBLAS entry points in favour of the
+// updated LAPACK headers; opt into those for a warning-free build.
+#if !defined(ACCELERATE_NEW_LAPACK)
+#define ACCELERATE_NEW_LAPACK
+#endif
+#include <Accelerate/Accelerate.h>
+#else
+#include <cblas.h>
+#endif
+#endif
+
 // Row-major storage: element (r, c) lives at data[r * cols + c]. All indices
 // are widened to u64 before multiplying so large matrices cannot overflow.
 
@@ -688,11 +706,46 @@ b32 mat_mm_scalar(Mat *out, const Mat *a, const Mat *b, b8 zero_out,
   return true;
 }
 
+#if defined(RL_LIB_USE_BLAS)
+// BLAS-backed MatMul. CBLAS's row-major mode maps straight onto Mat's layout,
+// so no operand is swapped: the logical A is a->rows x a->cols (its transpose
+// when transpose_a), the leading dimension of each contiguous row-major operand
+// is its own column count, and beta implements the kernels' zero-out /
+// accumulate choice. The caller validated the shapes (mm_shape_ok), so M/N/K
+// and the transposition flags are consistent.
+static void mm_blas(Mat *out, const Mat *a, const Mat *b, b8 zero_out,
+                    b8 transpose_a, b8 transpose_b) {
+  // Apple's header tags the enum (no typedef) and OpenBLAS's typedef also keeps
+  // the tag, so spell it out to satisfy both and to avoid a sign conversion.
+  const enum CBLAS_TRANSPOSE ta = transpose_a ? CblasTrans : CblasNoTrans;
+  const enum CBLAS_TRANSPOSE tb = transpose_b ? CblasTrans : CblasNoTrans;
+  const int m = (int)out->rows;
+  const int n = (int)out->cols;
+  const int k = (int)(transpose_a ? a->rows : a->cols);
+  const real alpha = (real)1;
+  const real beta = zero_out ? (real)0 : (real)1;
+#if defined(RL_LIB_USE_DOUBLE)
+  cblas_dgemm(CblasRowMajor, ta, tb, m, n, k, alpha, a->data, (int)a->cols,
+              b->data, (int)b->cols, beta, out->data, (int)out->cols);
+#else
+  cblas_sgemm(CblasRowMajor, ta, tb, m, n, k, alpha, a->data, (int)a->cols,
+              b->data, (int)b->cols, beta, out->data, (int)out->cols);
+#endif
+}
+#endif
+
 b32 mat_mm(Mat *out, const Mat *a, const Mat *b, b8 zero_out, b8 transpose_a,
            b8 transpose_b) {
   if (!mm_shape_ok(out, a, b, transpose_a, transpose_b)) {
     return false;
   }
+
+#if defined(RL_LIB_USE_BLAS)
+  // A system BLAS replaces both the SIMD and the scalar paths.
+  mm_blas(out, a, b, zero_out, transpose_a, transpose_b);
+  return true;
+#endif
+
   if (zero_out) {
     mat_zero(out);
   }
