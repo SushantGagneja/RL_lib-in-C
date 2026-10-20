@@ -367,9 +367,10 @@ The same budget and hyperparameters — 12 800 steps, 1000-step warmup, batch 64
 
 The two implementations land in the same region, and the C trainer is the more
 consistent of the two at this budget: it stays within 13 points across seeds,
-while SB3's third seed is still visibly mid-learning at 12 800 steps. The
-evaluation seed lists differ — the C example uses its harness seeds, SB3 starts
-at 9000 — so compare the means, not individual episodes. The comparison script
+while SB3's third seed ends at -505, ordinary run-to-run variance at 12 800
+steps. The evaluation seed lists differ — the C example uses its harness seeds,
+SB3 starts at 9000 — so compare the means, not individual episodes. The
+comparison script
 and its Python environment are not part of the repository: torch/SB3 are
 optional, external dependencies and are not needed to build, test or run
 RL_lib-in-C.
