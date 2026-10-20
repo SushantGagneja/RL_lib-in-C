@@ -26,6 +26,7 @@
 /train_ppo_continuous
 /train_ppo_snake
 /train_dqn
+/train_sac
 /hello_rl
 /hello_rl.ckpt
 /test_base
@@ -36,6 +37,7 @@
 /test_rl
 /test_checkpoint
 /test_dqn
+/test_sac
 /checkpoint_test*
 /rl_lib_bench
 /exercise/arena
