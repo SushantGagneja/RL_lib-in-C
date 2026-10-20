@@ -1,24 +1,34 @@
-# macOS
+# OS noise
 .DS_Store
+._*
+Thumbs.db
+
+# Editor files
 *.swp
 *.swo
+*~
+.idea/
+.vscode/
 
-# C build outputs
+# Compiler and build outputs
 *.o
 *.out
 *.dSYM/
-
-# Coverage artifacts from `make COVERAGE=1` (gcov)
 *.gcda
 *.gcno
 *.gcov
+*.profraw
+*.profdata
+/build/
+/build-*/
+/cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+compile_commands.json
 
-# Local compiled binaries
-/main
-/mat
-/mnist
-/arena
-/RL_lib-in-C
+# Local executables
+/hello_rl
+/hello_rl.ckpt
 /train_snake
 /train_cartpole
 /train_a2c
@@ -27,8 +37,9 @@
 /train_ppo_snake
 /train_dqn
 /train_sac
-/hello_rl
-/hello_rl.ckpt
+/rl_lib_bench
+
+# Local test binaries
 /test_base
 /test_mat
 /test_gradcheck
@@ -39,10 +50,6 @@
 /test_dqn
 /test_sac
 /checkpoint_test*
-/rl_lib_bench
-/exercise/arena
-/exercise/autograd
-/exercise/mat
 
 # Library artifacts from `make lib` / `make install`
 /librl_lib.a
@@ -50,18 +57,13 @@
 /librl_lib.so*
 /rl_lib.pc
 
-# Out-of-tree object trees (double-precision gradcheck build, shared objects)
-/build/
-
-# Generated benchmark report
+# Generated reports and data
 /bench_results.md
-
-#  MNIST data files
+/coverage/
+/coverage.xml
 /*.mat
 
-# Local compiled binaries (Snake PPO example)
-/train_ppo_snake
-
-# Python bytecode from the Conan recipes
+# Python
 __pycache__/
 *.pyc
+.venv/

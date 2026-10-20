@@ -95,10 +95,10 @@ release: clean $(TARGET_SNAKE) $(TARGET_CARTPOLE) $(TARGET_A2C) $(TARGET_PPO) $(
 debug: CFLAGS += -g -fsanitize=undefined
 debug: clean $(TARGET_SNAKE) $(TARGET_CARTPOLE) $(TARGET_A2C) $(TARGET_PPO) $(TARGET_PPO_CONT) $(TARGET_PPO_SNAKE) $(TARGET_DQN) $(TARGET_SAC) $(TARGET_HELLO)
 
-# Compile every example and the benchmark with the current flags. CI runs this
-# with ERR=1 so example code is held to the same warning standard as the
-# library; the test binaries cannot do it, because they build the library
-# objects with -fsanitize=undefined.
+# Compile every example with the current flags. CI runs this with ERR=1 so
+# example code is held to the same warning standard as the library; the test
+# binaries cannot do it, because they build the library objects with
+# -fsanitize=undefined.
 examples: $(TARGET_SNAKE) $(TARGET_CARTPOLE) $(TARGET_A2C) $(TARGET_PPO) $(TARGET_PPO_CONT) $(TARGET_PPO_SNAKE) $(TARGET_DQN) $(TARGET_SAC) $(TARGET_HELLO)
 
 # AddressSanitizer + UndefinedBehaviorSanitizer build of everything.
@@ -345,7 +345,7 @@ hello: $(TARGET_HELLO)
 BENCH_BIN = rl_lib_bench
 
 $(BENCH_BIN): CFLAGS += -O3
-$(BENCH_BIN): $(LIB_OBJS) examples/bench.o
+$(BENCH_BIN): $(LIB_OBJS) benchmarks/bench.o
 	$(CC) $(CFLAGS) -o $@ $^ -lm $(BLAS_LIBS)
 
 bench: $(BENCH_BIN)
@@ -367,7 +367,7 @@ bench-throughput: $(BENCH_BIN)
 BENCH_DOUBLE_DIR = build/bench-double
 BENCH_DOUBLE_BIN = $(BENCH_DOUBLE_DIR)/rl_lib_bench
 BENCH_DOUBLE_CFLAGS = $(WARN) -Iinclude -I. -O3 -DRL_LIB_USE_DOUBLE $(THREAD_FLAGS) $(EXTRA_CFLAGS)
-BENCH_DOUBLE_OBJS = $(patsubst %.c,$(BENCH_DOUBLE_DIR)/%.o,$(LIB_SRCS)) $(BENCH_DOUBLE_DIR)/examples/bench.o
+BENCH_DOUBLE_OBJS = $(patsubst %.c,$(BENCH_DOUBLE_DIR)/%.o,$(LIB_SRCS)) $(BENCH_DOUBLE_DIR)/benchmarks/bench.o
 
 $(BENCH_DOUBLE_DIR)/%.o: %.c
 	@mkdir -p $(dir $@)
@@ -382,7 +382,7 @@ bench-double: $(BENCH_DOUBLE_BIN)
 # ── Cleanup ─────────────────────────────────────────────────────────
 
 clean:
-	rm -f $(LIB_OBJS) examples/train_snake.o examples/train_cartpole.o examples/train_a2c.o examples/train_ppo.o examples/train_ppo_continuous.o examples/train_ppo_snake.o examples/train_dqn.o examples/train_sac.o examples/hello_rl.o examples/bench.o
+	rm -f $(LIB_OBJS) examples/train_snake.o examples/train_cartpole.o examples/train_a2c.o examples/train_ppo.o examples/train_ppo_continuous.o examples/train_ppo_snake.o examples/train_dqn.o examples/train_sac.o examples/hello_rl.o benchmarks/bench.o
 	rm -f $(TARGET_SNAKE) $(TARGET_CARTPOLE) $(TARGET_A2C) $(TARGET_PPO) $(TARGET_PPO_CONT) $(TARGET_PPO_SNAKE) $(TARGET_DQN) $(TARGET_SAC) $(TARGET_HELLO) $(TEST_BINS) $(BENCH_BIN)
 	rm -f $(TEST_GRAD_DOUBLE_BIN) $(LIB_STATIC) $(SHARED_REAL) $(SHARED_LINK) $(SHARED_EXTRA_LINKS) rl_lib.pc
 	rm -rf build

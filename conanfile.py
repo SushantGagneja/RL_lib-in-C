@@ -23,7 +23,7 @@ class RlLibInCRecipe(ConanFile):
     package_type = "library"
     description = ("A dependency-free C reinforcement-learning and autograd "
                    "library: arena-based memory, SIMD matmul, reverse-mode AD, "
-                   "REINFORCE/A2C/PPO/DQN and CartPole/Snake/Pendulum")
+                   "REINFORCE/A2C/PPO/DQN/SAC and CartPole/Snake/Pendulum")
     license = "MIT"
     url = "https://github.com/SushantGagneja/RL_lib-in-C"
     homepage = "https://github.com/SushantGagneja/RL_lib-in-C"

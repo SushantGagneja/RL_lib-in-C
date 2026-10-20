@@ -1,4 +1,11 @@
-# RL_lib-in-C: Compact Reinforcement Learning & Autograd Library in C
+# RL_lib-in-C
+
+**A compact, dependency-free reinforcement-learning and autograd library in C.**
+
+[![CI](https://github.com/SushantGagneja/RL_lib-in-C/actions/workflows/ci.yml/badge.svg)](https://github.com/SushantGagneja/RL_lib-in-C/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-yellow.svg)](LICENSE)
+[![Version](https://img.shields.io/badge/version-1.1.0-informational.svg)](CHANGELOG.md)
+[![C99](https://img.shields.io/badge/C-C99-blue.svg)](CMakeLists.txt)
 
 A small, readable C library for reverse-mode autograd, neural networks, and
 reinforcement learning. No third-party dependencies — only the C standard
@@ -9,21 +16,31 @@ end (the tests and examples are the long tail), and the benchmarks below are
 reported with their real weaknesses rather than tuned to flatter the
 algorithms.
 
----
+## Quick start
 
-## License
+```bash
+git clone https://github.com/SushantGagneja/RL_lib-in-C.git
+cd RL_lib-in-C
+make hello     # build and run the smallest end-to-end program
+make test      # build and run every suite
+```
 
-MIT — see [`LICENSE`](LICENSE). Copyright (c) 2026 Sushant Gagneja.
+`make` needs only a C99 compiler, `libm` and pthreads; CMake is the equivalent
+path (and the one Windows uses). See [Build & test](#build--test) for the full
+matrix.
 
-The engine here is an original implementation written for this project:
+## Contents
 
-- the arena allocator (`memory.c`),
-- the row-major linear algebra (`linalg.c`), and
-- the reverse-mode autograd graph (`graph.c`),
-
-are new code. The pseudo-random number generator is **xoshiro256\*\*** with
-SplitMix64 seeding (public domain / CC0). There is no bundled third-party code,
-so there is nothing to attribute and no external license to carry.
+- [Quick start](#quick-start)
+- [Features](#features)
+- [Install as a library](#install-as-a-library)
+- [Benchmarks & baselines](#benchmarks--baselines)
+- [Build & test](#build--test)
+- [Architecture](#architecture)
+- [Known limitations](#known-limitations)
+- [Roadmap](#roadmap)
+- [Contributing](#contributing)
+- [License](#license)
 
 ---
 
@@ -141,7 +158,7 @@ also all a foreign-function caller needs: `examples/python/ctypes_demo.py` drive
 the installed shared library from CPython with nothing but `ctypes` — it runs
 CartPole through the `Env` vtable and multiplies two matrices.
 
-#### Conan and vcpkg
+### Conan and vcpkg
 
 `conanfile.py` at the repository root is a Conan 2 recipe: `conan create .`
 builds the CMake project inside Conan's toolchain, runs the ctest suites (skip
@@ -264,7 +281,7 @@ single session, Accelerate is ≈25× the shipped f32 kernel at 256² and ≈12�
 64³ (the gap narrows where the matrices already fit in cache) — the ratio, not
 the absolute rate, is what transfers between machines.
 
-#### Threaded `VecEnv`
+### Threaded `VecEnv`
 
 Those env steps are far too cheap for a worker pool: its barrier costs tens of
 microseconds per step, which is why `vecenv_set_threads` is opt-in and off by
@@ -554,6 +571,7 @@ Tests: 77 passed, 0 failed
 │   ├── dqn.h                # Replay buffer, epsilon schedule, DQN trainer
 │   └── sac.h                # Continuous replay buffer, soft updates, SAC trainer
 ├── src/
+│   ├── base.c               # Primitives, fatal-error hook
 │   ├── memory.c
 │   ├── random.c
 │   ├── simd.c               # Backend name + runtime AVX2/FMA probe
@@ -571,19 +589,21 @@ Tests: 77 passed, 0 failed
 │   ├── cartpole.h / cartpole.c  # CartPole-like physics
 │   └── pendulum.h / pendulum.c  # Pendulum-v1: continuous torque, max 200 steps
 ├── examples/
-│   ├── train_snake.c
-│   ├── train_cartpole.c
-│   ├── train_a2c.c
-│   ├── train_ppo.c
+│   ├── train_snake.c            # REINFORCE on the 6x6 grid
+│   ├── train_cartpole.c         # REINFORCE on CartPole-like
+│   ├── train_a2c.c              # Advantage actor-critic
+│   ├── train_ppo.c              # PPO over 8 vectorized CartPoles
 │   ├── train_ppo_continuous.c   # Pendulum-v1 with a squashed Gaussian policy
-│   ├── train_ppo_snake.c    # 6x6 Snake with PPO over VecEnv
-│   ├── train_dqn.c          # CartPole with DQN and a replay buffer
-│   ├── train_sac.c          # Pendulum-v1 with SAC (twin critics, auto-alpha)
-│   ├── hello_rl.c           # Smallest end-to-end program (also used by CI)
-│   ├── bench.c              # Multi-seed harness + throughput micro-benchmarks
+│   ├── train_ppo_snake.c        # 6x6 Snake with PPO over VecEnv
+│   ├── train_dqn.c              # CartPole with DQN and a replay buffer
+│   ├── train_sac.c              # Pendulum-v1 with SAC (twin critics, auto-alpha)
+│   ├── hello_rl.c               # Smallest end-to-end program (also used by CI)
 │   └── python/
 │       └── ctypes_demo.py   # Drives the installed shared library from CPython
+├── benchmarks/
+│   └── bench.c              # Multi-seed harness + throughput micro-benchmarks
 ├── tests/
+│   ├── test_base.c          # Primitives, alignment, fatal-error hook
 │   ├── test_mat.c
 │   ├── test_gradcheck.c     # f32 and f64 numerical gradient checks
 │   ├── test_envs.c
@@ -597,13 +617,17 @@ Tests: 77 passed, 0 failed
 │   └── vcpkg/               # Reference vcpkg port (vcpkg.json + portfile.cmake)
 ├── test_package/            # Conan test package: consumes the built package
 ├── conanfile.py             # Conan 2 recipe (conan create .)
-├── .github/workflows/ci.yml # POSIX matrix + sanitizers + scalar + BLAS + f64 + coverage + bench + Windows/MSVC + install + Conan
+├── .github/workflows/ci.yml # Build/test matrix, sanitizers, packaging, benchmarks
+├── .editorconfig            # Indentation and line-ending rules
+├── .gitignore
 ├── cmake/
 │   └── RL_lib-in-CConfig.cmake.in  # find_package() config template
 ├── rl_lib.pc.in             # pkg-config template (stamped from version.h)
 ├── CMakeLists.txt           # CMake project (POSIX and Windows)
-├── CHANGELOG.md
 ├── Makefile
+├── CONTRIBUTING.md
+├── CHANGELOG.md
+├── LICENSE
 └── README.md
 ```
 
@@ -778,7 +802,8 @@ Tests: 77 passed, 0 failed
   - [x] v1.1.0 tagged (recipe, DQN, new graph ops, optional system BLAS, ctypes
         demo): `version.h`, `docs/API.md` and the changelog move together, and
         the pkg-config stamp follows from `version.h`.
-  - [x] Checkpoints carry a CRC-32 trailer, architecture metadata, and optional normalisation statistics (format 4), saves are atomic
+  - [x] Checkpoints carry a CRC-32 trailer, architecture metadata, and
+        optional normalisation statistics (format 4), saves are atomic
         (`<path>.tmp` + fsync + rename, so a failed save cannot clobber the
         previous file), and loads are transactional, with a 300-case mutation
         fuzz pass in the suite and under the sanitizers.
@@ -787,19 +812,40 @@ Tests: 77 passed, 0 failed
   - [x] Packaging: a Conan 2 recipe with a `test_package/` (verified by a CI
         job that builds, packages and consumes it) and a vcpkg reference port
         wrapping the same CMake install.
+  - [x] Windows/MSVC build via CMake: `CMakeLists.txt` configures, builds,
+        tests and installs on POSIX and Windows, `src/vecenv.c` has a Win32
+        thread backend, `arena_new` uses `_aligned_malloc` there and the
+        benchmark uses `QueryPerformanceCounter`. MSVC gets the scalar SIMD
+        reference (it cannot compile the `target`-attributed AVX2 kernels),
+        MinGW/clang-cl get AVX2. CI gained a `windows-latest` job (MSVC +
+        ctest + install), a serial-only job, and every example is now compiled
+        with `-Werror`.
 
-### Remaining
+### Deliberately out of scope
 
-- [x] Windows/MSVC build via CMake: `CMakeLists.txt` configures, builds, tests
-      and installs on POSIX and Windows, `src/vecenv.c` has a Win32 thread
-      backend, `arena_new` uses `_aligned_malloc` there and the benchmark uses
-      `QueryPerformanceCounter`. MSVC gets the scalar SIMD reference (it cannot
-      compile the `target`-attributed AVX2 kernels), MinGW/clang-cl get AVX2.
-      CI gained a `windows-latest` job (MSVC + ctest + install), a serial-only
-      job, and every example is now compiled with `-Werror`.
+- **Multi-machine benchmarks.** This is a single-machine project: the numbers
+  above are one machine's, and they are not extrapolated.
+- **Bit-exact reproduction across machines.** That would need a pinned libm and
+  compiler version; the reproducibility limitation is stated instead.
 
-Two things are deliberately not attempted, and said so rather than faked:
-multi-machine benchmarks (this is a single-machine project — the numbers above
-are one machine's, and they are not extrapolated) and bit-exact reproduction
-across machines (that would need a pinned libm and compiler version; the
-reproducibility limitation is stated instead).
+---
+
+## Contributing
+
+Issues and pull requests are welcome. [`CONTRIBUTING.md`](CONTRIBUTING.md)
+covers the build/test loop, the style, and what a change should include; the
+short version is `make ERR=1 test` plus a test for anything new.
+
+## License
+
+MIT — see [`LICENSE`](LICENSE). Copyright (c) 2026 Sushant Gagneja.
+
+The engine here is an original implementation written for this project:
+
+- the arena allocator (`memory.c`),
+- the row-major linear algebra (`linalg.c`), and
+- the reverse-mode autograd graph (`graph.c`),
+
+are new code. The pseudo-random number generator is **xoshiro256\*\*** with
+SplitMix64 seeding (public domain / CC0). There is no bundled third-party code,
+so there is nothing to attribute and no external license to carry.

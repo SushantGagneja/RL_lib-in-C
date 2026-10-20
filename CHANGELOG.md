@@ -85,6 +85,13 @@ single source of truth — it is also stamped into `rl_lib.pc`.
   failures still return `false`. `test_base` covers the hook and the base
   helpers.
 
+### Changed
+- **Repository layout and contributor docs.** The multi-seed benchmark harness
+  moved from `examples/bench.c` to `benchmarks/bench.c`; the `make bench*`
+  targets are unchanged. Added `CONTRIBUTING.md` and `.editorconfig`, cleaned
+  up `.gitignore`, and gave the README a contents list, badges and an updated
+  tree. No library or API changes.
+
 ### Fixed
 - DQN treated a time-limit truncation as a terminal transition, so the bootstrap
   was dropped exactly when CartPole reached its 500-step cap. Truncated

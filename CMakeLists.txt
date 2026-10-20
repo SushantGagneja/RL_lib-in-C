@@ -118,10 +118,12 @@ set(RL_LIB_TESTS test_base test_mat test_gradcheck test_envs test_rl
                  test_checkpoint test_dqn test_sac)
 
 if(RL_LIB_BUILD_EXAMPLES)
-  foreach(ex ${RL_LIB_EXAMPLES} bench)
+  foreach(ex ${RL_LIB_EXAMPLES})
     add_executable(${ex} examples/${ex}.c)
     target_link_libraries(${ex} PRIVATE rl_lib)
   endforeach()
+  add_executable(bench benchmarks/bench.c)
+  target_link_libraries(bench PRIVATE rl_lib)
 endif()
 
 if(RL_LIB_BUILD_TESTS)
