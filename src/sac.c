@@ -500,6 +500,9 @@ void train_sac(Env *env, Net *actor, Net *q1, Net *q2, Net *q1_target,
   // The targets start as copies of the critics.
   sac_soft_update(q1, q1_target, (real)1);
   sac_soft_update(q2, q2_target, (real)1);
+  zero_grad(actor);
+  zero_grad(q1);
+  zero_grad(q2);
 
   Rng rng;
   const u64 seed = (config->seed != 0u) ? config->seed : 42u;
