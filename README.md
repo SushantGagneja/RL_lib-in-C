@@ -351,6 +351,29 @@ trainer discards each rollout after its passes. The recipe is small:
 Adam at `3e-4`, `tau = 0.005`, and `auto_alpha` starting from 0.2 and settling
 around 0.08–0.15.
 
+### External baseline: Stable-Baselines3
+
+The same budget and hyperparameters — 12 800 steps, 1000-step warmup, batch 64,
+64×64 actor and critic, Adam at `3e-4`, `tau = 0.005`, automatic entropy from
+0.2 with target `-act_dim` — under Stable-Baselines3 2.9.0's SAC (`torch`
+2.14.1, `MlpPolicy`, CPU), deterministic evaluation over 100 episodes:
+
+| Seed | RL_lib-in-C | Stable-Baselines3 |
+|---|---|---|
+| 42 | -179.65 | -216.15 |
+| 7 | -169.73 | -146.91 |
+| 13 | -182.24 | -505.01 |
+| mean | **-177.2** | -289.4 |
+
+The two implementations land in the same region, and the C trainer is the more
+consistent of the two at this budget: it stays within 13 points across seeds,
+while SB3's third seed is still visibly mid-learning at 12 800 steps. The
+evaluation seed lists differ — the C example uses its harness seeds, SB3 starts
+at 9000 — so compare the means, not individual episodes. The comparison script
+and its Python environment are not part of the repository: torch/SB3 are
+optional, external dependencies and are not needed to build, test or run
+RL_lib-in-C.
+
 ---
 
 ## Build & test
@@ -740,7 +763,9 @@ Tests: 77 passed, 0 failed
         compared with the fused kernels in value and finite-differenced in
         gradient, and the trainer is deterministic per seed. `make sac` reaches
         -169..-182 deterministic on Pendulum across three seeds in 12800 steps
-        (against ~-1200 for a random policy); `test_sac` covers it (77 checks).
+        (against ~-1200 for a random policy, and -147..-505 for
+        Stable-Baselines3's SAC at the same budget); `test_sac` covers it (77
+        checks).
   - [x] Graph ops: elementwise `sigmoid`, `exp`, `log` and `div`, plus shape
         ops (`reshape`, `broadcast`, `sum`/`mean`, `gather`, `min`/`max`/`clip`),
         `log_softmax`, `log(sech^2)`, the straight-through clip and the
