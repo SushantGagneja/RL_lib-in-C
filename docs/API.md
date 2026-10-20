@@ -21,13 +21,14 @@ program has to initialise: one arena, one random generator, and you are running.
 | [`linalg.h`](#linalgh) | `Mat` plus every matrix / activation / loss / gradient kernel, including the squashed-Gaussian policy kernels |
 | [`simd.h`](#simdh) | matrix-multiply backend selection and probing |
 | [`graph.h`](#graphh) | `Tensor`, `Net`, reverse-mode autograd |
-| [`layers.h`](#layersh) | `Dense`, `mlp_new`, `actor_build`, `actor_critic_build`, `continuous_actor_critic_build`, `q_net_build` |
+| [`layers.h`](#layersh) | `Dense`, `mlp_new`, `actor_build`, `actor_critic_build`, `continuous_actor_critic_build`, `q_net_build`, `sac_actor_build`, `sac_q_build` |
 | [`optim.h`](#optimh) | `zero_grad`, `sgd_step`, `Adam`, `clip_grad_norm` |
 | [`checkpoint.h`](#checkpointh) | `net_save` / `net_load` / `checkpoint_save` / `checkpoint_load`, `_ex` variants that carry `NormStats` |
 | [`env.h`](#envh) | the `Env` interface every environment implements, discrete and continuous |
 | [`vecenv.h`](#vecenvh) | `VecEnv`, synchronised parallel environments |
 | [`rl.h`](#rlh) | `TrainCfg`, `Rollout`, `train_reinforce`, `train_a2c`, `train_ppo`, `train_ppo_continuous`, `evaluate`, `evaluate_continuous` |
 | [`dqn.h`](#dqnh) | `ReplayBuf`, `replay_new`, `replay_add`, `replay_add_ex`, `dqn_td_target`, `dqn_sync_target`, `dqn_epsilon_at`, `train_dqn` |
+| [`sac.h`](#sach) | `SacReplay`, `sac_replay_new`, `sac_replay_add`, `sac_replay_gather`, `sac_soft_update`, `sac_td_target`, `train_sac` |
 | [`envs/`](#environments) | CartPole, Grid Snake, Pendulum-v1 |
 
 Three conventions run through the whole API and are worth reading first:
@@ -614,6 +615,11 @@ void actor_critic_build(Arena *arena, Net *model, Rng *rng, u32 obs_dim,
 void continuous_actor_critic_build(Arena *arena, Net *model, Rng *rng, u32 obs_dim,
                                    const u32 *hidden_dims, u32 num_hidden, u32 act_dim,
                                    u32 batch_size, real log_std_init);
+void sac_actor_build(Arena *arena, Net *model, Rng *rng, u32 obs_dim,
+                     const u32 *hidden_dims, u32 num_hidden, u32 act_dim,
+                     u32 batch_size, real log_std_init);
+void sac_q_build(Arena *arena, Net *model, Rng *rng, u32 obs_dim, u32 act_dim,
+                 const u32 *hidden_dims, u32 num_hidden, u32 batch_size);
 ```
 
 `dense_new` allocates parameters with He-uniform initialisation
@@ -675,18 +681,19 @@ untouched, and the batch and single-sample graphs keep agreeing. This is what
 lets `TrainCfg.batch_size` be a runtime choice: the trainers call
 `net_set_batch_size` themselves before sizing any buffer from the graph, so
 asking for 8 when the model was built for 64 just works. Returns `false` for a
-model that was not built by `actor_build` / `actor_critic_build` /
-`continuous_actor_critic_build` / `q_net_build` (there is no recorded
-architecture to rebuild from), and `true` immediately when the size already
-matches. Pointers into
-`batch_input` / `batch_logits` / `batch_value` / `batch_mean` are invalidated by
-a rebuild.
+model that was not built by one of the builders (`actor_build`,
+`actor_critic_build`, `continuous_actor_critic_build`, `q_net_build`,
+`sac_actor_build`, `sac_q_build`) — there is no recorded architecture to rebuild
+from — and `true` immediately when the size already matches. Pointers into
+`batch_input` / `batch_logits` / `batch_value` / `batch_mean` / `batch_action`
+are invalidated by a rebuild.
 
 The recorded architecture is also readable:
 
 ```c
 typedef struct {
-  NetArchKind kind;        // NET_ARCH_ACTOR, _ACTOR_CRITIC, _CONTINUOUS, _Q
+  NetArchKind kind;        // NET_ARCH_ACTOR, _ACTOR_CRITIC, _CONTINUOUS, _Q,
+                           // _SAC_ACTOR, _SAC_Q
   u32 obs_dim;
   u32 act_dim;
   u32 num_hidden;
@@ -701,7 +708,8 @@ b32 net_arch_info(const Net *model, NetArchInfo *out);
 architecture. The checkpoint writer uses the same record to stamp an ARCH block
 into every file saved from a builder-made model, so a checkpoint cannot be
 loaded into a different kind of model or a different shape even when the
-parameter counts happen to match.
+parameter counts happen to match. The SAC builders record kinds of their own, so
+their checkpoints are gated the same way.
 
 ---
 
@@ -720,6 +728,58 @@ batched graph adds `batch_logits (act_dim x B)`, a plain `target` tensor of the
 same shape (regression targets must not receive gradients), and `cost =
 MSE(batch_logits, target)`, with `train` and `loss_plan` schedules ready for the
 DQN trainer — see [`dqn.h`](#dqnh) for the loop that fills `target`.
+
+### SAC actor and critics
+
+```c
+typedef struct {
+  Tensor *w_obs;    // (out_features x obs_features)
+  Tensor *w_act;    // (out_features x act_features)
+  Tensor *bias;     // (out_features x 1)
+  u32 obs_features, act_features, out_features;
+} SplitDense;
+
+typedef struct {
+  SplitDense split;  // (obs, action) -> hidden_dims[0], or the Q value itself
+  Dense *hidden;     // (num_hidden - 1) ReLU layers
+  u32 num_hidden;
+  b32 split_is_head; // true for a linear critic (num_hidden == 0)
+  Dense head;        // trunk -> 1
+} SacQNet;
+
+Tensor *sac_q_apply(Arena *arena, Net *model, const SacQNet *q, Tensor *obs,
+                    Tensor *act);
+b32 sac_q_layers(const Net *model, SacQNet *out);
+
+void sac_q_build(Arena *arena, Net *model, Rng *rng, u32 obs_dim, u32 act_dim,
+                 const u32 *hidden_dims, u32 num_hidden, u32 batch_size);
+void sac_actor_build(Arena *arena, Net *model, Rng *rng, u32 obs_dim,
+                     const u32 *hidden_dims, u32 num_hidden, u32 act_dim,
+                     u32 batch_size, real log_std_init);
+```
+
+`sac_q_build` records `NET_ARCH_SAC_Q` and builds a continuous critic
+`Q(s, a)` whose first layer is *split* rather than concatenated:
+`h = relu(w_obs @ s + w_act @ a + b)`, followed by the remaining ReLU layers and
+a linear scalar head (a critic with `num_hidden == 0` is just the split layer).
+Both weight blocks use the He-uniform limit of the joint fan-in, so the critic
+starts at the same scale as one over a concatenated `(s, a)` input. The batched
+graph is `batch_input (obs_dim x B)` plus `batch_action (act_dim x B)` ->
+`batch_logits (1 x B)`, a plain `target (1 x B)` and `cost =
+MSE(batch_logits, target)`, ready for `train_sac`; `net_set_batch_size` rebuilds
+all of it. The recorded stack is readable with `sac_q_layers`, and
+`sac_q_apply` applies those same weights to any `(obs, action)` pair in another
+graph — which is exactly how the SAC actor loss gets `dQ/da` without a
+concatenation op or a hand-written gradient: the graph-computed action is an
+operand of `w_act @ a`, so the reverse sweep produces it.
+
+`sac_actor_build` records `NET_ARCH_SAC_ACTOR` and builds the same mean head and
+learnable `log_std` parameter as `continuous_actor_critic_build`, with no value
+head (SAC's critics are separate networks). Its rollout graph is
+`input -> mean (act_dim x 1)`; the batched graph is
+`batch_input -> batch_mean (act_dim x B)`. Unlike the PPO actor, `log_std` is
+consumed by the trainer's cost (through the reparameterised sample and the
+log-density), so it is updated by the same reverse sweep.
 
 ## `optim.h`
 
@@ -1014,13 +1074,19 @@ typedef struct {
   real norm_reward_clip;  // scaled-reward clip (<= 0 => 10)
   NormStats *norm;        // required when norm_obs/norm_reward is set
 
-  u32 replay_capacity; // DQN: transitions stored (0 => 20000)
-  u32 warmup_steps;    // DQN: env steps before the first gradient step (0 => 1000)
-  u32 train_every;     // DQN: env steps per gradient step (0 => 1)
+  u32 replay_capacity; // DQN/SAC: transitions stored (0 => 20000)
+  u32 warmup_steps;    // DQN/SAC: env steps before the first gradient step (0 => 1000)
+  u32 train_every;     // DQN/SAC: env steps per gradient step (0 => 1)
   u32 target_sync;     // DQN: gradient steps between target copies (0 => 500)
   real eps_start;      // DQN: initial epsilon (<= 0 => 1)
   real eps_end;        // DQN: final epsilon (<= 0 => 0.05)
   u32 eps_decay_steps; // DQN: env steps of linear epsilon decay (0 => half the run)
+
+  real tau;            // SAC: soft target rate (<= 0 => 0.005)
+  real alpha;          // SAC: initial temperature (<= 0 => 0.2)
+  b32 auto_alpha;      // SAC: learn log_alpha against target_entropy
+  real alpha_lr;       // SAC: temperature learning rate (<= 0 => learning_rate)
+  real target_entropy; // SAC: entropy target (<= 0 => -act_dim)
 } TrainCfg;
 
 typedef struct { real avg_return, avg_steps; } EvalResult;
@@ -1066,6 +1132,11 @@ return — reward scaling is a training transform).
 `eps_end` and `eps_decay_steps` are DQN-only (`train_dqn`, [`dqn.h`](#dqnh)).
 For DQN, `epochs` is the number of updates and `rollout_size` the number of
 environment steps collected per update (0 => 32).
+
+`replay_capacity`, `warmup_steps` and `train_every` are shared with SAC;
+`target_sync` and the epsilon fields are DQN-only. `tau`, `alpha`, `auto_alpha`,
+`alpha_lr` and `target_entropy` are SAC-only (`train_sac`, [`sac.h`](#sach)), and
+SAC reads `epochs`/`rollout_size` the same way DQN does.
 
 ### Rollouts
 
@@ -1252,6 +1323,84 @@ stream separate from the epsilon/replay sampling, so runs are reproducible. The
 optimizer is `config->optim` with `config->learning_rate`, decayed by
 `config->lr_schedule` like the other trainers, and `config->max_grad_norm`
 clips the global gradient norm when positive.
+
+---
+
+## `sac.h`
+
+```c
+typedef struct {
+  u32 obs_dim, act_dim, capacity, size, head;
+  real *obs;       // capacity * obs_dim
+  real *next_obs;  // capacity * obs_dim
+  real *actions;   // capacity * act_dim
+  real *rewards;   // capacity
+  u8 *terminated;  // capacity, 0/1: the episode ended (no bootstrap)
+  u8 *truncated;   // capacity, 0/1: cut by a time limit (still bootstraps)
+} SacReplay;
+
+SacReplay *sac_replay_new(Arena *arena, u32 capacity, u32 obs_dim, u32 act_dim);
+void sac_replay_add(SacReplay *buf, const real *obs, const real *action,
+                    real reward, const real *next_obs, b32 terminated,
+                    b32 truncated);
+void sac_replay_gather(const SacReplay *buf, const u32 *indices, u32 batch,
+                       Mat *obs, Mat *actions, Mat *next_obs, Mat *rewards,
+                       Mat *terminated);
+void sac_soft_update(const Net *src, Net *dst, real tau);
+real sac_td_target(real reward, real q_min, real alpha_logp, real gamma,
+                   b32 terminal);
+void train_sac(Env *env, Net *actor, Net *q1, Net *q2, Net *q1_target,
+               Net *q2_target, const TrainCfg *config, Arena *train_arena);
+```
+
+Soft actor-critic for continuous action spaces. The actor is a `sac_actor_build`
+model and the four critics are `sac_q_build` models
+([`layers.h`](#layersh)); `train_sac` needs a `continuous` environment with
+`step_continuous` and action bounds, and six pairwise-distinct networks.
+
+`SacReplay` is the continuous counterpart of `ReplayBuf`: the same ring
+semantics, one flat array per field, plus real-vector actions and the two
+end-of-episode flags. `sac_replay_gather` copies sampled transitions into
+`(dim x batch)` matrices — the layout the trainers' graphs consume — and reports
+only *real* terminals in its terminal row. `sac_soft_update` performs the target
+update `dst <- (1 - tau) * dst + tau * src` in place, clamping `tau` to `[0, 1]`
+(so `tau = 1` is a hard copy, which is what initialises the targets each run).
+`sac_td_target` is the public form of the bootstrap rule:
+
+```
+y = terminal ? r : r + gamma * (min_i Q_i'(s', a') - alpha * log pi(a' | s'))
+```
+
+so a truncated transition keeps its bootstrap and a real terminal drops it.
+
+Each gradient step of `train_sac`, once the replay buffer holds
+`max(warmup_steps, batch_size)` transitions and every `train_every` collected
+steps:
+
+1. Samples a minibatch and gathers it. The next action is drawn from the current
+   actor on the next states and scored by the *target* critics and the frozen
+   log-density kernel (`mat_gaussian_logp`), which shares the sampler's clamps.
+2. Builds the shared TD target above and regresses both critics with their
+   batched MSE loss (`config->max_grad_norm` clips when positive, and
+   `config->optim` with the scheduled learning rate steps them).
+3. Runs the actor cost
+   `alpha * mean_b log pi(a_b | s_b) - mean_b min_i Q_i(s_b, a_b)` with
+   `a_b = squash(mu_b + sigma_b * eps_b)` drawn from the reparameterisation
+   noise. The action is an operand of the critics' split first layer
+   (`sac_q_apply`), so one reverse sweep yields the policy gradient; the
+   gradient it also deposits in the critics' weights is discarded.
+4. Optionally updates the temperature: with `auto_alpha`, a one-parameter
+   `log_alpha` is trained by Adam (or SGD) on
+   `-log_alpha * (mean_b log pi(a' | s') + target_entropy)`, starting from
+   `log(config->alpha)`. The entropy target defaults to `-act_dim` (the usual
+   heuristic). `alpha_lr` defaults to `learning_rate`.
+5. Soft-updates both target critics towards their online counterparts with
+   `config->tau`.
+
+The temperature is trainer-internal: a resumed run starts from `config->alpha`
+again, so pass the value you want to continue with. `norm_obs`/`norm_reward` are
+PPO-only and rejected here. Logging follows the DQN trainer (every 50 updates,
+plus the first and last) and includes the current temperature.
 
 ## Environments
 

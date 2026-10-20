@@ -9,6 +9,25 @@ single source of truth — it is also stamped into `rl_lib.pc`.
 ## Unreleased
 
 ### Added
+- **Soft actor-critic (`sac.h`).** Off-policy, maximum-entropy SAC for continuous
+  action spaces: `sac_actor_build` (mean head + learnable `log_std`, no value
+  head), `sac_q_build` (a critic whose first layer is split into observation and
+  action weights, so the actor's cost can run through a graph-computed action
+  without a concatenation op), `SacReplay` (a continuous replay ring with
+  terminal and truncated flags kept apart), `sac_replay_gather`,
+  `sac_soft_update` and `sac_td_target`. `train_sac` regresses twin critics onto
+  a truncation-aware target built from the target critics and the next action's
+  log-density, ascends the entropy-adjusted value through one reverse sweep of
+  the actor cost, optionally learns the temperature (`auto_alpha`, Adam on a
+  one-parameter `log_alpha` against `target_entropy`, default `-act_dim`), and
+  soft-updates both targets each step. New `TrainCfg` knobs: `tau`, `alpha`,
+  `auto_alpha`, `alpha_lr`, `target_entropy`; the actor/critic builders record
+  the new `NET_ARCH_SAC_ACTOR` / `NET_ARCH_SAC_Q` kinds, so checkpoints are gated
+  by architecture as for every other builder. `examples/train_sac.c`
+  (`make sac`) solves Pendulum-v1; `test_sac` adds 77 checks (replay, gather,
+  soft update, TD rule, builders, the actor cost against the fused kernels in
+  value and gradient, checkpoint round trips, determinism and a Pendulum
+  learning run).
 - **General autograd shape ops.** `tensor_reshape`, `tensor_broadcast`,
   `tensor_sum` / `tensor_mean` (over rows, columns, or everything),
   `tensor_gather` (per-column selection with a scatter-add backward), and

@@ -69,7 +69,9 @@ so there is nothing to attribute and no external license to carry.
   value clipping, approximate-KL early stopping, LR/entropy schedules and
   running observation normalization / reward scaling), continuous PPO on the
   squashed Gaussian policy, and an off-policy **DQN** with experience replay, a
-  hard-synced target network and an epsilon-greedy schedule.
+  hard-synced target network and an epsilon-greedy schedule, plus off-policy
+  **SAC** with twin split-input critics (differentiable in a graph-computed
+  action), soft target updates and an automatically tuned temperature.
 - **Environments** — CartPole-like, grid Snake, and Pendulum-v1 behind a common
   `Env` interface (`reset(env, seed)`, `step` or `step_continuous`, `observe`,
   `clone`, plus the action bounds a continuous policy needs).
@@ -329,6 +331,26 @@ Two knobs decide whether this reproduces:
 
 The same seed gives byte-identical evaluation returns at `-O2` and `-O3`.
 
+### Pendulum-v1 (SAC, 12800 steps, `examples/train_sac.c`)
+
+`make sac`, deterministic (policy-mean) evaluation over 100 episodes on the same
+harness seeds (`seed + 5000`):
+
+| Seed | Deterministic eval return | Last training update (stochastic) |
+|---|---|---|
+| 42 | -179.65 | -220.17 |
+| 7 | -169.73 | -212.17 |
+| 13 | -182.24 | -261.03 |
+
+A random policy scores about -1200, so every seed is swinging up and balancing
+in the same region continuous PPO reaches above — with two orders of magnitude
+fewer environment steps (12800 vs 1.2M). That is the expected trade: SAC's replay
+buffer reuses every transition for many gradient steps, while an on-policy
+trainer discards each rollout after its passes. The recipe is small:
+64×64 twin critics with a split first layer, a 64×64 mean head, batch 64,
+Adam at `3e-4`, `tau = 0.005`, and `auto_alpha` starting from 0.2 and settling
+around 0.08–0.15.
+
 ---
 
 ## Build & test
@@ -361,6 +383,7 @@ make ppo                # train CartPole with PPO
 make ppo-continuous     # train Pendulum-v1 with continuous-action PPO
 make ppo-snake          # train 6x6 Snake with PPO (sparse; optional shaping)
 make dqn                # train CartPole with DQN (off-policy)
+make sac                # train Pendulum-v1 with SAC (off-policy, continuous)
 make hello              # the minimal end-to-end example
 
 make bench              # multi-seed benchmarks -> bench_results.md
@@ -439,6 +462,7 @@ of aborting; `RL_LIB_HAS_THREADS` in `vecenv.h` is the compile-time answer.
 | `test_rl` | 103 checks: GAE vs a hand-computed trajectory, one Adam step, grad clipping, actor-critic build, value-head learning, batched-vs-per-sample gradient equivalence, a parameter registry grown past 128 entries, rebuilding the batched graph for a new minibatch size (weights preserved, batch and single-sample inference agree), the continuous builder (per-dimension bounds, sampled `u`/squash round trip, `log_std` registered as a parameter and surviving a rebuild), CartPole learning smoke tests for REINFORCE and PPO with same-seed determinism, a Pendulum continuous-PPO learning smoke test plus determinism, the LR/entropy schedules against hand-computed values, normalization statistics (Welford/posterior/clip cases), PPO recipe-knob effects (each knob changes the run; the defaults do not), normalized-training determinism, and threaded rollouts reaching bit-identical weights in both trainers |
 | `test_checkpoint` | 616 checks: byte-exact parameter round trips, bit-exact Adam-state resume, parameter-only and optimiser-only files, atomic replacement (no `.tmp` is left behind, and a save that cannot start leaves the previous checkpoint byte-identical and loadable), a continuous model round trip including `log_std`, bit-exact round trips of `NormStats` through `checkpoint_save_ex` / `checkpoint_load_ex`, architecture gating (an actor file cannot be loaded into an actor-critic, a different hidden width, or a hand-built graph, all before a parameter changes), a flipped byte caught by the CRC before the parser runs, a 300-case mutation fuzz pass (bit flips, truncations, overwritten runs, one third of them with a recomputed checksum), and rejection of missing, corrupt, truncated, wrong-width, wrongly-sized, wrongly-shaped and format-3 files — each verified to leave the model untouched |
 | `test_dqn` | 38 checks: replay-ring overwrite order (with terminal and truncated flags stored separately), the Q-network builder's rollout and batched views (including a rebuild that shares parameters), the epsilon schedule against hand-computed values, the one-step TD target (a terminal transition drops the bootstrap, a truncation keeps it), target-network sync (copies every parameter; untouched before its interval), same-seed determinism across two complete training runs, and a CartPole training run whose greedy evaluation clears 100 — it reaches ~140 in the sanitizer test build (~200 at `-O2`), against a random policy's ~22 |
+| `test_sac` | 77 checks: continuous replay-ring overwrite order and the gather layout (terminal and truncated stored separately, truncations excluded from the terminal flag), the TD target with the entropy term (a terminal transition drops the bootstrap, a truncation keeps it), soft target updates (interpolation, `tau = 1` copies, out-of-range clamping), the actor and critic builders (batched views, on-demand rebuild, the split first layer, a linear critic, a non-SAC model reporting no layers), the full actor-cost composition checked against the fused kernels in value *and* against central differences in gradient, checkpoint round trips for both builders with wrong-architecture rejection, same-seed determinism across two complete runs (SGD path, `auto_alpha`), and a Pendulum training run whose deterministic evaluation clears the random baseline — it reaches about -160 in the sanitizer test build, against a random policy's ~-1200 |
 
 `make test-double` then rebuilds the library with `-DRL_LIB_USE_DOUBLE` and runs
 every one of those suites in f64, so the f64 path is not only exercised by the
@@ -478,6 +502,9 @@ Tests: 616 passed, 0 failed
 
 --- test_dqn ---
 Tests: 38 passed, 0 failed
+
+--- test_sac ---
+Tests: 77 passed, 0 failed
 ```
 
 ---
@@ -500,7 +527,8 @@ Tests: 38 passed, 0 failed
 │   ├── env.h                # Env interface (reset(seed), step, observe, clone)
 │   ├── vecenv.h             # Vectorized (batched) environment wrapper
 │   ├── rl.h                 # Rollout buffer, REINFORCE, A2C, PPO, GAE, evaluation
-│   └── dqn.h                # Replay buffer, epsilon schedule, DQN trainer
+│   ├── dqn.h                # Replay buffer, epsilon schedule, DQN trainer
+│   └── sac.h                # Continuous replay buffer, soft updates, SAC trainer
 ├── src/
 │   ├── memory.c
 │   ├── random.c
@@ -512,7 +540,8 @@ Tests: 38 passed, 0 failed
 │   ├── checkpoint.c         # Versioned checkpoint format (LE, blocks + CRC-32)
 │   ├── vecenv.c             # Synchronized env vector with auto-reset
 │   ├── rl.c                 # Rollout, REINFORCE, A2C, PPO/GAE, evaluation
-│   └── dqn.c                # Replay ring, target sync, DQN update loop
+│   ├── dqn.c                # Replay ring, target sync, DQN update loop
+│   └── sac.c                # Continuous replay, actor/critic steps, SAC loop
 ├── envs/
 │   ├── snake.h / snake.c        # Grid Snake: 3-channel obs, 4 actions
 │   ├── cartpole.h / cartpole.c  # CartPole-like physics
@@ -525,6 +554,7 @@ Tests: 38 passed, 0 failed
 │   ├── train_ppo_continuous.c   # Pendulum-v1 with a squashed Gaussian policy
 │   ├── train_ppo_snake.c    # 6x6 Snake with PPO over VecEnv
 │   ├── train_dqn.c          # CartPole with DQN and a replay buffer
+│   ├── train_sac.c          # Pendulum-v1 with SAC (twin critics, auto-alpha)
 │   ├── hello_rl.c           # Smallest end-to-end program (also used by CI)
 │   ├── bench.c              # Multi-seed harness + throughput micro-benchmarks
 │   └── python/
@@ -535,7 +565,8 @@ Tests: 38 passed, 0 failed
 │   ├── test_envs.c
 │   ├── test_rl.c
 │   ├── test_checkpoint.c    # Round trips, corrupt/truncated/fuzzed rejection
-│   └── test_dqn.c           # Replay buffer, target sync, CartPole learning
+│   ├── test_dqn.c           # Replay buffer, target sync, CartPole learning
+│   └── test_sac.c           # Continuous replay, cost composition, Pendulum learning
 ├── docs/
 │   └── API.md               # Full API reference
 ├── packaging/
@@ -701,6 +732,15 @@ Tests: 38 passed, 0 failed
         target network, epsilon schedule, and the masked-MSE regression on the
         existing autograd engine; `make dqn` reaches ~194 greedy on CartPole in
         16000 steps (seed 42, 100 episodes); `test_dqn` covers it (38 checks).
+  - [x] SAC (`sac.h`, off-policy, continuous): twin critics whose first layer is
+        split into observation and action weights, so the actor cost runs
+        through a graph-computed action into the critic parameters without a
+        concat op; soft target updates, truncation-aware TD targets, and a
+        temperature learnt by Adam against `-act_dim`. The actor cost is
+        compared with the fused kernels in value and finite-differenced in
+        gradient, and the trainer is deterministic per seed. `make sac` reaches
+        -169..-182 deterministic on Pendulum across three seeds in 12800 steps
+        (against ~-1200 for a random policy); `test_sac` covers it (77 checks).
   - [x] Graph ops: elementwise `sigmoid`, `exp`, `log` and `div`, plus shape
         ops (`reshape`, `broadcast`, `sum`/`mean`, `gather`, `min`/`max`/`clip`),
         `log_softmax`, `log(sech^2)`, the straight-through clip and the
