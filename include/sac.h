@@ -68,7 +68,7 @@ real sac_td_target(real reward, real q_min, real alpha_logp, real gamma,
                    b32 terminal);
 
 // Trains `actor` against the twin critics `q1`/`q2`, using `q1_target` and
-// `q2_target` as the soft-updated bootstrap targets. All six networks must come
+// `q2_target` as the soft-updated bootstrap targets. All five networks must come
 // from the SAC builders (sac_actor_build / sac_q_build) and be pairwise
 // distinct. `config` supplies the SAC knobs (tau, alpha, auto_alpha) and the
 // shared off-policy settings (epochs, rollout_size, batch_size, warmup_steps,

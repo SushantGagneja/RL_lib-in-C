@@ -1356,7 +1356,7 @@ void train_sac(Env *env, Net *actor, Net *q1, Net *q2, Net *q1_target,
 Soft actor-critic for continuous action spaces. The actor is a `sac_actor_build`
 model and the four critics are `sac_q_build` models
 ([`layers.h`](#layersh)); `train_sac` needs a `continuous` environment with
-`step_continuous` and action bounds, and six pairwise-distinct networks.
+`step_continuous` and action bounds, and five pairwise-distinct networks.
 
 `SacReplay` is the continuous counterpart of `ReplayBuf`: the same ring
 semantics, one flat array per field, plus real-vector actions and the two
